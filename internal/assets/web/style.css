@@ -1,0 +1,765 @@
+/* =========================================================
+   Gaze Receiver — style.css
+   Design system: dark zinc base, sky-500 accent, Geist font
+   DESIGN_VARIANCE=8 / MOTION_INTENSITY=6 / VISUAL_DENSITY=4
+   ========================================================= */
+
+/* ── Reset & Base ─────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  /* Palette */
+  --zinc-950: #09090b;
+  --zinc-900: #18181b;
+  --zinc-800: #27272a;
+  --zinc-700: #3f3f46;
+  --zinc-600: #52525b;
+  --zinc-400: #a1a1aa;
+  --zinc-200: #e4e4e7;
+  --zinc-50:  #fafafa;
+  --sky-500:  #0ea5e9;
+  --sky-400:  #38bdf8;
+  --sky-300:  #7dd3fc;
+  --indigo-500: #6366f1;
+  --emerald-500: #10b981;
+  --rose-500: #f43f5e;
+
+  /* Semantic */
+  --bg:        var(--zinc-950);
+  --surface:   var(--zinc-900);
+  --border:    var(--zinc-800);
+  --accent:    var(--sky-500);
+  --accent-lt: var(--sky-400);
+  --muted:     var(--zinc-600);
+  --subtle:    var(--zinc-400);
+  --text:      var(--zinc-200);
+  --text-hi:   var(--zinc-50);
+
+  /* Sizing */
+  --radius-sm: 8px;
+  --radius-md: 16px;
+  --radius-lg: 24px;
+  --radius-xl: 32px;
+
+  /* Shadows (tinted to bg hue) */
+  --shadow-card: 0 24px 48px -12px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05);
+  --shadow-btn:  0 8px 24px -4px rgba(14,165,233,0.35);
+
+  /* Transitions */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+html { font-size: 16px; -webkit-font-smoothing: antialiased; }
+
+body {
+  font-family: 'Geist', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100dvh;
+  overflow-x: hidden;
+}
+
+/* ── Animated Mesh Background ─────────────────────────── */
+.mesh-bg {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+}
+
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.18;
+  animation: float 20s ease-in-out infinite;
+}
+.blob-1 {
+  width: 600px; height: 600px;
+  background: radial-gradient(circle, var(--sky-500), transparent 70%);
+  top: -200px; left: -200px;
+  animation-delay: 0s;
+}
+.blob-2 {
+  width: 500px; height: 500px;
+  background: radial-gradient(circle, var(--indigo-500), transparent 70%);
+  bottom: -150px; right: -150px;
+  animation-delay: -7s;
+}
+.blob-3 {
+  width: 350px; height: 350px;
+  background: radial-gradient(circle, #0284c7, transparent 70%);
+  top: 40%; left: 55%;
+  animation-delay: -14s;
+}
+
+@keyframes float {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33%  { transform: translate(30px, -40px) scale(1.08); }
+  66%  { transform: translate(-20px, 20px) scale(0.94); }
+}
+
+/* ── Noise texture overlay ────────────────────────────── */
+.noise {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.03;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 256px;
+}
+
+/* ── Layout ───────────────────────────────────────────── */
+.layout {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-height: 100dvh;
+}
+
+@media (max-width: 768px) {
+  .layout { grid-template-columns: 1fr; }
+}
+
+/* ── Brand Rail (Left) ────────────────────────────────── */
+.brand-rail {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 3rem 3.5rem;
+  border-right: 1px solid var(--border);
+}
+
+@media (max-width: 768px) {
+  .brand-rail {
+    padding: 2rem 1.5rem 1.5rem;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+/* Logo mark */
+.brand-logo {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+.brand-name {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-hi);
+  letter-spacing: -0.02em;
+}
+.brand-by {
+  font-size: 0.75rem;
+  color: var(--muted);
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  letter-spacing: 0.02em;
+}
+
+/* Brand copy */
+.brand-copy { margin-top: auto; padding: 3rem 0 2rem; }
+
+.brand-headline {
+  font-size: clamp(2rem, 4vw, 3.25rem);
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+  color: var(--text-hi);
+}
+
+.brand-sub {
+  margin-top: 1rem;
+  font-size: 0.9375rem;
+  color: var(--subtle);
+  line-height: 1.65;
+  max-width: 36ch;
+}
+
+/* Security badge */
+.security-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-family: 'Geist Mono', monospace;
+  padding: 0.5rem 0;
+}
+.security-badge svg { color: var(--emerald-500); flex-shrink: 0; }
+
+/* ── Receiver Panel (Right) ───────────────────────────── */
+.receiver-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 2.5rem;
+}
+
+/* ── State containers ─────────────────────────────────── */
+.state {
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+  text-align: center;
+  animation: state-in 0.4s var(--ease-out-expo) both;
+}
+.state.hidden { display: none; }
+
+@keyframes state-in {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.state-label {
+  font-size: 1.0625rem;
+  font-weight: 500;
+  color: var(--subtle);
+  letter-spacing: -0.01em;
+}
+
+/* ── Loading state ────────────────────────────────────── */
+.state-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+
+.pulse-ring {
+  position: relative;
+}
+.pulse-ring::before {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  opacity: 0;
+  animation: pulse-out 2s ease-out infinite;
+}
+.pulse-ring::after {
+  content: '';
+  position: absolute;
+  inset: -12px;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  opacity: 0;
+  animation: pulse-out 2s ease-out infinite 0.4s;
+}
+
+@keyframes pulse-out {
+  0%   { opacity: 0.6; transform: scale(0.85); }
+  100% { opacity: 0;   transform: scale(1.3); }
+}
+
+/* Skeleton loader */
+.skeleton-file {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  width: 100%;
+}
+.skeleton-icon {
+  width: 40px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  background: var(--zinc-800);
+  flex-shrink: 0;
+}
+.skeleton-lines { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.skeleton-line {
+  height: 10px;
+  border-radius: 100px;
+  background: var(--zinc-800);
+}
+.shimmer {
+  background: linear-gradient(90deg, var(--zinc-800) 25%, var(--zinc-700) 50%, var(--zinc-800) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── File card ────────────────────────────────────────── */
+.file-card {
+  position: relative;
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  box-shadow: var(--shadow-card);
+  /* Subtle inner refraction border */
+  box-shadow:
+    var(--shadow-card),
+    inset 0 1px 0 rgba(255,255,255,0.05);
+  overflow: hidden;
+}
+
+/* Spotlight effect via CSS conic gradient that follows mouse (Phase 3 enhancement) */
+.file-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 0%, rgba(14,165,233,0.07) 0%, transparent 60%);
+  pointer-events: none;
+}
+
+.file-icon-wrap {
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2rem;
+  background: var(--zinc-800);
+  border: 1px solid var(--border);
+}
+
+.file-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.375rem;
+}
+.file-name {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-hi);
+  letter-spacing: -0.02em;
+  word-break: break-all;
+  max-width: 28ch;
+}
+.file-size {
+  font-size: 0.8125rem;
+  font-family: 'Geist Mono', monospace;
+  color: var(--muted);
+}
+.file-badge {
+  font-size: 0.6875rem;
+  font-family: 'Geist Mono', monospace;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  background: rgba(14,165,233,0.1);
+  border: 1px solid rgba(14,165,233,0.2);
+  padding: 0.25rem 0.625rem;
+  border-radius: 100px;
+}
+
+/* ── Download button ──────────────────────────────────── */
+.btn-download {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.625rem;
+  padding: 0.875rem 1.5rem;
+  background: var(--accent);
+  color: white;
+  font-family: 'Geist', sans-serif;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: transform 0.2s var(--ease-out-expo), box-shadow 0.2s var(--ease-out-expo), background 0.15s;
+  box-shadow: var(--shadow-btn);
+}
+.btn-download:hover {
+  background: var(--sky-400);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 32px -4px rgba(14,165,233,0.5);
+}
+.btn-download:active {
+  transform: translateY(1px) scale(0.98);
+  box-shadow: 0 4px 12px -2px rgba(14,165,233,0.3);
+}
+
+.hint {
+  font-size: 0.75rem;
+  color: var(--zinc-700);
+  letter-spacing: 0.01em;
+}
+
+/* ── Progress ring ────────────────────────────────────── */
+.progress-ring-wrap {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.progress-ring { transform: rotate(-90deg); }
+.progress-track {
+  fill: none;
+  stroke: var(--zinc-800);
+  stroke-width: 6;
+}
+.progress-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 6;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.3s ease;
+}
+.progress-pct {
+  position: absolute;
+  font-size: 1.25rem;
+  font-weight: 700;
+  font-family: 'Geist Mono', monospace;
+  color: var(--text-hi);
+  letter-spacing: -0.04em;
+}
+.dl-stats {
+  font-size: 0.8125rem;
+  font-family: 'Geist Mono', monospace;
+  color: var(--muted);
+}
+
+/* ── Done state ───────────────────────────────────────── */
+.done-icon {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16,185,129,0.1);
+  border: 1px solid rgba(16,185,129,0.25);
+  color: var(--emerald-500);
+  animation: done-pop 0.5s var(--ease-out-expo) both;
+}
+@keyframes done-pop {
+  0%   { transform: scale(0.5); opacity: 0; }
+  70%  { transform: scale(1.1); }
+  100% { transform: scale(1);   opacity: 1; }
+}
+
+.done-label { color: var(--text-hi); }
+.done-sub {
+  font-size: 0.8125rem;
+  font-family: 'Geist Mono', monospace;
+  color: var(--muted);
+}
+
+.btn-again {
+  font-family: 'Geist', sans-serif;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--subtle);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.625rem 1.25rem;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, transform 0.2s;
+}
+.btn-again:hover { color: var(--text-hi); border-color: var(--zinc-600); transform: translateY(-1px); }
+.btn-again:active { transform: scale(0.97); }
+
+/* ── Error state ──────────────────────────────────────── */
+.error-icon {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(244,63,94,0.1);
+  border: 1px solid rgba(244,63,94,0.25);
+  color: var(--rose-500);
+}
+.error-msg {
+  font-size: 0.875rem;
+  color: var(--rose-500);
+  max-width: 30ch;
+  line-height: 1.5;
+}
+.btn-retry {
+  font-family: 'Geist', sans-serif;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: white;
+  background: var(--rose-500);
+  border: none;
+  border-radius: var(--radius-md);
+  padding: 0.625rem 1.5rem;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.2s;
+}
+.btn-retry:hover  { opacity: 0.88; transform: translateY(-1px); }
+.btn-retry:active { transform: scale(0.97); }
+
+/* ── Footer ───────────────────────────────────────────── */
+.footer {
+  position: fixed;
+  bottom: 1.25rem;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  font-size: 0.6875rem;
+  font-family: 'Geist Mono', monospace;
+  color: var(--zinc-700);
+  pointer-events: none;
+}
+.footer a {
+  pointer-events: all;
+  color: var(--zinc-600);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+.footer a:hover { color: var(--subtle); }
+
+/* ── Utility ──────────────────────────────────────────── */
+.hidden { display: none !important; }
+
+/* ── Mode badge ───────────────────────────────────────── */
+.mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  font-family: 'Geist Mono', monospace;
+  color: var(--subtle);
+  padding: 0.5rem 0.875rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  width: fit-content;
+}
+.mode-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--zinc-600);
+  flex-shrink: 0;
+}
+.mode-dot.mode-http    { background: var(--sky-500); box-shadow: 0 0 6px var(--sky-500); }
+.mode-dot.mode-webrtc  { background: var(--emerald-500); box-shadow: 0 0 6px var(--emerald-500); animation: pulse-dot 1.5s ease-in-out infinite; }
+.mode-dot.mode-connecting { background: var(--zinc-600); animation: pulse-dot 1.5s ease-in-out infinite; }
+
+@keyframes pulse-dot {
+  0%,100% { opacity: 1; } 50% { opacity: 0.4; }
+}
+
+/* ── State sub-label ──────────────────────────────────── */
+.state-sub {
+  font-size: 0.8125rem;
+  color: var(--muted);
+  font-family: 'Geist Mono', monospace;
+  letter-spacing: 0.01em;
+}
+
+/* ── WebRTC state ─────────────────────────────────────── */
+.webrtc-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+/* Concentric pulsing signal rings */
+.signal-rings {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  opacity: 0;
+  animation: ring-pulse 2.4s ease-out infinite;
+}
+.ring-1 { width: 40px;  height: 40px;  animation-delay: 0s; }
+.ring-2 { width: 60px;  height: 60px;  animation-delay: 0.5s; }
+.ring-3 { width: 80px;  height: 80px;  animation-delay: 1s; }
+.ring-icon { position: relative; z-index: 1; color: var(--accent); }
+
+@keyframes ring-pulse {
+  0%   { opacity: 0.7; transform: scale(0.5); }
+  100% { opacity: 0;   transform: scale(1.15); }
+}
+
+/* Handshake step checklist */
+.webrtc-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 1.25rem 1.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.step {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--zinc-600);
+  transition: color 0.3s;
+}
+.step-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--zinc-700);
+  flex-shrink: 0;
+  transition: background 0.3s, box-shadow 0.3s;
+}
+.step.step-done { color: var(--subtle); }
+.step.step-done .step-dot {
+  background: var(--emerald-500);
+  box-shadow: 0 0 6px rgba(16,185,129,0.5);
+}
+.step.step-active .step-dot {
+  background: var(--accent);
+  box-shadow: 0 0 6px rgba(14,165,233,0.5);
+  animation: pulse-dot 1s ease-in-out infinite;
+}
+
+/* ── Download speed ───────────────────────────────────── */
+.dl-speed {
+  font-size: 0.75rem;
+  font-family: 'Geist Mono', monospace;
+  color: var(--zinc-700);
+}
+
+/* ── Done metadata row ────────────────────────────────── */
+.done-meta {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.75rem;
+  font-family: 'Geist Mono', monospace;
+  color: var(--muted);
+  padding: 0.5rem 0.875rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+}
+
+/* ── Terminal Stream (Phase 5) ────────────────────────── */
+.terminal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-top-left-radius: var(--radius-md);
+  border-top-right-radius: var(--radius-md);
+}
+
+.terminal-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.live-pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--emerald-500);
+  box-shadow: 0 0 8px var(--emerald-500);
+  animation: pulse-dot 1.2s infinite;
+}
+
+.terminal-title {
+  font-size: 0.8125rem;
+  font-family: 'Geist Mono', monospace;
+  color: var(--text-hi);
+  font-weight: 500;
+}
+
+.terminal-controls {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.btn-terminal-action {
+  font-family: 'Geist Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--subtle);
+  background: transparent;
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.625rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-terminal-action:hover {
+  color: var(--text-hi);
+  border-color: var(--zinc-600);
+  background: var(--zinc-800);
+}
+
+.terminal-body {
+  width: 100%;
+  height: 320px;
+  background: #09090b; /* pure black background for contrast */
+  border: 1px solid var(--border);
+  border-bottom-left-radius: var(--radius-md);
+  border-bottom-right-radius: var(--radius-md);
+  padding: 1.25rem;
+  overflow-y: auto;
+  text-align: left;
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.8);
+}
+
+#terminal-pre {
+  margin: 0;
+  font-family: 'Geist Mono', monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: #a7f3d0; /* emerald-200 for high readability log style */
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.term-dim {
+  color: var(--zinc-600);
+}
+
+/* Respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

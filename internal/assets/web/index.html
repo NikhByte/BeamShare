@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gaze — Beam Receiver</title>
+  <meta name="description" content="Receive files wirelessly via Beam P2P transfer. Zero install required." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- Animated mesh background -->
+  <div class="mesh-bg" aria-hidden="true">
+    <div class="blob blob-1"></div>
+    <div class="blob blob-2"></div>
+    <div class="blob blob-3"></div>
+  </div>
+  <div class="noise" aria-hidden="true"></div>
+
+  <main class="layout">
+
+    <!-- ── Left rail: branding ────────────────────────── -->
+    <aside class="brand-rail">
+      <div class="brand-logo">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect width="32" height="32" rx="8" fill="url(#logo-grad)" />
+          <path d="M8 10h8c3.314 0 6 2.686 6 6s-2.686 6-6 6H8V10z" fill="white" fill-opacity="0.9"/>
+          <path d="M18 16c0-2.21 1.79-4 4-4" stroke="white" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
+          <defs>
+            <linearGradient id="logo-grad" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#0ea5e9"/>
+              <stop offset="100%" stop-color="#6366f1"/>
+            </linearGradient>
+          </defs>
+        </svg>
+        <span class="brand-name">Gaze</span>
+        <span class="brand-by">by Beam</span>
+      </div>
+
+      <div class="brand-copy">
+        <h1 class="brand-headline">Peer-to-peer.<br/>No cloud.<br/>Just physics.</h1>
+        <p class="brand-sub">Your file travels directly from sender to you. No server ever touches the data. Even blocked college Wi-Fi can't stop it.</p>
+      </div>
+
+      <!-- Connection mode badge — updated by JS -->
+      <div class="mode-badge" id="mode-badge">
+        <div class="mode-dot" id="mode-dot"></div>
+        <span id="mode-label">Connecting…</span>
+      </div>
+
+      <div class="security-badge">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <span>End-to-end · No server storage</span>
+      </div>
+    </aside>
+
+    <!-- ── Right panel: receiver card ─────────────────── -->
+    <section class="receiver-panel" aria-label="File receiver">
+
+      <!-- Loading / Connecting state -->
+      <div id="state-loading" class="state" aria-live="polite">
+        <div class="state-icon pulse-ring">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </div>
+        <p class="state-label">Establishing connection…</p>
+        <p class="state-sub" id="loading-sub">Fetching file metadata</p>
+        <div class="skeleton-file">
+          <div class="skeleton-icon shimmer"></div>
+          <div class="skeleton-lines">
+            <div class="skeleton-line shimmer" style="width:60%"></div>
+            <div class="skeleton-line shimmer" style="width:40%"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Ready / Direct HTTP mode -->
+      <div id="state-ready" class="state hidden" aria-live="polite">
+        <div class="file-card" id="file-card">
+          <div class="file-icon-wrap" id="file-icon-wrap" aria-hidden="true"></div>
+          <div class="file-info">
+            <span class="file-name" id="file-name">—</span>
+            <span class="file-size" id="file-size">—</span>
+          </div>
+          <div class="file-badge" id="file-mime">—</div>
+        </div>
+        <button class="btn-download" id="btn-download" aria-label="Download file">
+          <span class="btn-text">Download File</span>
+          <svg class="btn-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </button>
+        <p class="hint">File is served directly from the sender's device.</p>
+        <div class="upload-section" id="upload-section" style="width: 100%; margin-top: 1rem; display: flex; flex-direction: column; gap: 0.75rem; align-items: center;">
+          <div class="upload-divider" style="display: flex; align-items: center; width: 100%; color: var(--zinc-600); font-size: 0.75rem; text-transform: uppercase; font-family: 'Geist Mono', monospace; gap: 0.5rem;"><hr style="flex: 1; border: none; border-top: 1px solid var(--border);" /><span>or</span><hr style="flex: 1; border: none; border-top: 1px solid var(--border);" /></div>
+          <button class="btn-download" id="btn-upload-trigger" aria-label="Send file back to Laptop" style="background: transparent; border: 1px solid var(--border); box-shadow: none; color: var(--subtle);">
+            <span class="btn-text">Send File back to Laptop</span>
+            <svg class="btn-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          </button>
+          <input type="file" id="file-upload-input" class="hidden" style="display: none;" />
+        </div>
+      </div>
+
+      <!-- WebRTC P2P mode — waiting for data channel -->
+      <div id="state-webrtc" class="state hidden" aria-live="polite">
+        <div class="webrtc-status">
+          <div class="signal-rings">
+            <div class="ring ring-1"></div>
+            <div class="ring ring-2"></div>
+            <div class="ring ring-3"></div>
+            <svg class="ring-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+              <path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>
+            </svg>
+          </div>
+          <p class="state-label">WebRTC tunnel opening…</p>
+          <p class="state-sub" id="webrtc-sub">Exchanging encryption keys</p>
+        </div>
+        <div class="webrtc-steps">
+          <div class="step" id="step-offer">
+            <div class="step-dot"></div><span>SDP offer received</span>
+          </div>
+          <div class="step" id="step-answer">
+            <div class="step-dot"></div><span>Answer sent to sender</span>
+          </div>
+          <div class="step" id="step-ice">
+            <div class="step-dot"></div><span>ICE candidates exchanged</span>
+          </div>
+          <div class="step" id="step-open">
+            <div class="step-dot"></div><span>Data channel open</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Downloading state -->
+      <div id="state-downloading" class="state hidden" aria-live="polite">
+        <div class="progress-ring-wrap" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Download progress" id="progress-wrap">
+          <svg class="progress-ring" viewBox="0 0 100 100" width="120" height="120">
+            <circle class="progress-track" cx="50" cy="50" r="42" />
+            <circle class="progress-fill" id="progress-circle" cx="50" cy="50" r="42"
+              stroke-dasharray="263.9" stroke-dashoffset="263.9" />
+          </svg>
+          <span class="progress-pct" id="progress-pct">0%</span>
+        </div>
+        <p class="state-label" id="dl-label">Downloading…</p>
+        <p class="dl-stats" id="dl-stats">— / —</p>
+        <p class="dl-speed" id="dl-speed">—</p>
+      </div>
+
+      <!-- Live Terminal / Stdin Pipe state (Phase 5) -->
+      <div id="state-livepipe" class="state hidden" aria-live="polite">
+        <div class="terminal-header">
+          <div class="terminal-title-wrap">
+            <div class="live-pulse-dot"></div>
+            <span class="terminal-title">Live Terminal Stream</span>
+          </div>
+          <div class="terminal-controls">
+            <button class="btn-terminal-action" id="btn-terminal-copy" title="Copy output">Copy</button>
+            <button class="btn-terminal-action" id="btn-terminal-download" title="Save as file">Save</button>
+          </div>
+        </div>
+        <div class="terminal-body">
+          <pre id="terminal-pre"><span class="term-dim">// Waiting for stream input...</span></pre>
+        </div>
+        <p class="hint">Real-time log viewer. Streaming stdin from source.</p>
+      </div>
+
+      <!-- Done state -->
+      <div id="state-done" class="state hidden" aria-live="polite">
+        <div class="done-icon">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        </div>
+        <p class="state-label done-label" id="done-title">Transfer complete</p>
+        <p class="done-sub" id="done-sub">—</p>
+        <div class="done-meta" id="done-meta"></div>
+
+        <!-- Sharing container for uploads -->
+        <div id="done-share-container" class="hidden" style="display: flex; flex-direction: column; gap: 0.75rem; align-items: center; width: 100%;">
+          <p class="hint" style="color: var(--emerald-500); font-weight: 500;">Other devices can scan this QR to receive your file:</p>
+          <img id="done-qr-img" src="" alt="Share QR" style="border: 4px solid white; border-radius: 8px; width: 180px; height: 180px;" />
+          <button class="btn-terminal-action" id="btn-copy-share-url" style="padding: 0.5rem 1rem;">Copy Share Link</button>
+        </div>
+
+        <button class="btn-again" id="btn-again">Receive another file</button>
+      </div>
+
+      <!-- Error state -->
+      <div id="state-error" class="state hidden" aria-live="assertive">
+        <div class="error-icon">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        </div>
+        <p class="state-label">Connection error</p>
+        <p class="error-msg" id="error-msg">Could not reach the sender.</p>
+        <button class="btn-retry" id="btn-retry">Retry</button>
+      </div>
+
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Beam v0.4 — Phase 4 & 5</span>
+    <span id="transfer-mode-footer"></span>
+    <a href="https://github.com/beamshare/beam" target="_blank" rel="noopener noreferrer">GitHub</a>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
