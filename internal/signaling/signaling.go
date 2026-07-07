@@ -1,0 +1,240 @@
+// Package signaling implements the WebRTC signaling layer for Beam.
+//
+// Phase 3 — Optical Handshake:
+//   - The CLI generates a WebRTC "Offer" SDP, compresses it with zlib + base64,
+//     and encodes the result into a QR code (the "optical handshake").
+//   - The receiver's browser scans the QR, decodes the offer, and POSTs its
+//     "Answer" SDP back to /api/signal/answer.
+//   - Once both sides have each other's SDP + ICE candidates, the RTCPeerConnection
+//     opens a data channel and file transfer begins peer-to-peer.
+//
+// Privacy guarantee: STUN servers are only used to discover the public IP for
+// the ICE handshake. The actual file bytes travel directly between peers.
+package signaling
+
+import (
+	"bytes"
+	"compress/zlib"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/pion/webrtc/v3"
+)
+
+// STUNServers are the ICE servers used only for NAT traversal discovery.
+// No file data ever touches these servers.
+var STUNServers = []webrtc.ICEServer{
+	{URLs: []string{"stun:stun.l.google.com:19302"}},
+	{URLs: []string{"stun:stun1.l.google.com:19302"}},
+}
+
+// Session holds the state of one WebRTC sender session.
+type Session struct {
+	pc          *webrtc.PeerConnection
+	dc          *webrtc.DataChannel
+	offerSDP    string   // compressed+b64 for QR encoding
+	rawOffer    string   // full SDP text
+	answerReady chan struct{}
+	candidates  []webrtc.ICECandidateInit
+	mu          sync.Mutex
+
+	// OnOpen is called when the data channel is open and ready to send.
+	OnOpen func(dc *webrtc.DataChannel)
+}
+
+// NewSession creates a new WebRTC PeerConnection configured as the sender.
+func NewSession() (*Session, error) {
+	config := webrtc.Configuration{ICEServers: STUNServers}
+	pc, err := webrtc.NewPeerConnection(config)
+	if err != nil {
+		return nil, fmt.Errorf("create peer connection: %w", err)
+	}
+
+	s := &Session{
+		pc:          pc,
+		answerReady: make(chan struct{}, 1),
+	}
+
+	// Collect trickle ICE candidates as they arrive.
+	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c == nil {
+			return
+		}
+		s.mu.Lock()
+		s.candidates = append(s.candidates, c.ToJSON())
+		s.mu.Unlock()
+	})
+
+	// Create the ordered, reliable data channel for file transfer.
+	ordered := true
+	dc, err := pc.CreateDataChannel("beam-file", &webrtc.DataChannelInit{
+		Ordered: &ordered,
+	})
+	if err != nil {
+		pc.Close()
+		return nil, fmt.Errorf("create data channel: %w", err)
+	}
+	s.dc = dc
+
+	dc.OnOpen(func() {
+		if s.OnOpen != nil {
+			s.OnOpen(dc)
+		}
+	})
+
+	return s, nil
+}
+
+// CreateOffer generates the SDP offer and compresses it for QR encoding.
+// Must be called before RegisterHandlers.
+func (s *Session) CreateOffer(ctx context.Context) (compressedOffer string, err error) {
+	offer, err := s.pc.CreateOffer(nil)
+	if err != nil {
+		return "", fmt.Errorf("create offer: %w", err)
+	}
+	if err := s.pc.SetLocalDescription(offer); err != nil {
+		return "", fmt.Errorf("set local description: %w", err)
+	}
+
+	// Wait for ICE gathering to complete (or timeout after 3s).
+	gatherDone := webrtc.GatheringCompletePromise(s.pc)
+	select {
+	case <-gatherDone:
+	case <-time.After(3 * time.Second):
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+
+	// Use the final (trickle-complete) local description.
+	finalSDP := s.pc.LocalDescription().SDP
+	s.rawOffer = finalSDP
+
+	compressed, err := compressSDP(finalSDP)
+	if err != nil {
+		return "", fmt.Errorf("compress sdp: %w", err)
+	}
+	s.offerSDP = compressed
+	return compressed, nil
+}
+
+// CompressedOffer returns the zlib+base64 encoded SDP, ready for embedding in a QR.
+func (s *Session) CompressedOffer() string { return s.offerSDP }
+
+// RegisterHandlers mounts the signaling API routes on the given mux:
+//   - GET  /api/signal/offer  → returns the compressed SDP offer
+//   - POST /api/signal/answer → accepts the receiver's SDP answer
+//   - GET  /api/signal/candidates → returns ICE candidates as JSON
+func (s *Session) RegisterHandlers(mux *http.ServeMux) {
+	// Offer endpoint — receiver fetches this after scanning the QR.
+	mux.HandleFunc("/api/signal/offer", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		json.NewEncoder(w).Encode(map[string]string{
+			"sdp":  s.rawOffer,
+			"type": "offer",
+		})
+	})
+
+	// Answer endpoint — receiver POSTs its SDP answer here.
+	mux.HandleFunc("/api/signal/answer", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var answer webrtc.SessionDescription
+		if err := json.NewDecoder(r.Body).Decode(&answer); err != nil {
+			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.pc.SetRemoteDescription(answer); err != nil {
+			http.Error(w, "set remote desc: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+
+		// Unblock WaitForAnswer.
+		select {
+		case s.answerReady <- struct{}{}:
+		default:
+		}
+	})
+
+	// ICE candidates endpoint — receiver polls this to add remote candidates.
+	mux.HandleFunc("/api/signal/candidates", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		s.mu.Lock()
+		cands := s.candidates
+		s.mu.Unlock()
+		json.NewEncoder(w).Encode(cands)
+	})
+}
+
+// WaitForAnswer blocks until the receiver has posted its SDP answer,
+// or until the context is cancelled.
+func (s *Session) WaitForAnswer(ctx context.Context) error {
+	select {
+	case <-s.answerReady:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// DataChannel returns the WebRTC data channel once the connection is ready.
+func (s *Session) DataChannel() *webrtc.DataChannel { return s.dc }
+
+// Close shuts down the peer connection.
+func (s *Session) Close() error { return s.pc.Close() }
+
+// ─── SDP compression helpers ──────────────────────────────────────────────────
+
+// compressSDP applies zlib deflate + URL-safe base64 to reduce SDP size
+// so it fits in a single scannable QR code (≈1500 bytes max at Version 40).
+func compressSDP(sdp string) (string, error) {
+	var buf bytes.Buffer
+	w := zlib.NewWriter(&buf)
+	if _, err := io.WriteString(w, sdp); err != nil {
+		return "", err
+	}
+	if err := w.Close(); err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(buf.Bytes()), nil
+}
+
+// DecompressSDP reverses compressSDP — used by the browser (via JS atob +
+// pako) and optionally by Go unit tests.
+func DecompressSDP(compressed string) (string, error) {
+	raw, err := base64.URLEncoding.DecodeString(compressed)
+	if err != nil {
+		return "", fmt.Errorf("base64 decode: %w", err)
+	}
+	r, err := zlib.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return "", fmt.Errorf("zlib open: %w", err)
+	}
+	defer r.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		return "", fmt.Errorf("zlib read: %w", err)
+	}
+	return string(out), nil
+}
