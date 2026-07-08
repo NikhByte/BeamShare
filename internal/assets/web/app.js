@@ -39,6 +39,63 @@ let diskWritableStream = null;
 let diskFileHandle     = null;
 let webrtcDataChannel  = null;
 let currentShareURL    = "";
+let useIndexedDB       = false;
+
+// ── IndexedDB Buffering ────────────────────────────────────────────────────────
+const IDB_NAME = 'GazeTransferDB';
+const IDB_STORE = 'chunks';
+let idb = null;
+let idbChunkIndex = 0;
+
+function initIDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (db.objectStoreNames.contains(IDB_STORE)) {
+        db.deleteObjectStore(IDB_STORE);
+      }
+      db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = (e) => {
+      idb = e.target.result;
+      resolve();
+    };
+    req.onerror = (e) => reject(e.target.error);
+  });
+}
+
+async function clearIDB() {
+  if (!idb) await initIDB();
+  return new Promise((resolve, reject) => {
+    const tx = idb.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).clear();
+    tx.oncomplete = () => {
+      idbChunkIndex = 0;
+      resolve();
+    };
+    tx.onerror = (e) => reject(e.target.error);
+  });
+}
+
+function storeChunkIDB(chunk) {
+  return new Promise((resolve, reject) => {
+    const tx = idb.transaction(IDB_STORE, 'readwrite');
+    const index = idbChunkIndex++;
+    tx.objectStore(IDB_STORE).put(chunk, index);
+    tx.oncomplete = () => resolve();
+    tx.onerror = (e) => reject(e.target.error);
+  });
+}
+
+function getAllChunksIDB() {
+  return new Promise((resolve, reject) => {
+    const tx = idb.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).getAll();
+    req.onsuccess = (e) => resolve(e.target.result);
+    req.onerror = (e) => reject(e.target.error);
+  });
+}
 
 // ── State machine ─────────────────────────────────────────────────────────────
 const STATES = ['loading', 'ready', 'webrtc', 'downloading', 'livepipe', 'done', 'error'];
@@ -121,11 +178,17 @@ function init() {
     }
   });
 
-  document.getElementById('btn-terminal-download')?.addEventListener('click', () => {
-    const pre = document.getElementById('terminal-pre');
-    if (pre) {
-      const blob = new Blob([pre.innerText], { type: 'text/plain;charset=utf-8' });
+  document.getElementById('btn-terminal-download')?.addEventListener('click', async () => {
+    if (useIndexedDB) {
+      const chunks = await getAllChunksIDB();
+      const blob = new Blob(chunks, { type: 'text/plain;charset=utf-8' });
       triggerSave(blob, currentFile ? currentFile.name : 'stream.log');
+    } else {
+      const pre = document.getElementById('terminal-pre');
+      if (pre) {
+        const blob = new Blob([pre.innerText], { type: 'text/plain;charset=utf-8' });
+        triggerSave(blob, currentFile ? currentFile.name : 'stream.log');
+      }
     }
   });
 
@@ -143,6 +206,8 @@ function resetState() {
   diskFileHandle = null;
   webrtcDataChannel = null;
   currentShareURL = "";
+  useIndexedDB = false;
+  if (idb) clearIDB().catch(console.error);
   document.getElementById('done-share-container')?.classList.add('hidden');
   const pre = document.getElementById('terminal-pre');
   if (pre) pre.innerHTML = '<span class="term-dim">// Waiting for stream input...</span>';
@@ -198,6 +263,7 @@ async function startHTTPDownload() {
 
   // Try to use FileSystem API for streaming to disk if supported
   const useDiskStream = typeof window.showSaveFilePicker === 'function';
+  useIndexedDB = !useDiskStream;
 
   if (useDiskStream) {
     try {
@@ -205,10 +271,17 @@ async function startHTTPDownload() {
         suggestedName: currentFile.name,
       });
       diskWritableStream = await diskFileHandle.createWritable();
+      useIndexedDB = false;
     } catch (pickerErr) {
-      console.warn("Direct-to-disk picker cancelled/failed, falling back to RAM Blob:", pickerErr);
+      console.warn("Direct-to-disk picker cancelled/failed, falling back to IndexedDB:", pickerErr);
       diskWritableStream = null;
+      useIndexedDB = true;
     }
+  }
+
+  if (useIndexedDB) {
+    await clearIDB();
+    receivedChunks = [];
   }
 
   setState('downloading');
@@ -228,6 +301,8 @@ async function startHTTPDownload() {
 
       if (diskWritableStream) {
         await diskWritableStream.write(value);
+      } else if (useIndexedDB) {
+        await storeChunkIDB(value);
       } else {
         receivedChunks.push(value);
       }
@@ -244,10 +319,15 @@ async function startHTTPDownload() {
     if (diskWritableStream) {
       await diskWritableStream.close();
     } else {
-      triggerSave(new Blob(receivedChunks, { type: currentFile.mime }), currentFile.name);
+      let finalChunks = receivedChunks;
+      if (useIndexedDB) {
+        finalChunks = await getAllChunksIDB();
+        await clearIDB();
+      }
+      triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
     }
 
-    showDone(currentFile.name, currentFile.size, diskWritableStream ? 'LAN HTTP (Direct Disk)' : 'LAN HTTP (RAM Blob)');
+    showDone(currentFile.name, currentFile.size, diskWritableStream ? 'LAN HTTP (Direct Disk)' : 'LAN HTTP (IndexedDB)');
 
   } catch (err) {
     showError(`Download failed: ${err.message}`);
@@ -255,17 +335,26 @@ async function startHTTPDownload() {
 }
 
 // ── HTTP SSE (Server-Sent Events) live log streamer ─────────────────────────
-function startHTTPSSE() {
+async function startHTTPSSE() {
   setState('livepipe');
   const source = new EventSource('/api/live/stream');
   const pre = document.getElementById('terminal-pre');
   if (pre) pre.textContent = "";
+
+  const useDiskStream = typeof window.showSaveFilePicker === 'function';
+  useIndexedDB = !useDiskStream;
+  if (useIndexedDB) {
+    await clearIDB();
+  }
 
   source.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
       if (msg.type === "backlog" || msg.type === "data") {
         appendTerminalText(msg.payload);
+        if (useIndexedDB) {
+          storeChunkIDB(msg.payload);
+        }
       } else if (msg.type === "eof") {
         source.close();
         // Change pulsing dot status
@@ -364,6 +453,12 @@ async function startWebRTC() {
     const pre = document.getElementById('terminal-pre');
     if (pre) pre.textContent = "";
 
+    const useDiskStream = typeof window.showSaveFilePicker === 'function';
+    useIndexedDB = !useDiskStream;
+    if (useIndexedDB) {
+      clearIDB();
+    }
+
     dc.onmessage = (e) => {
       if (typeof e.data === 'string') {
         if (e.data === "EOF") {
@@ -378,12 +473,16 @@ async function startWebRTC() {
           pc.close();
         } else {
           appendTerminalText(e.data);
+          if (useIndexedDB) {
+            storeChunkIDB(e.data);
+          }
         }
       }
     };
   } else {
     // ── Direct-to-Disk File transfer over WebRTC data channel ──────────────────
     const useDiskStream = typeof window.showSaveFilePicker === 'function';
+    useIndexedDB = !useDiskStream;
 
     if (useDiskStream) {
       try {
@@ -391,16 +490,22 @@ async function startWebRTC() {
           suggestedName: currentFile.name,
         });
         diskWritableStream = await diskFileHandle.createWritable();
+        useIndexedDB = false;
       } catch (pickerErr) {
-        console.warn("WebRTC Direct-to-disk picker cancelled, falling back to RAM Blob:", pickerErr);
+        console.warn("WebRTC Direct-to-disk picker cancelled, falling back to IndexedDB:", pickerErr);
         diskWritableStream = null;
+        useIndexedDB = true;
       }
+    }
+
+    if (useIndexedDB) {
+      await clearIDB();
+      receivedChunks = [];
     }
 
     setState('downloading');
     startTime     = Date.now();
     receivedBytes = 0;
-    receivedChunks = [];
     updateProgress(0);
 
     await new Promise((resolve, reject) => {
@@ -412,7 +517,12 @@ async function startWebRTC() {
             if (diskWritableStream) {
               await diskWritableStream.close();
             } else {
-              triggerSave(new Blob(receivedChunks, { type: currentFile.mime }), currentFile.name);
+              let finalChunks = receivedChunks;
+              if (useIndexedDB) {
+                finalChunks = await getAllChunksIDB();
+                await clearIDB();
+              }
+              triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
             }
             resolve();
           }
@@ -423,6 +533,9 @@ async function startWebRTC() {
         if (diskWritableStream) {
           // Direct disk write
           await diskWritableStream.write(chunk);
+        } else if (useIndexedDB) {
+          // IndexedDB buffer
+          await storeChunkIDB(chunk);
         } else {
           // RAM buffer
           receivedChunks.push(chunk);
@@ -442,7 +555,7 @@ async function startWebRTC() {
       };
     });
 
-    showDone(currentFile.name, currentFile.size, diskWritableStream ? 'WebRTC P2P (Direct Disk)' : 'WebRTC P2P (RAM Blob)');
+    showDone(currentFile.name, currentFile.size, diskWritableStream ? 'WebRTC P2P (Direct Disk)' : 'WebRTC P2P (IndexedDB)');
     pc.close();
   }
 }
@@ -584,6 +697,7 @@ function showDone(name, size, mode) {
 }
 
 function showError(msg) {
+  if (useIndexedDB) clearIDB().catch(console.error);
   document.getElementById('error-msg').textContent = msg;
   setState('error');
 }
@@ -666,3 +780,15 @@ if (document.readyState === 'loading') {
 } else {
   init();
 }
+
+window.addEventListener('pagehide', () => {
+  if (useIndexedDB && idb) {
+    // Attempt best-effort synchronous-like clear
+    try {
+      const tx = idb.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).clear();
+    } catch (e) {
+      // Ignore errors on unload
+    }
+  }
+});
