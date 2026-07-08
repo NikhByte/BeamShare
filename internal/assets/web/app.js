@@ -35,6 +35,41 @@ let receivedChunks   = [];
 let isLivePipeMode   = false;
 let liveBacklogText  = "";
 
+let initialOffset    = 0;
+let lastSavedOffset  = 0;
+
+function checkResumeState() {
+  try {
+    const saved = localStorage.getItem('beam_resume');
+    if (saved) {
+      const data = JSON.parse(saved);
+      if (data.name === currentFile.name && data.size === currentFile.size) {
+        if (confirm(`Resume partial download of ${currentFile.name} from ${formatBytes(data.offset)}?`)) {
+          initialOffset = data.offset;
+          receivedBytes = initialOffset;
+          lastSavedOffset = initialOffset;
+          return;
+        }
+      }
+    }
+  } catch (e) {}
+  localStorage.removeItem('beam_resume');
+  initialOffset = 0;
+  lastSavedOffset = 0;
+}
+
+function maybeSaveProgress() {
+  if (!currentFile || currentFile.size === -1) return;
+  if (receivedBytes - lastSavedOffset >= 1024 * 1024) {
+    localStorage.setItem('beam_resume', JSON.stringify({
+      name: currentFile.name,
+      size: currentFile.size,
+      offset: receivedBytes
+    }));
+    lastSavedOffset = receivedBytes;
+  }
+}
+
 // Direct-to-disk states
 let diskWritableStream = null;
 let diskFileHandle     = null;
@@ -60,7 +95,13 @@ function initIDB() {
     };
     req.onsuccess = (e) => {
       idb = e.target.result;
-      resolve();
+      const tx = idb.transaction(IDB_STORE, 'readonly');
+      const countReq = tx.objectStore(IDB_STORE).count();
+      countReq.onsuccess = (e2) => {
+        idbChunkIndex = e2.target.result;
+        resolve();
+      };
+      countReq.onerror = () => resolve();
     };
     req.onerror = (e) => reject(e.target.error);
   });
@@ -320,6 +361,7 @@ async function fetchMetaAndShowReady() {
       setMode('http', 'Live Log (HTTP SSE)');
       startHTTPSSE();
     } else {
+      checkResumeState();
       renderFileCard(currentFile);
       setMode('http', 'Direct LAN transfer');
       setState('ready');
@@ -369,20 +411,25 @@ async function startHTTPDownload() {
   if (!diskWritableStream && swSupported) {
     swPipePort = await getSWPipe(currentFile);
   } else if (!diskWritableStream && useIndexedDB) {
-    await clearIDB();
+    if (initialOffset === 0) {
+      await clearIDB();
+    }
     receivedChunks = [];
   }
 
   setState('downloading');
-  updateProgress(0);
+  updateProgress(initialOffset / totalBytes || 0);
 
   try {
-    const res = await fetch(apiPath('/api/download'));
+    const headers = {};
+    if (initialOffset > 0) {
+      headers['Range'] = `bytes=${initialOffset}-`;
+    }
+    const res = await fetch(apiPath('/api/download'), { headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-    const total  = parseInt(res.headers.get('Content-Length') || '0', 10);
     const reader = res.body.getReader();
-    let received = 0;
+    let received = initialOffset;
     
     let decryptionKey = null;
     let encBuffer = new Uint8Array(0);
@@ -454,9 +501,10 @@ async function startHTTPDownload() {
 
 
       receivedBytes = received;
-      if (total > 0) {
-        updateProgress(received / total);
-        updateDLStats(received, total);
+      maybeSaveProgress();
+      if (totalBytes > 0) {
+        updateProgress(received / totalBytes);
+        updateDLStats(received, totalBytes);
         updateSpeed(received);
       }
     }
@@ -593,6 +641,10 @@ async function startWebRTC() {
   currentFile = await metaPromise;
   totalBytes  = currentFile.size;
 
+  if (currentFile.size !== -1) {
+    checkResumeState();
+  }
+
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {
     if (webrtcDataChannel) webrtcDataChannel.close();
@@ -652,7 +704,10 @@ async function startWebRTC() {
         diskFileHandle = await window.showSaveFilePicker({
           suggestedName: currentFile.name,
         });
-        diskWritableStream = await diskFileHandle.createWritable();
+        diskWritableStream = await diskFileHandle.createWritable({ keepExistingData: true });
+        if (initialOffset > 0) {
+          await diskWritableStream.seek(initialOffset);
+        }
         useIndexedDB = false;
       } catch (pickerErr) {
         console.warn("WebRTC Direct-to-disk picker cancelled, falling back to SW or IndexedDB:", pickerErr);
@@ -664,17 +719,23 @@ async function startWebRTC() {
     if (!diskWritableStream && swSupported) {
       swPipePort = await getSWPipe(currentFile);
     } else if (!diskWritableStream && useIndexedDB) {
-      await clearIDB();
+      if (initialOffset === 0) {
+        await clearIDB();
+      }
       receivedChunks = [];
     }
 
     setState('downloading');
     startTime     = Date.now();
-    receivedBytes = 0;
-    updateProgress(0);
+    updateProgress(initialOffset / totalBytes || 0);
 
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
+      if (dc.readyState === 'open') {
+        dc.send(`OFFSET:${initialOffset}`);
+      } else {
+        dc.onopen = () => dc.send(`OFFSET:${initialOffset}`);
+      }
 
       dc.onmessage = async (e) => {
         if (typeof e.data === 'string') {
@@ -711,6 +772,7 @@ async function startWebRTC() {
         }
 
         receivedBytes += chunk.byteLength;
+        maybeSaveProgress();
         if (totalBytes > 0) {
           updateProgress(receivedBytes / totalBytes);
           updateDLStats(receivedBytes, totalBytes);
@@ -832,6 +894,7 @@ function appendTerminalText(text) {
 }
 
 function showDone(name, size, mode) {
+  localStorage.removeItem('beam_resume');
   document.getElementById('done-sub').textContent = `${name} · ${formatBytes(size)}`;
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   const speed   = formatBytes(size / (elapsed || 1)) + '/s';

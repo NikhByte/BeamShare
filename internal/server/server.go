@@ -191,6 +191,14 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Range")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	s.mu.Lock()
 	s.downloads++
 	count := s.downloads
@@ -198,7 +206,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("\r  Receiver connected (download #%d)…\n", count)
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Disposition")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition")
 
 	if s.isLivePipe {
 		s.mu.Lock()
