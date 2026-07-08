@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -220,24 +221,62 @@ func (s *Session) Close() error { return s.pc.Close() }
 
 // ─── SDP compression helpers ──────────────────────────────────────────────────
 
+func minifySDP(sdp string) string {
+	lines := strings.Split(sdp, "\r\n")
+	var out []string
+	hasHostCandidate := false
+	for _, line := range lines {
+		// Remove unneeded verbosity
+		if strings.HasPrefix(line, "a=extmap") || strings.HasPrefix(line, "a=msid") || strings.HasPrefix(line, "a=ice-options") || strings.HasPrefix(line, "b=") || strings.HasPrefix(line, "a=sctp-port") {
+			continue
+		}
+		// Minify candidate lines to remove redundant fields (raddr, rport, etc.)
+		if strings.HasPrefix(line, "a=candidate") {
+			// Keep only the first host candidate to save space in the QR code
+			if !strings.Contains(line, "typ host") {
+				continue
+			}
+			if hasHostCandidate {
+				continue
+			}
+			hasHostCandidate = true
+			if idx := strings.Index(line, " raddr"); idx > 0 {
+				line = line[:idx]
+			}
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\r\n")
+}
+
 // compressSDP applies zlib deflate + URL-safe base64 to reduce SDP size
 // so it fits in a single scannable QR code (≈1500 bytes max at Version 40).
 func compressSDP(sdp string) (string, error) {
+	sdp = minifySDP(sdp)
 	var buf bytes.Buffer
-	w := zlib.NewWriter(&buf)
+	w, err := zlib.NewWriterLevel(&buf, zlib.BestCompression)
+	if err != nil {
+		return "", err
+	}
 	if _, err := io.WriteString(w, sdp); err != nil {
 		return "", err
 	}
 	if err := w.Close(); err != nil {
 		return "", err
 	}
-	return base64.URLEncoding.EncodeToString(buf.Bytes()), nil
+	return base64.RawURLEncoding.EncodeToString(buf.Bytes()), nil
 }
 
 // DecompressSDP reverses compressSDP — used by the browser (via JS atob +
 // pako) and optionally by Go unit tests.
 func DecompressSDP(compressed string) (string, error) {
-	raw, err := base64.URLEncoding.DecodeString(compressed)
+	var raw []byte
+	var err error
+	if strings.ContainsAny(compressed, "=") || len(compressed)%4 == 0 {
+		raw, err = base64.URLEncoding.DecodeString(compressed)
+	} else {
+		raw, err = base64.RawURLEncoding.DecodeString(compressed)
+	}
 	if err != nil {
 		return "", fmt.Errorf("base64 decode: %w", err)
 	}
