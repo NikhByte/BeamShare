@@ -110,8 +110,8 @@ func PrintReceiverURL(url string) {
 func PrintQR(content string) {
 	fmt.Printf("  %s\n\n", colorize(bold+white, "Or scan the QR code:"))
 
-	// Generate a QR code bitmap (medium error correction is enough for URLs).
-	qr, err := qrcode.New(content, qrcode.Medium)
+	// Generate a QR code bitmap (low error correction to keep matrix small for large URLs).
+	qr, err := qrcode.New(content, qrcode.Low)
 	if err != nil {
 		fmt.Printf("  (QR generation failed: %v)\n\n", err)
 		return
@@ -128,7 +128,7 @@ func PrintQR(content string) {
 // Each pair of rows is merged into one line using ▀ / ▄ / █ / space.
 func renderHalfBlock(bitmap [][]bool) {
 	size := len(bitmap)
-	indent := "    "
+	indent := "  "
 
 	for row := 0; row < size; row += 2 {
 		line := indent

@@ -331,7 +331,7 @@ function resetState() {
 
 async function bootstrap() {
   const params = new URLSearchParams(window.location.search);
-  const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp');
+  const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('offer');
 
   if (isWebRTCMode && typeof RTCPeerConnection !== 'undefined') {
     setLoadingSub('Connecting WebRTC signaling tunnel…');
@@ -573,16 +573,73 @@ async function startHTTPSSE() {
   };
 }
 
+// ── Decompression helper ──────────────────────────────────────────────────────
+async function decompressOffer(base64Str) {
+  // Decode URL-safe base64
+  let b64 = base64Str.replace(/-/g, '+').replace(/_/g, '/');
+  // Pad with '=' if necessary
+  while (b64.length % 4 !== 0) {
+    b64 += '=';
+  }
+  const binStr = atob(b64);
+  const len = binStr.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binStr.charCodeAt(i);
+  }
+  const ds = new DecompressionStream('deflate');
+  const writer = ds.writable.getWriter();
+  writer.write(bytes);
+  writer.close();
+  
+  const reader = ds.readable.getReader();
+  const chunks = [];
+  while(true) {
+    const {done, value} = await reader.read();
+    if(done) break;
+    chunks.push(value);
+  }
+  
+  const totalLength = chunks.reduce((acc, c) => acc + c.length, 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for(let c of chunks) {
+    result.set(c, offset);
+    offset += c.length;
+  }
+  return new TextDecoder().decode(result);
+}
+
 // ── WebRTC P2P mode ───────────────────────────────────────────────────────────
 async function startWebRTC() {
   setState('webrtc');
   setMode('webrtc', 'WebRTC P2P (optical handshake)');
 
   // 1. Fetch the full SDP offer from the server.
-  setWebRTCSub('Fetching SDP offer…');
-  const offerRes = await fetch(apiPath('/api/signal/offer'));
-  if (!offerRes.ok) throw new Error(`offer fetch: HTTP ${offerRes.status}`);
-  const offer = await offerRes.json();
+  let offer;
+  const params = new URLSearchParams(window.location.search);
+  const embeddedOffer = params.get('offer');
+
+  if (embeddedOffer) {
+    setWebRTCSub('Decoding embedded SDP offer…');
+    try {
+      const decompressedSDP = await decompressOffer(embeddedOffer);
+      offer = {
+        type: 'offer',
+        sdp: decompressedSDP,
+        iceServers: STUN_SERVERS
+      };
+    } catch (err) {
+      console.warn("Failed to decompress embedded offer, falling back to HTTP fetch", err);
+    }
+  }
+
+  if (!offer) {
+    setWebRTCSub('Fetching SDP offer…');
+    const offerRes = await fetch(apiPath('/api/signal/offer'));
+    if (!offerRes.ok) throw new Error(`offer fetch: HTTP ${offerRes.status}`);
+    offer = await offerRes.json();
+  }
   markStep('step-offer');
 
   // 2. Create peer connection and set remote description.
