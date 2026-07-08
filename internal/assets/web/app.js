@@ -483,7 +483,8 @@ async function startWebRTC() {
   markStep('step-offer');
 
   // 2. Create peer connection and set remote description.
-  const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+  const iceServers = offer.iceServers || STUN_SERVERS;
+  const pc = new RTCPeerConnection({ iceServers });
 
   // Also fetch file meta in parallel.
   const metaPromise = fetch('/api/meta').then(r => r.json());

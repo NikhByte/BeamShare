@@ -27,11 +27,19 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
-// STUNServers are the ICE servers used only for NAT traversal discovery.
-// No file data ever touches these servers.
-var STUNServers = []webrtc.ICEServer{
+// ICEServers are the ICE servers used for NAT traversal discovery and relay.
+var ICEServers = []webrtc.ICEServer{
 	{URLs: []string{"stun:stun.l.google.com:19302"}},
 	{URLs: []string{"stun:stun1.l.google.com:19302"}},
+	{
+		URLs: []string{
+			"turn:openrelay.metered.ca:80",
+			"turn:openrelay.metered.ca:443",
+			"turn:openrelay.metered.ca:443?transport=tcp",
+		},
+		Username:   "openrelayproject",
+		Credential: "openrelayproject",
+	},
 }
 
 // Session holds the state of one WebRTC sender session.
@@ -50,7 +58,7 @@ type Session struct {
 
 // NewSession creates a new WebRTC PeerConnection configured as the sender.
 func NewSession() (*Session, error) {
-	config := webrtc.Configuration{ICEServers: STUNServers}
+	config := webrtc.Configuration{ICEServers: ICEServers}
 	pc, err := webrtc.NewPeerConnection(config)
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)
@@ -135,9 +143,10 @@ func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/signal/offer", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		json.NewEncoder(w).Encode(map[string]string{
-			"sdp":  s.rawOffer,
-			"type": "offer",
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"sdp":        s.rawOffer,
+			"type":       "offer",
+			"iceServers": ICEServers,
 		})
 	})
 
