@@ -2,18 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"strconv"
-	"strings"
-
 	"github.com/beamshare/beam/internal/mdns"
+	"github.com/beamshare/beam/internal/relay"
 	"github.com/beamshare/beam/internal/server"
 	"github.com/beamshare/beam/internal/signaling"
 	"github.com/beamshare/beam/internal/ui"
@@ -26,9 +28,26 @@ var (
 	activeChannels []*webrtc.DataChannel
 	channelsMu     sync.Mutex
 	liveFinished   bool
+	relayURL       string
 )
 
 func main() {
+	relayURL = os.Getenv("BEAM_RELAY_URL")
+
+	// Parse args to extract --relay if present
+	var newArgs []string
+	for i := 0; i < len(os.Args); i++ {
+		if os.Args[i] == "--relay" && i+1 < len(os.Args) {
+			relayURL = os.Args[i+1]
+			i++ // skip next
+		} else if strings.HasPrefix(os.Args[i], "--relay=") {
+			relayURL = strings.TrimPrefix(os.Args[i], "--relay=")
+		} else {
+			newArgs = append(newArgs, os.Args[i])
+		}
+	}
+	os.Args = newArgs
+
 	fi, err := os.Stdin.Stat()
 	isPipe := err == nil && (fi.Mode()&os.ModeCharDevice) == 0
 
@@ -172,6 +191,27 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 		os.Exit(1)
 	}
 
+	var relClient *relay.Client
+	var relSessionID string
+	var relKey []byte
+	var relKeyStr string
+	if relayURL != "" {
+		fmt.Printf("  %s\n", dimStr("Connecting to relay..."))
+		relClient = relay.NewClient(relayURL)
+
+		relKey = make([]byte, 32)
+		rand.Read(relKey)
+		relClient.Key = relKey
+		relKeyStr = base64.URLEncoding.EncodeToString(relKey)
+
+		var err error
+		relSessionID, err = relClient.Register()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  warn: Relay connection failed (%v)\n", err)
+			relClient = nil
+		}
+	}
+
 	// ── Phase 3: WebRTC signaling session ─────────────────────────────────────
 	fmt.Printf("  %s\n", dimStr("Setting up WebRTC session…"))
 	session, err := signaling.NewSession(iceServers)
@@ -186,8 +226,53 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 			session.Close()
 			session = nil
 		} else {
+			if relClient != nil {
+				// We need to convert candidates to map[string]interface{}
+				var mCands []map[string]interface{}
+				for _, c := range session.GetCandidates() {
+					mCands = append(mCands, map[string]interface{}{
+						"candidate":     c.Candidate,
+						"sdpMid":        c.SDPMid,
+						"sdpMLineIndex": c.SDPMLineIndex,
+					})
+				}
+				relClient.PushState(session.RawOffer(), mCands, map[string]interface{}{
+					"name": fileName,
+					"size": fileSize,
+					"mime": "application/octet-stream",
+				})
+
+				// Poll for answer and download commands
+				go func() {
+					for {
+						cmd, err := relClient.Poll()
+						if err != nil {
+							time.Sleep(1 * time.Second)
+							continue
+						}
+						if cmd.Action == "answer" {
+							session.ProvideAnswer(cmd.Answer)
+						} else if cmd.Action == "download" {
+							fmt.Println("\n  [Relay] Bridge active! Streaming data via relay...")
+							err = relClient.UploadData(filePath)
+							if err != nil {
+								fmt.Printf("  Error uploading via relay: %v\n", err)
+							} else {
+								fmt.Println("  ✅ Relay Transfer Complete!")
+							}
+						}
+					}
+				}()
+			}
+
 			// Register /api/signal/* routes on the server's mux.
 			session.RegisterHandlers(srv.Mux())
+
+			session.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+				if state == webrtc.ICEConnectionStateFailed {
+					fmt.Println("\n  [WebRTC] ICE connection failed. Switching to bridge...")
+				}
+			})
 
 			// Hook up data channel handler
 			session.OnOpen = func(dc *webrtc.DataChannel) {
@@ -208,7 +293,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 							if len(parts) == 3 {
 								name := parts[1]
 								size, _ := strconv.ParseInt(parts[2], 10, 64)
-								
+
 								uploadName = "received_" + filepath.Base(name)
 								uploadSize = size
 								uploaded = 0
@@ -398,9 +483,19 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 	// ── Print URLs ────────────────────────────────────────────────────────────
 	ui.PrintDiscovery(localURL, mdnsName)
 
+	if relClient != nil {
+		fmt.Printf("    %s/?s=%s#k=%s    (global relay)\n", relayURL, relSessionID, relKeyStr)
+	}
+
 	// ── Print QR ─────────────────────────────────────────────────────────────
 	qrURL := localURL
-	if session != nil {
+	if relClient != nil {
+		qrURL = fmt.Sprintf("%s/?s=%s", relayURL, relSessionID)
+		if session != nil {
+			qrURL += "&mode=webrtc"
+		}
+		qrURL += "#k=" + relKeyStr
+	} else if session != nil {
 		qrURL = localURL + "?mode=webrtc"
 	}
 	ui.PrintQR(qrURL)
@@ -408,6 +503,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 	// ── Connection mode summary ───────────────────────────────────────────────
 	if isLive {
 		fmt.Printf("  Live Stream: %s\n", greenStr("active"))
+	}
+	if relClient != nil {
+		fmt.Printf("  Global Relay : %s\n", greenStr("active"))
 	}
 	if session != nil {
 		fmt.Printf("  WebRTC P2P : %s\n", greenStr("ready"))

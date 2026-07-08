@@ -1,3 +1,4 @@
+function apiPath(path) { const s = new URLSearchParams(window.location.search).get('s'); if (s) { return path.includes('?') ? path + '&s=' + s : path + '?s=' + s; } return path; }
 /**
  * app.js — Gaze Receiver (Phase 4 & 5: Direct-to-Disk + Live Pipe)
  *
@@ -309,7 +310,7 @@ async function bootstrap() {
 // ── HTTP mode ─────────────────────────────────────────────────────────────────
 async function fetchMetaAndShowReady() {
   try {
-    const res = await fetch('/api/meta');
+    const res = await fetch(apiPath('/api/meta'));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     currentFile = await res.json();
 
@@ -376,28 +377,82 @@ async function startHTTPDownload() {
   updateProgress(0);
 
   try {
-    const res = await fetch('/api/download');
+    const res = await fetch(apiPath('/api/download'));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
     const total  = parseInt(res.headers.get('Content-Length') || '0', 10);
     const reader = res.body.getReader();
     let received = 0;
+    
+    let decryptionKey = null;
+    let encBuffer = new Uint8Array(0);
+    if (window.location.hash.includes('k=')) {
+      try {
+        const b64 = window.location.hash.split('k=')[1].split('&')[0];
+        const raw = Uint8Array.from(atob(b64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+        decryptionKey = await crypto.subtle.importKey(
+          "raw", raw, { name: "AES-GCM" }, false, ["decrypt"]
+        );
+      } catch(e) {
+        console.error("Failed to import decryption key", e);
+      }
+    }
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      if (diskWritableStream) {
-        await diskWritableStream.write(value);
-      } else if (swPipePort) {
-        swPipePort.postMessage(value);
-      } else if (useIndexedDB) {
-        await storeChunkIDB(value);
+
+      if (decryptionKey) {
+        let newBuffer = new Uint8Array(encBuffer.length + value.length);
+        newBuffer.set(encBuffer, 0);
+        newBuffer.set(value, encBuffer.length);
+        encBuffer = newBuffer;
+
+        while (encBuffer.length >= 4) {
+          const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+          const frameLen = dv.getUint32(0, false);
+          if (encBuffer.length >= 4 + frameLen) {
+            const frame = encBuffer.slice(4, 4 + frameLen);
+            encBuffer = encBuffer.slice(4 + frameLen);
+            
+            const nonce = frame.slice(0, 12);
+            const ciphertext = frame.slice(12);
+            const decrypted = await crypto.subtle.decrypt(
+              { name: "AES-GCM", iv: nonce },
+              decryptionKey,
+              ciphertext
+            );
+            const decValue = new Uint8Array(decrypted);
+            
+            if (diskWritableStream) {
+              await diskWritableStream.write(decValue);
+            } else if (swPipePort) {
+              swPipePort.postMessage(decValue);
+            } else if (useIndexedDB) {
+              await storeChunkIDB(decValue);
+            } else {
+              receivedChunks.push(decValue);
+            }
+            received += decValue.length;
+          } else {
+            break;
+          }
+        }
       } else {
-        receivedChunks.push(value);
+        if (diskWritableStream) {
+          await diskWritableStream.write(value);
+        } else if (swPipePort) {
+          swPipePort.postMessage(value);
+        } else if (useIndexedDB) {
+          await storeChunkIDB(value);
+        } else {
+          receivedChunks.push(value);
+        }
+        received += value.length;
       }
 
-      received += value.length;
+
       receivedBytes = received;
       if (total > 0) {
         updateProgress(received / total);
@@ -430,7 +485,7 @@ async function startHTTPDownload() {
 // ── HTTP SSE (Server-Sent Events) live log streamer ─────────────────────────
 async function startHTTPSSE() {
   setState('livepipe');
-  const source = new EventSource('/api/live/stream');
+  const source = new EventSource(apiPath('/api/live/stream'));
   const pre = document.getElementById('terminal-pre');
   if (pre) pre.textContent = "";
 
@@ -477,7 +532,7 @@ async function startWebRTC() {
 
   // 1. Fetch the full SDP offer from the server.
   setWebRTCSub('Fetching SDP offer…');
-  const offerRes = await fetch('/api/signal/offer');
+  const offerRes = await fetch(apiPath('/api/signal/offer'));
   if (!offerRes.ok) throw new Error(`offer fetch: HTTP ${offerRes.status}`);
   const offer = await offerRes.json();
   markStep('step-offer');
@@ -486,7 +541,7 @@ async function startWebRTC() {
   const pc = new RTCPeerConnection({ iceServers: offer.iceServers || STUN_SERVERS });
 
   // Also fetch file meta in parallel.
-  const metaPromise = fetch('/api/meta').then(r => r.json());
+  const metaPromise = fetch(apiPath('/api/meta')).then(r => r.json());
 
   await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
@@ -506,7 +561,7 @@ async function startWebRTC() {
 
   // 4. POST answer to sender.
   setWebRTCSub('Sending answer to sender…');
-  const answerRes = await fetch('/api/signal/answer', {
+  const answerRes = await fetch(apiPath('/api/signal/answer'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(pc.localDescription),
@@ -517,7 +572,7 @@ async function startWebRTC() {
   // 5. Fetch and add ICE candidates from sender.
   setWebRTCSub('Exchanging ICE candidates…');
   try {
-    const candRes  = await fetch('/api/signal/candidates');
+    const candRes  = await fetch(apiPath('/api/signal/candidates'));
     const cands    = await candRes.json();
     for (const c of cands) {
       await pc.addIceCandidate(new RTCIceCandidate(c));
@@ -740,7 +795,7 @@ async function handleUploadFile(e) {
       showError("Upload failed due to network error.");
     };
 
-    xhr.open('POST', '/api/upload', true);
+    xhr.open('POST', apiPath('/api/upload'), true);
     xhr.send(formData);
   }
 }
@@ -799,7 +854,7 @@ function showDone(name, size, mode) {
     // Load QR PNG dynamically from the server's newly added QR API
     const qrImg = document.getElementById('done-qr-img');
     if (qrImg) {
-      qrImg.src = "/api/qr?url=" + encodeURIComponent(shareLink);
+      qrImg.src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareLink);
     }
     
     if (doneShare) doneShare.classList.remove('hidden');

@@ -38,8 +38,8 @@ var STUNServers = []webrtc.ICEServer{
 type Session struct {
 	pc          *webrtc.PeerConnection
 	dc          *webrtc.DataChannel
-	offerSDP    string   // compressed+b64 for QR encoding
-	rawOffer    string   // full SDP text
+	offerSDP    string // compressed+b64 for QR encoding
+	rawOffer    string // full SDP text
 	answerReady chan struct{}
 	candidates  []webrtc.ICECandidateInit
 	mu          sync.Mutex
@@ -243,4 +243,35 @@ func DecompressSDP(compressed string) (string, error) {
 		return "", fmt.Errorf("zlib read: %w", err)
 	}
 	return string(out), nil
+}
+
+func (s *Session) GetCandidates() []webrtc.ICECandidateInit {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cands := make([]webrtc.ICECandidateInit, len(s.candidates))
+	copy(cands, s.candidates)
+	return cands
+}
+
+func (s *Session) ProvideAnswer(answer string) error {
+	var ans webrtc.SessionDescription
+	if err := json.Unmarshal([]byte(answer), &ans); err != nil {
+		return err
+	}
+	if err := s.pc.SetRemoteDescription(ans); err != nil {
+		return err
+	}
+	select {
+	case s.answerReady <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (s *Session) RawOffer() string {
+	return s.rawOffer
+}
+
+func (s *Session) OnICEConnectionStateChange(f func(webrtc.ICEConnectionState)) {
+	s.pc.OnICEConnectionStateChange(f)
 }
