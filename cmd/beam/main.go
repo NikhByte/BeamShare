@@ -32,37 +32,39 @@ func main() {
 	fi, err := os.Stdin.Stat()
 	isPipe := err == nil && (fi.Mode()&os.ModeCharDevice) == 0
 
-	if len(os.Args) < 2 {
+	args, iceServers := parseFlags(os.Args[1:])
+	
+	if len(args) < 1 {
 		if isPipe {
-			runSend("")
+			runSend("", iceServers)
 			os.Exit(0)
 		}
 		printHelp()
 		os.Exit(0)
 	}
 
-	cmd := os.Args[1]
+	cmd := args[0]
 	switch cmd {
 	case "send":
-		if len(os.Args) < 3 {
+		if len(args) < 2 {
 			if isPipe {
-				runSend("")
+				runSend("", iceServers)
 				os.Exit(0)
 			}
 			fmt.Fprintln(os.Stderr, "beam: 'send' requires a file path or piped stdin")
 			os.Exit(1)
 		}
-		runSend(os.Args[2])
+		runSend(args[1], iceServers)
 	case "version", "--version", "-v":
 		fmt.Printf("beam version %s\n", version)
 	case "help", "--help", "-h":
 		printHelp()
 	default:
 		if _, err := os.Stat(cmd); err == nil {
-			runSend(cmd)
+			runSend(cmd, iceServers)
 		} else {
 			if isPipe {
-				runSend("")
+				runSend("", iceServers)
 				os.Exit(0)
 			}
 			fmt.Fprintf(os.Stderr, "beam: unknown command/file '%s'\nRun 'beam help' for usage.\n", cmd)
@@ -71,7 +73,69 @@ func main() {
 	}
 }
 
-func runSend(filePath string) {
+func parseFlags(args []string) ([]string, []webrtc.ICEServer) {
+	var cleanArgs []string
+	var stunServers []string
+	var turnServers []string
+	var turnUsername string
+	var turnCredential string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		
+		if strings.HasPrefix(arg, "--stun-server=") {
+			stunServers = append(stunServers, strings.TrimPrefix(arg, "--stun-server="))
+		} else if arg == "--stun-server" {
+			if i+1 < len(args) {
+				stunServers = append(stunServers, args[i+1])
+				i++
+			}
+		} else if strings.HasPrefix(arg, "--turn-server=") {
+			turnServers = append(turnServers, strings.TrimPrefix(arg, "--turn-server="))
+		} else if arg == "--turn-server" {
+			if i+1 < len(args) {
+				turnServers = append(turnServers, args[i+1])
+				i++
+			}
+		} else if strings.HasPrefix(arg, "--turn-username=") {
+			turnUsername = strings.TrimPrefix(arg, "--turn-username=")
+		} else if arg == "--turn-username" {
+			if i+1 < len(args) {
+				turnUsername = args[i+1]
+				i++
+			}
+		} else if strings.HasPrefix(arg, "--turn-credential=") {
+			turnCredential = strings.TrimPrefix(arg, "--turn-credential=")
+		} else if arg == "--turn-credential" {
+			if i+1 < len(args) {
+				turnCredential = args[i+1]
+				i++
+			}
+		} else {
+			cleanArgs = append(cleanArgs, arg)
+		}
+	}
+
+	var iceServers []webrtc.ICEServer
+
+	if len(stunServers) > 0 {
+		iceServers = append(iceServers, webrtc.ICEServer{
+			URLs: stunServers,
+		})
+	}
+	
+	if len(turnServers) > 0 {
+		iceServers = append(iceServers, webrtc.ICEServer{
+			URLs:       turnServers,
+			Username:   turnUsername,
+			Credential: turnCredential,
+		})
+	}
+
+	return cleanArgs, iceServers
+}
+
+func runSend(filePath string, iceServers []webrtc.ICEServer) {
 	var isLive bool
 	var fileName string
 	var fileSize int64
@@ -110,7 +174,7 @@ func runSend(filePath string) {
 
 	// ── Phase 3: WebRTC signaling session ─────────────────────────────────────
 	fmt.Printf("  %s\n", dimStr("Setting up WebRTC session…"))
-	session, err := signaling.NewSession()
+	session, err := signaling.NewSession(iceServers)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  warn: WebRTC unavailable (%v) — HTTP-only mode\n", err)
 	} else {
@@ -396,6 +460,14 @@ func printHelp() {
     beam send report.pdf
     beam notes.txt
     cat logs.txt | beam   (Phase 5 — Live Pipe)
+    beam --stun-server stun:my-stun.com:3478 send my-file.txt
+    beam --turn-server turn:my-turn.com:3478 --turn-username user --turn-credential pass send file.zip
+
+  OPTIONS:
+    --stun-server      Custom STUN server URL (can be specified multiple times)
+    --turn-server      Custom TURN server URL (can be specified multiple times)
+    --turn-username    TURN server username for authentication
+    --turn-credential  TURN server credential/password for authentication
 
   HOW IT WORKS:
     Phase 1  Local HTTP server + embedded Gaze web UI
