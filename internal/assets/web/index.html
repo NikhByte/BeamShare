@@ -201,6 +201,31 @@
     <a href="https://github.com/beamshare/beam" target="_blank" rel="noopener noreferrer">GitHub</a>
   </footer>
 
+
+  <!-- RAM Warning Modal -->
+  <div id="ram-warning-modal" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="ram-warning-title">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div class="modal-icon warning-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+        </div>
+        <h2 id="ram-warning-title" class="modal-title">Large File Warning</h2>
+      </div>
+      <div class="modal-body">
+        <p>This file is larger than 500MB. Your browser does not support direct-to-disk streaming, meaning the entire file must be kept in memory (RAM) until the transfer completes.</p>
+        <p><strong>Continuing may cause this browser tab to crash.</strong> Do you want to proceed at your own risk?</p>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-ram-abort" class="btn-secondary">Abort Transfer</button>
+        <button id="btn-ram-proceed" class="btn-danger">Proceed Anyway</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>
