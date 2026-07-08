@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/beamshare/beam/internal/assets"
 	qrcode "github.com/skip2/go-qrcode"
@@ -111,6 +113,25 @@ func (s *Server) WriteLive(data []byte) {
 	defer s.mu.Unlock()
 
 	s.liveData = append(s.liveData, data...)
+
+	const maxLiveBacklog = 1 * 1024 * 1024 // 1MB
+	if len(s.liveData) > maxLiveBacklog {
+		truncateIdx := len(s.liveData) - maxLiveBacklog
+		nlIdx := bytes.IndexByte(s.liveData[truncateIdx:], '\n')
+		idx := truncateIdx
+		if nlIdx >= 0 {
+			idx += nlIdx + 1
+		} else {
+			// Fallback: ensure we don't truncate in the middle of a UTF-8 multi-byte character
+			for idx < len(s.liveData) && !utf8.RuneStart(s.liveData[idx]) {
+				idx++
+			}
+		}
+		
+		// Slice from idx to drop old data. Go's append will automatically reallocate 
+		// when capacity is reached, keeping memory footprint bounded.
+		s.liveData = s.liveData[idx:]
+	}
 
 	for _, ch := range s.liveClients {
 		// Non-blocking write to client channel
