@@ -509,6 +509,10 @@ async function startHTTPDownload() {
       }
     }
 
+    if (totalBytes > 0 && receivedBytes < totalBytes) {
+      throw new Error(`Connection closed prematurely. Received ${formatBytes(receivedBytes)} of ${formatBytes(totalBytes)}.`);
+    }
+
     if (diskWritableStream) {
       await diskWritableStream.close();
     } else if (swPipePort) {

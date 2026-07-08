@@ -434,6 +434,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if errRead != nil {
+					if errRead != io.EOF {
+						outFile.Close()
+						part.Close()
+						os.Remove(outName) // Clean up partial file
+						fmt.Printf("\n  ❌ HTTP Upload failed: connection interrupted (%v)\n", errRead)
+						http.Error(w, "read file error: "+errRead.Error(), http.StatusInternalServerError)
+						return
+					}
 					break
 				}
 			}
