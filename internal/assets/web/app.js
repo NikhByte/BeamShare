@@ -943,6 +943,12 @@ function appendTerminalText(text) {
   pre.appendChild(document.createTextNode(text));
   receivedBytes += text.length;
 
+  // Prune terminal buffer to prevent DOM memory leaks and UI lag
+  const MAX_NODES = 10000;
+  while (pre.childNodes.length > MAX_NODES) {
+    pre.removeChild(pre.firstChild);
+  }
+
   // Auto-scroll terminal body
   const body = document.querySelector('.terminal-body');
   if (body) {
