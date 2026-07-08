@@ -331,7 +331,7 @@ function resetState() {
 
 async function bootstrap() {
   const params = new URLSearchParams(window.location.search);
-  const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('offer');
+  const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
 
   if (isWebRTCMode && typeof RTCPeerConnection !== 'undefined') {
     setLoadingSub('Connecting WebRTC signaling tunnel…');
@@ -587,27 +587,9 @@ async function decompressOffer(base64Str) {
   for (let i = 0; i < len; i++) {
     bytes[i] = binStr.charCodeAt(i);
   }
-  const ds = new DecompressionStream('deflate');
-  const writer = ds.writable.getWriter();
-  writer.write(bytes);
-  writer.close();
   
-  const reader = ds.readable.getReader();
-  const chunks = [];
-  while(true) {
-    const {done, value} = await reader.read();
-    if(done) break;
-    chunks.push(value);
-  }
-  
-  const totalLength = chunks.reduce((acc, c) => acc + c.length, 0);
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for(let c of chunks) {
-    result.set(c, offset);
-    offset += c.length;
-  }
-  return new TextDecoder().decode(result);
+  const decompressed = pako.inflate(bytes);
+  return new TextDecoder().decode(decompressed);
 }
 
 // ── WebRTC P2P mode ───────────────────────────────────────────────────────────
@@ -618,7 +600,7 @@ async function startWebRTC() {
   // 1. Fetch the full SDP offer from the server.
   let offer;
   const params = new URLSearchParams(window.location.search);
-  const embeddedOffer = params.get('offer');
+  const embeddedOffer = params.get('sdp') || params.get('offer');
 
   if (embeddedOffer) {
     setWebRTCSub('Decoding embedded SDP offer…');
