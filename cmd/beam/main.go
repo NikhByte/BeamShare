@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -322,6 +323,89 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 								srv.UpdateSharedFile(uploadName, filepath.Base(uploadName), uploaded)
 								uploadFile = nil
 							}
+						} else if strings.HasPrefix(dataStr, "OFFSET:") {
+							if isLive {
+								return
+							}
+							parts := strings.SplitN(dataStr, ":", 2)
+							var offset int64
+							if len(parts) == 2 {
+								offset, _ = strconv.ParseInt(parts[1], 10, 64)
+							}
+							// File sender goroutine (Direct-to-Disk + Backpressure)
+							go func() {
+								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
+								file, err := os.Open(filePath)
+								if err != nil {
+									fmt.Printf("  Error opening file: %v\n", err)
+									return
+								}
+								defer file.Close()
+
+								if offset > 0 {
+									_, err = file.Seek(offset, io.SeekStart)
+									if err != nil {
+										fmt.Printf("  Error seeking file: %v\n", err)
+										return
+									}
+								}
+
+								// Send META header
+								metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
+								if errSend := dc.SendText(metaHeader); errSend != nil {
+									fmt.Printf("  Error sending meta header: %v\n", errSend)
+									return
+								}
+
+								buffer := make([]byte, 64*1024) // 64KB chunk size
+								totalSent := offset
+								start := time.Now()
+
+								for {
+									// Backpressure check: if buffered amount > 1MB, wait
+									if dc.BufferedAmount() > 1024*1024 {
+										time.Sleep(10 * time.Millisecond)
+										continue
+									}
+
+									n, err := file.Read(buffer)
+									if n > 0 {
+										errSend := dc.Send(buffer[:n])
+										if errSend != nil {
+											fmt.Printf("\n  Error sending chunk: %v\n", errSend)
+											return
+										}
+										totalSent += int64(n)
+										pct := float64(totalSent) / float64(fileSize) * 100
+										fmt.Printf("\r  📤 Sending P2P: %.1f%% (%s/%s)",
+											pct,
+											ui.FormatBytes(totalSent),
+											ui.FormatBytes(fileSize),
+										)
+									}
+									if err != nil {
+										break
+									}
+								}
+
+								// Wait for buffer to clear before sending EOF
+								for dc.BufferedAmount() > 0 {
+									time.Sleep(10 * time.Millisecond)
+								}
+								dc.SendText("EOF")
+
+								elapsed := time.Since(start)
+								sentInSession := totalSent - offset
+								speed := float64(sentInSession) / elapsed.Seconds()
+								if elapsed.Seconds() == 0 {
+									speed = 0
+								}
+								fmt.Printf("\n  ✅ P2P Transfer Complete! Sent %s in %.1fs (avg %s/s)\n",
+									ui.FormatBytes(sentInSession),
+									elapsed.Seconds(),
+									ui.FormatBytes(int64(speed)),
+								)
+							}()
 						}
 					} else {
 						if uploadFile != nil {
@@ -360,68 +444,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 					channelsMu.Unlock()
 					fmt.Println("\n  [P2P] Receiver subscribed to live log stream!")
 				} else {
-					// File sender goroutine (Direct-to-Disk + Backpressure)
-					go func() {
-						fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
-						file, err := os.Open(filePath)
-						if err != nil {
-							fmt.Printf("  Error opening file: %v\n", err)
-							return
-						}
-						defer file.Close()
-
-						// Send META header
-						metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
-						if errSend := dc.SendText(metaHeader); errSend != nil {
-							fmt.Printf("  Error sending meta header: %v\n", errSend)
-							return
-						}
-
-						buffer := make([]byte, 64*1024) // 64KB chunk size
-						totalSent := int64(0)
-						start := time.Now()
-
-						for {
-							// Backpressure check: if buffered amount > 1MB, wait
-							if dc.BufferedAmount() > 1024*1024 {
-								time.Sleep(10 * time.Millisecond)
-								continue
-							}
-
-							n, err := file.Read(buffer)
-							if n > 0 {
-								errSend := dc.Send(buffer[:n])
-								if errSend != nil {
-									fmt.Printf("\n  Error sending chunk: %v\n", errSend)
-									return
-								}
-								totalSent += int64(n)
-								pct := float64(totalSent) / float64(fileSize) * 100
-								fmt.Printf("\r  📤 Sending P2P: %.1f%% (%s/%s)",
-									pct,
-									ui.FormatBytes(totalSent),
-									ui.FormatBytes(fileSize),
-								)
-							}
-							if err != nil {
-								break
-							}
-						}
-
-						// Wait for buffer to clear before sending EOF
-						for dc.BufferedAmount() > 0 {
-							time.Sleep(10 * time.Millisecond)
-						}
-						dc.SendText("EOF")
-
-						elapsed := time.Since(start)
-						speed := float64(totalSent) / elapsed.Seconds()
-						fmt.Printf("\n  ✅ P2P Transfer Complete! Sent %s in %.1fs (avg %s/s)\n",
-							ui.FormatBytes(totalSent),
-							elapsed.Seconds(),
-							ui.FormatBytes(int64(speed)),
-						)
-					}()
+					// We wait for OFFSET message before starting the stream.
 				}
 			}
 		}
