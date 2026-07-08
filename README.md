@@ -64,4 +64,5 @@ go build -o beam ./cmd/beam
 - **Security:** Self-signed certs with fingerprint embedded in QR code.
 - **UX:** Beautiful QR code printed in terminal via UTF-8 blocks.
 - **Portability:** Single binary. No install on the receiver side.
+- **Zero Limits:** Direct-to-Disk chunked streaming bypasses browser memory and file size limits.
 
