@@ -39,6 +39,63 @@ let diskWritableStream = null;
 let diskFileHandle     = null;
 let webrtcDataChannel  = null;
 let currentShareURL    = "";
+let useIndexedDB       = false;
+
+// ── IndexedDB Buffering ────────────────────────────────────────────────────────
+const IDB_NAME = 'GazeTransferDB';
+const IDB_STORE = 'chunks';
+let idb = null;
+let idbChunkIndex = 0;
+
+function initIDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (db.objectStoreNames.contains(IDB_STORE)) {
+        db.deleteObjectStore(IDB_STORE);
+      }
+      db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = (e) => {
+      idb = e.target.result;
+      resolve();
+    };
+    req.onerror = (e) => reject(e.target.error);
+  });
+}
+
+async function clearIDB() {
+  if (!idb) await initIDB();
+  return new Promise((resolve, reject) => {
+    const tx = idb.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).clear();
+    tx.oncomplete = () => {
+      idbChunkIndex = 0;
+      resolve();
+    };
+    tx.onerror = (e) => reject(e.target.error);
+  });
+}
+
+function storeChunkIDB(chunk) {
+  return new Promise((resolve, reject) => {
+    const tx = idb.transaction(IDB_STORE, 'readwrite');
+    const index = idbChunkIndex++;
+    tx.objectStore(IDB_STORE).put(chunk, index);
+    tx.oncomplete = () => resolve();
+    tx.onerror = (e) => reject(e.target.error);
+  });
+}
+
+function getAllChunksIDB() {
+  return new Promise((resolve, reject) => {
+    const tx = idb.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).getAll();
+    req.onsuccess = (e) => resolve(e.target.result);
+    req.onerror = (e) => reject(e.target.error);
+  });
+}
 
 // ── State machine ─────────────────────────────────────────────────────────────
 const STATES = ['loading', 'ready', 'webrtc', 'downloading', 'livepipe', 'done', 'error'];
@@ -108,6 +165,46 @@ async function getSWPipe(fileMeta) {
   return port;
 }
 
+const RAM_WARNING_THRESHOLD = 500 * 1024 * 1024; // 500 MB
+
+function checkRamWarning(size) {
+  return new Promise((resolve) => {
+    const useDiskStream = typeof window.showSaveFilePicker === 'function';
+    const swSupported = 'serviceWorker' in navigator;
+    // We shouldn't warn if disk stream, service worker stream, or IndexedDB are used.
+    // Wait, IndexedDB buffering is always used as a fallback now. So maybe we don't need warning?
+    // Actually, IndexedDB is used, but we'll stick to the original logic or improve it:
+    // If we have swSupported, we don't need to warn.
+    if (useDiskStream || swSupported || size <= RAM_WARNING_THRESHOLD || size === -1) {
+      resolve(true);
+      return;
+    }
+    
+    const modal = document.getElementById('ram-warning-modal');
+    if (!modal) {
+      resolve(true);
+      return;
+    }
+    
+    modal.classList.remove('hidden');
+    
+    const abortBtn = document.getElementById('btn-ram-abort');
+    const proceedBtn = document.getElementById('btn-ram-proceed');
+    
+    const cleanup = () => {
+      modal.classList.add('hidden');
+      abortBtn.removeEventListener('click', onAbort);
+      proceedBtn.removeEventListener('click', onProceed);
+    };
+    
+    const onAbort = () => { cleanup(); resolve(false); };
+    const onProceed = () => { cleanup(); resolve(true); };
+    
+    abortBtn.addEventListener('click', onAbort);
+    proceedBtn.addEventListener('click', onProceed);
+  });
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 function init() {
   if ('serviceWorker' in navigator) {
@@ -155,11 +252,17 @@ function init() {
     }
   });
 
-  document.getElementById('btn-terminal-download')?.addEventListener('click', () => {
-    const pre = document.getElementById('terminal-pre');
-    if (pre) {
-      const blob = new Blob([pre.innerText], { type: 'text/plain;charset=utf-8' });
+  document.getElementById('btn-terminal-download')?.addEventListener('click', async () => {
+    if (useIndexedDB) {
+      const chunks = await getAllChunksIDB();
+      const blob = new Blob(chunks, { type: 'text/plain;charset=utf-8' });
       triggerSave(blob, currentFile ? currentFile.name : 'stream.log');
+    } else {
+      const pre = document.getElementById('terminal-pre');
+      if (pre) {
+        const blob = new Blob([pre.innerText], { type: 'text/plain;charset=utf-8' });
+        triggerSave(blob, currentFile ? currentFile.name : 'stream.log');
+      }
     }
   });
 
@@ -177,6 +280,8 @@ function resetState() {
   diskFileHandle = null;
   webrtcDataChannel = null;
   currentShareURL = "";
+  useIndexedDB = false;
+  if (idb) clearIDB().catch(console.error);
   document.getElementById('done-share-container')?.classList.add('hidden');
   const pre = document.getElementById('terminal-pre');
   if (pre) pre.innerHTML = '<span class="term-dim">// Waiting for stream input...</span>';
@@ -226,6 +331,11 @@ async function fetchMetaAndShowReady() {
 async function startHTTPDownload() {
   if (!currentFile) return;
 
+  const proceed = await checkRamWarning(currentFile.size);
+  if (!proceed) {
+    return;
+  }
+
   startTime     = Date.now();
   receivedBytes = 0;
   totalBytes    = currentFile.size;
@@ -233,6 +343,7 @@ async function startHTTPDownload() {
   // Try to use FileSystem API for streaming to disk if supported
   const useDiskStream = typeof window.showSaveFilePicker === 'function';
   const swSupported = 'serviceWorker' in navigator;
+  useIndexedDB = !useDiskStream && !swSupported;
 
   if (!useDiskStream && !swSupported) {
     console.warn("Advanced streaming not supported. Large files may cause Out of Memory errors.");
@@ -246,14 +357,19 @@ async function startHTTPDownload() {
         suggestedName: currentFile.name,
       });
       diskWritableStream = await diskFileHandle.createWritable();
+      useIndexedDB = false;
     } catch (pickerErr) {
-      console.warn("Direct-to-disk picker cancelled/failed, falling back to Service Worker Pipe:", pickerErr);
+      console.warn("Direct-to-disk picker cancelled/failed, falling back to SW or IndexedDB:", pickerErr);
       diskWritableStream = null;
+      useIndexedDB = !swSupported;
     }
   }
 
   if (!diskWritableStream && swSupported) {
     swPipePort = await getSWPipe(currentFile);
+  } else if (!diskWritableStream && useIndexedDB) {
+    await clearIDB();
+    receivedChunks = [];
   }
 
   setState('downloading');
@@ -275,6 +391,8 @@ async function startHTTPDownload() {
         await diskWritableStream.write(value);
       } else if (swPipePort) {
         swPipePort.postMessage(value);
+      } else if (useIndexedDB) {
+        await storeChunkIDB(value);
       } else {
         receivedChunks.push(value);
       }
@@ -293,10 +411,15 @@ async function startHTTPDownload() {
     } else if (swPipePort) {
       swPipePort.postMessage('EOF');
     } else {
-      triggerSave(new Blob(receivedChunks, { type: currentFile.mime }), currentFile.name);
+      let finalChunks = receivedChunks;
+      if (useIndexedDB) {
+        finalChunks = await getAllChunksIDB();
+        await clearIDB();
+      }
+      triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
     }
 
-    let modeDesc = diskWritableStream ? 'LAN HTTP (Direct Disk)' : (swPipePort ? 'LAN HTTP (SW Pipe)' : 'LAN HTTP (RAM Blob)');
+    let modeDesc = diskWritableStream ? 'LAN HTTP (Direct Disk)' : (swPipePort ? 'LAN HTTP (SW Pipe)' : (useIndexedDB ? 'LAN HTTP (IndexedDB)' : 'LAN HTTP (RAM Blob)'));
     showDone(currentFile.name, currentFile.size, modeDesc);
 
   } catch (err) {
@@ -305,17 +428,26 @@ async function startHTTPDownload() {
 }
 
 // ── HTTP SSE (Server-Sent Events) live log streamer ─────────────────────────
-function startHTTPSSE() {
+async function startHTTPSSE() {
   setState('livepipe');
   const source = new EventSource('/api/live/stream');
   const pre = document.getElementById('terminal-pre');
   if (pre) pre.textContent = "";
+
+  const useDiskStream = typeof window.showSaveFilePicker === 'function';
+  useIndexedDB = !useDiskStream;
+  if (useIndexedDB) {
+    await clearIDB();
+  }
 
   source.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
       if (msg.type === "backlog" || msg.type === "data") {
         appendTerminalText(msg.payload);
+        if (useIndexedDB) {
+          storeChunkIDB(msg.payload);
+        }
       } else if (msg.type === "eof") {
         source.close();
         // Change pulsing dot status
@@ -406,6 +538,14 @@ async function startWebRTC() {
   currentFile = await metaPromise;
   totalBytes  = currentFile.size;
 
+  const proceed = await checkRamWarning(currentFile.size);
+  if (!proceed) {
+    if (webrtcDataChannel) webrtcDataChannel.close();
+    pc.close();
+    showError('Transfer aborted by user. File too large for memory.');
+    return;
+  }
+
   if (currentFile.size === -1) {
     // ── Live log stream over WebRTC data channel ─────────────────────────────
     isLivePipeMode = true;
@@ -413,6 +553,12 @@ async function startWebRTC() {
     setMode('webrtc', 'WebRTC Live Log');
     const pre = document.getElementById('terminal-pre');
     if (pre) pre.textContent = "";
+
+    const useDiskStream = typeof window.showSaveFilePicker === 'function';
+    useIndexedDB = !useDiskStream;
+    if (useIndexedDB) {
+      clearIDB();
+    }
 
     dc.onmessage = (e) => {
       if (typeof e.data === 'string') {
@@ -428,6 +574,9 @@ async function startWebRTC() {
           pc.close();
         } else {
           appendTerminalText(e.data);
+          if (useIndexedDB) {
+            storeChunkIDB(e.data);
+          }
         }
       }
     };
@@ -435,6 +584,7 @@ async function startWebRTC() {
     // ── Direct-to-Disk File transfer over WebRTC data channel ──────────────────
     const useDiskStream = typeof window.showSaveFilePicker === 'function';
     const swSupported = 'serviceWorker' in navigator;
+    useIndexedDB = !useDiskStream && !swSupported;
 
     if (!useDiskStream && !swSupported) {
       console.warn("Advanced streaming not supported. Large files may cause Out of Memory errors.");
@@ -448,20 +598,24 @@ async function startWebRTC() {
           suggestedName: currentFile.name,
         });
         diskWritableStream = await diskFileHandle.createWritable();
+        useIndexedDB = false;
       } catch (pickerErr) {
-        console.warn("WebRTC Direct-to-disk picker cancelled, falling back to RAM Blob:", pickerErr);
+        console.warn("WebRTC Direct-to-disk picker cancelled, falling back to SW or IndexedDB:", pickerErr);
         diskWritableStream = null;
+        useIndexedDB = !swSupported;
       }
     }
 
     if (!diskWritableStream && swSupported) {
       swPipePort = await getSWPipe(currentFile);
+    } else if (!diskWritableStream && useIndexedDB) {
+      await clearIDB();
+      receivedChunks = [];
     }
 
     setState('downloading');
     startTime     = Date.now();
     receivedBytes = 0;
-    receivedChunks = [];
     updateProgress(0);
 
     await new Promise((resolve, reject) => {
@@ -475,7 +629,12 @@ async function startWebRTC() {
             } else if (swPipePort) {
               swPipePort.postMessage("EOF");
             } else {
-              triggerSave(new Blob(receivedChunks, { type: currentFile.mime }), currentFile.name);
+              let finalChunks = receivedChunks;
+              if (useIndexedDB) {
+                finalChunks = await getAllChunksIDB();
+                await clearIDB();
+              }
+              triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
             }
             resolve();
           }
@@ -488,6 +647,9 @@ async function startWebRTC() {
           await diskWritableStream.write(chunk);
         } else if (swPipePort) {
           swPipePort.postMessage(chunk);
+        } else if (useIndexedDB) {
+          // IndexedDB buffer
+          await storeChunkIDB(chunk);
         } else {
           // RAM buffer
           receivedChunks.push(chunk);
@@ -507,7 +669,7 @@ async function startWebRTC() {
       };
     });
 
-    let modeDesc = diskWritableStream ? 'WebRTC P2P (Direct Disk)' : (swPipePort ? 'WebRTC P2P (SW Pipe)' : 'WebRTC P2P (RAM Blob)');
+    let modeDesc = diskWritableStream ? 'WebRTC P2P (Direct Disk)' : (swPipePort ? 'WebRTC P2P (SW Pipe)' : (useIndexedDB ? 'WebRTC P2P (IndexedDB)' : 'WebRTC P2P (RAM Blob)'));
     showDone(currentFile.name, currentFile.size, modeDesc);
     pc.close();
   }
@@ -650,6 +812,7 @@ function showDone(name, size, mode) {
 }
 
 function showError(msg) {
+  if (useIndexedDB) clearIDB().catch(console.error);
   document.getElementById('error-msg').textContent = msg;
   setState('error');
 }
@@ -732,3 +895,15 @@ if (document.readyState === 'loading') {
 } else {
   init();
 }
+
+window.addEventListener('pagehide', () => {
+  if (useIndexedDB && idb) {
+    // Attempt best-effort synchronous-like clear
+    try {
+      const tx = idb.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).clear();
+    } catch (e) {
+      // Ignore errors on unload
+    }
+  }
+});
