@@ -515,11 +515,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 	if relClient != nil {
 		qrURL = fmt.Sprintf("%s/?s=%s", relayURL, relSessionID)
 		if session != nil {
-			qrURL += "&mode=webrtc&offer=" + session.CompressedOffer()
+			qrURL += "&mode=webrtc&sdp=" + session.CompressedOffer()
 		}
 		qrURL += "#k=" + relKeyStr
 	} else if session != nil {
-		qrURL = localURL + "?mode=webrtc&offer=" + session.CompressedOffer()
+		qrURL = localURL + "?mode=webrtc&sdp=" + session.CompressedOffer()
 	}
 	ui.PrintQR(qrURL)
 

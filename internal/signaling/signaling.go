@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -221,9 +222,36 @@ func (s *Session) Close() error { return s.pc.Close() }
 
 // ─── SDP compression helpers ──────────────────────────────────────────────────
 
+func getOutboundIP() net.IP {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP
+}
+
 func minifySDP(sdp string) string {
+	preferredIP := getOutboundIP()
+	preferredIPStr := ""
+	if preferredIP != nil {
+		preferredIPStr = preferredIP.String()
+	}
+
 	lines := strings.Split(sdp, "\r\n")
 	var out []string
+	
+	hasPreferred := false
+	if preferredIPStr != "" {
+		for _, line := range lines {
+			if strings.HasPrefix(line, "a=candidate") && strings.Contains(line, "typ host") && strings.Contains(line, " "+preferredIPStr+" ") {
+				hasPreferred = true
+				break
+			}
+		}
+	}
+
 	hasHostCandidate := false
 	for _, line := range lines {
 		// Remove unneeded verbosity
@@ -232,10 +260,17 @@ func minifySDP(sdp string) string {
 		}
 		// Minify candidate lines to remove redundant fields (raddr, rport, etc.)
 		if strings.HasPrefix(line, "a=candidate") {
-			// Keep only the first host candidate to save space in the QR code
 			if !strings.Contains(line, "typ host") {
 				continue
 			}
+			
+			if hasPreferred && preferredIPStr != "" {
+				if !strings.Contains(line, " "+preferredIPStr+" ") {
+					continue
+				}
+			}
+
+			// Keep only the first host candidate to save space in the QR code
 			if hasHostCandidate {
 				continue
 			}
