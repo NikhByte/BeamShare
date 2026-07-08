@@ -27,11 +27,19 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
-// STUNServers are the ICE servers used only for NAT traversal discovery.
-// No file data ever touches these servers.
-var STUNServers = []webrtc.ICEServer{
+// ICEServers are the ICE servers used for NAT traversal discovery and relay.
+var ICEServers = []webrtc.ICEServer{
 	{URLs: []string{"stun:stun.l.google.com:19302"}},
 	{URLs: []string{"stun:stun1.l.google.com:19302"}},
+	{
+		URLs: []string{
+			"turn:openrelay.metered.ca:80",
+			"turn:openrelay.metered.ca:443",
+			"turn:openrelay.metered.ca:443?transport=tcp",
+		},
+		Username:   "openrelayproject",
+		Credential: "openrelayproject",
+	},
 }
 
 // Session holds the state of one WebRTC sender session.
@@ -52,7 +60,7 @@ type Session struct {
 // NewSession creates a new WebRTC PeerConnection configured as the sender.
 func NewSession(iceServers []webrtc.ICEServer) (*Session, error) {
 	if len(iceServers) == 0 {
-		iceServers = STUNServers
+		iceServers = ICEServers
 	}
 	config := webrtc.Configuration{ICEServers: iceServers}
 	pc, err := webrtc.NewPeerConnection(config)
