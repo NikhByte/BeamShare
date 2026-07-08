@@ -51,14 +51,18 @@ type Session struct {
 	answerReady chan struct{}
 	candidates  []webrtc.ICECandidateInit
 	mu          sync.Mutex
+	iceServers  []webrtc.ICEServer
 
 	// OnOpen is called when the data channel is open and ready to send.
 	OnOpen func(dc *webrtc.DataChannel)
 }
 
 // NewSession creates a new WebRTC PeerConnection configured as the sender.
-func NewSession() (*Session, error) {
-	config := webrtc.Configuration{ICEServers: ICEServers}
+func NewSession(iceServers []webrtc.ICEServer) (*Session, error) {
+	if len(iceServers) == 0 {
+		iceServers = ICEServers
+	}
+	config := webrtc.Configuration{ICEServers: iceServers}
 	pc, err := webrtc.NewPeerConnection(config)
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)
@@ -67,6 +71,7 @@ func NewSession() (*Session, error) {
 	s := &Session{
 		pc:          pc,
 		answerReady: make(chan struct{}, 1),
+		iceServers:  iceServers,
 	}
 
 	// Collect trickle ICE candidates as they arrive.
@@ -146,7 +151,7 @@ func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"sdp":        s.rawOffer,
 			"type":       "offer",
-			"iceServers": ICEServers,
+			"iceServers": s.iceServers,
 		})
 	})
 
