@@ -80,6 +80,42 @@ function setMode(mode, label) {
   if (foot) foot.textContent = label;
 }
 
+
+const RAM_WARNING_THRESHOLD = 500 * 1024 * 1024; // 500 MB
+
+function checkRamWarning(size) {
+  return new Promise((resolve) => {
+    const useDiskStream = typeof window.showSaveFilePicker === 'function';
+    if (useDiskStream || size <= RAM_WARNING_THRESHOLD || size === -1) {
+      resolve(true);
+      return;
+    }
+    
+    const modal = document.getElementById('ram-warning-modal');
+    if (!modal) {
+      resolve(true);
+      return;
+    }
+    
+    modal.classList.remove('hidden');
+    
+    const abortBtn = document.getElementById('btn-ram-abort');
+    const proceedBtn = document.getElementById('btn-ram-proceed');
+    
+    const cleanup = () => {
+      modal.classList.add('hidden');
+      abortBtn.removeEventListener('click', onAbort);
+      proceedBtn.removeEventListener('click', onProceed);
+    };
+    
+    const onAbort = () => { cleanup(); resolve(false); };
+    const onProceed = () => { cleanup(); resolve(true); };
+    
+    abortBtn.addEventListener('click', onAbort);
+    proceedBtn.addEventListener('click', onProceed);
+  });
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 function init() {
   setState('loading');
@@ -191,6 +227,11 @@ async function fetchMetaAndShowReady() {
 
 async function startHTTPDownload() {
   if (!currentFile) return;
+
+  const proceed = await checkRamWarning(currentFile.size);
+  if (!proceed) {
+    return;
+  }
 
   startTime     = Date.now();
   receivedBytes = 0;
@@ -355,6 +396,14 @@ async function startWebRTC() {
   // 7. Resolve file metadata.
   currentFile = await metaPromise;
   totalBytes  = currentFile.size;
+
+  const proceed = await checkRamWarning(currentFile.size);
+  if (!proceed) {
+    if (webrtcDataChannel) webrtcDataChannel.close();
+    pc.close();
+    showError('Transfer aborted by user. File too large for memory.');
+    return;
+  }
 
   if (currentFile.size === -1) {
     // ── Live log stream over WebRTC data channel ─────────────────────────────
