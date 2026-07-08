@@ -80,8 +80,42 @@ function setMode(mode, label) {
   if (foot) foot.textContent = label;
 }
 
+// ── Service Worker Pipe ───────────────────────────────────────────────────────
+async function getSWPipe(fileMeta) {
+  if (!('serviceWorker' in navigator)) return null;
+  
+  let reg = await navigator.serviceWorker.ready;
+  let sw = reg.active || navigator.serviceWorker.controller;
+  if (!sw) return null;
+
+  const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
+  const channel = new MessageChannel();
+  const port = channel.port1;
+  
+  sw.postMessage({
+    type: 'INIT_PORT',
+    url: swUrl,
+    filename: fileMeta.name,
+    size: fileMeta.size,
+    mime: fileMeta.mime
+  }, [channel.port2]);
+
+  const iframe = document.createElement('iframe');
+  iframe.hidden = true;
+  iframe.src = swUrl;
+  document.body.appendChild(iframe);
+  
+  return port;
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 function init() {
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(err => {
+      console.warn('Service Worker registration failed:', err);
+    });
+  }
+
   setState('loading');
   setMode('connecting', 'Connecting…');
 
@@ -198,7 +232,14 @@ async function startHTTPDownload() {
 
   // Try to use FileSystem API for streaming to disk if supported
   const useDiskStream = typeof window.showSaveFilePicker === 'function';
+  const swSupported = 'serviceWorker' in navigator;
 
+  if (!useDiskStream && !swSupported) {
+    console.warn("Advanced streaming not supported. Large files may cause Out of Memory errors.");
+    alert("Warning: Streaming direct-to-disk is not supported in this browser. Large files may fail due to RAM limits.");
+  }
+
+  let swPipePort = null;
   if (useDiskStream) {
     try {
       diskFileHandle = await window.showSaveFilePicker({
@@ -206,9 +247,13 @@ async function startHTTPDownload() {
       });
       diskWritableStream = await diskFileHandle.createWritable();
     } catch (pickerErr) {
-      console.warn("Direct-to-disk picker cancelled/failed, falling back to RAM Blob:", pickerErr);
+      console.warn("Direct-to-disk picker cancelled/failed, falling back to Service Worker Pipe:", pickerErr);
       diskWritableStream = null;
     }
+  }
+
+  if (!diskWritableStream && swSupported) {
+    swPipePort = await getSWPipe(currentFile);
   }
 
   setState('downloading');
@@ -228,6 +273,8 @@ async function startHTTPDownload() {
 
       if (diskWritableStream) {
         await diskWritableStream.write(value);
+      } else if (swPipePort) {
+        swPipePort.postMessage(value);
       } else {
         receivedChunks.push(value);
       }
@@ -243,11 +290,14 @@ async function startHTTPDownload() {
 
     if (diskWritableStream) {
       await diskWritableStream.close();
+    } else if (swPipePort) {
+      swPipePort.postMessage('EOF');
     } else {
       triggerSave(new Blob(receivedChunks, { type: currentFile.mime }), currentFile.name);
     }
 
-    showDone(currentFile.name, currentFile.size, diskWritableStream ? 'LAN HTTP (Direct Disk)' : 'LAN HTTP (RAM Blob)');
+    let modeDesc = diskWritableStream ? 'LAN HTTP (Direct Disk)' : (swPipePort ? 'LAN HTTP (SW Pipe)' : 'LAN HTTP (RAM Blob)');
+    showDone(currentFile.name, currentFile.size, modeDesc);
 
   } catch (err) {
     showError(`Download failed: ${err.message}`);
@@ -384,7 +434,14 @@ async function startWebRTC() {
   } else {
     // ── Direct-to-Disk File transfer over WebRTC data channel ──────────────────
     const useDiskStream = typeof window.showSaveFilePicker === 'function';
+    const swSupported = 'serviceWorker' in navigator;
 
+    if (!useDiskStream && !swSupported) {
+      console.warn("Advanced streaming not supported. Large files may cause Out of Memory errors.");
+      alert("Warning: Streaming direct-to-disk is not supported in this browser. Large files may fail due to RAM limits.");
+    }
+
+    let swPipePort = null;
     if (useDiskStream) {
       try {
         diskFileHandle = await window.showSaveFilePicker({
@@ -395,6 +452,10 @@ async function startWebRTC() {
         console.warn("WebRTC Direct-to-disk picker cancelled, falling back to RAM Blob:", pickerErr);
         diskWritableStream = null;
       }
+    }
+
+    if (!diskWritableStream && swSupported) {
+      swPipePort = await getSWPipe(currentFile);
     }
 
     setState('downloading');
@@ -411,6 +472,8 @@ async function startWebRTC() {
           if (e.data === "EOF") {
             if (diskWritableStream) {
               await diskWritableStream.close();
+            } else if (swPipePort) {
+              swPipePort.postMessage("EOF");
             } else {
               triggerSave(new Blob(receivedChunks, { type: currentFile.mime }), currentFile.name);
             }
@@ -423,6 +486,8 @@ async function startWebRTC() {
         if (diskWritableStream) {
           // Direct disk write
           await diskWritableStream.write(chunk);
+        } else if (swPipePort) {
+          swPipePort.postMessage(chunk);
         } else {
           // RAM buffer
           receivedChunks.push(chunk);
@@ -442,7 +507,8 @@ async function startWebRTC() {
       };
     });
 
-    showDone(currentFile.name, currentFile.size, diskWritableStream ? 'WebRTC P2P (Direct Disk)' : 'WebRTC P2P (RAM Blob)');
+    let modeDesc = diskWritableStream ? 'WebRTC P2P (Direct Disk)' : (swPipePort ? 'WebRTC P2P (SW Pipe)' : 'WebRTC P2P (RAM Blob)');
+    showDone(currentFile.name, currentFile.size, modeDesc);
     pc.close();
   }
 }
