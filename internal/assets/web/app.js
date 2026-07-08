@@ -33,6 +33,169 @@ let receivedBytes    = 0;
 let totalBytes       = 0;
 let receivedChunks   = [];
 let isLivePipeMode   = false;
+
+
+class VirtualLogViewer {
+  constructor(containerQuery, maxLines = 100000) {
+    this.container = document.querySelector(containerQuery);
+    if (!this.container) return;
+    this.maxLines = maxLines;
+    this.lines = [];
+    this.buffer = "";
+    
+    this.spacer = document.createElement('div');
+    this.spacer.style.width = '1px';
+    
+    this.content = document.createElement('div');
+    this.content.style.position = 'absolute';
+    this.content.style.top = '0';
+    this.content.style.left = '0';
+    this.content.style.width = '100%';
+    this.content.style.height = '100%';
+    
+    this.container.innerHTML = '';
+    this.container.appendChild(this.spacer);
+    this.container.appendChild(this.content);
+    
+    const testLine = document.createElement('div');
+    testLine.textContent = 'A';
+    testLine.className = 'log-line';
+    testLine.style.fontFamily = "'Geist Mono', monospace";
+    testLine.style.fontSize = "0.8125rem";
+    testLine.style.lineHeight = "1.5";
+    this.content.appendChild(testLine);
+    this.lineHeight = testLine.getBoundingClientRect().height || 19.5;
+    this.content.removeChild(testLine);
+    
+    this.visibleNodes = new Map();
+    this.isAutoScroll = true;
+    
+    this.onScroll = () => {
+      const maxScroll = this.container.scrollHeight - this.container.clientHeight;
+      this.isAutoScroll = maxScroll - this.container.scrollTop < 10;
+      this.render();
+    };
+    
+    this.container.addEventListener('scroll', this.onScroll, { passive: true });
+    
+    if (window.ResizeObserver) {
+      this.ro = new ResizeObserver(() => this.render());
+      this.ro.observe(this.container);
+    }
+  }
+
+  append(text) {
+    this.buffer += text;
+    let newlineIdx;
+    let added = false;
+    
+    while ((newlineIdx = this.buffer.indexOf('\n')) !== -1) {
+      this.lines.push(this.buffer.substring(0, newlineIdx));
+      this.buffer = this.buffer.substring(newlineIdx + 1);
+      added = true;
+    }
+    
+    if (this.lines.length > this.maxLines) {
+      const overflow = this.lines.length - this.maxLines;
+      this.lines.splice(0, overflow);
+      const newVisibleNodes = new Map();
+      for (const [key, node] of this.visibleNodes.entries()) {
+        const newKey = key - overflow;
+        if (newKey >= 0) {
+          node.style.top = `${newKey * this.lineHeight}px`;
+          newVisibleNodes.set(newKey, node);
+        } else {
+          node.remove();
+        }
+      }
+      this.visibleNodes = newVisibleNodes;
+    }
+    
+    if (added) {
+      this.spacer.style.height = `${(this.lines.length * this.lineHeight) + 40}px`;
+      if (this.isAutoScroll) {
+        this.container.scrollTop = this.container.scrollHeight;
+      }
+      this.render();
+    }
+  }
+
+  render() {
+    const scrollTop = this.container.scrollTop;
+    const viewportHeight = this.container.clientHeight || 320;
+    
+    const startIndex = Math.max(0, Math.floor(scrollTop / this.lineHeight) - 5);
+    const endIndex = Math.min(this.lines.length - 1, startIndex + Math.ceil(viewportHeight / this.lineHeight) + 10);
+    
+    const sel = window.getSelection();
+    const hasSelection = sel && sel.rangeCount > 0 && !sel.isCollapsed;
+
+    // Remove nodes that are out of bounds and NOT selected
+    for (const [index, node] of this.visibleNodes.entries()) {
+      if (index < startIndex || index > endIndex) {
+        if (hasSelection && sel.containsNode(node, true)) {
+          continue; // keep for selection integrity
+        }
+        node.remove();
+        this.visibleNodes.delete(index);
+      }
+    }
+    
+    // Add missing visible nodes in DOM order
+    let currentChild = this.content.firstChild;
+    // Collect all indices we need to ensure are present (both selected out-of-bounds and currently visible in-bounds)
+    const neededIndices = Array.from(this.visibleNodes.keys());
+    for (let i = startIndex; i <= endIndex; i++) {
+      if (!neededIndices.includes(i)) neededIndices.push(i);
+    }
+    neededIndices.sort((a, b) => a - b);
+    
+    for (const i of neededIndices) {
+      let node = this.visibleNodes.get(i);
+      if (!node) {
+        node = document.createElement('div');
+        node.textContent = this.lines[i] === '' ? ' ' : this.lines[i];
+        node.className = 'log-line';
+        node.style.fontFamily = "'Geist Mono', monospace";
+        node.style.fontSize = "0.8125rem";
+        node.style.lineHeight = "1.5";
+        node.style.color = "#a7f3d0";
+        node.style.position = "absolute";
+        node.style.top = `${i * this.lineHeight}px`;
+        node.style.left = "1.25rem";
+        node.style.right = "1.25rem";
+        node.style.whiteSpace = "pre-wrap";
+        node.style.wordBreak = "break-all";
+        
+        this.visibleNodes.set(i, node);
+      }
+      
+      // Ensure DOM order
+      if (node.parentNode !== this.content) {
+        if (currentChild) {
+          this.content.insertBefore(node, currentChild);
+        } else {
+          this.content.appendChild(node);
+        }
+      }
+      currentChild = node.nextSibling;
+    }
+  }
+
+  clear() {
+    this.lines = [];
+    this.buffer = "";
+    this.spacer.style.height = '40px';
+    this.content.innerHTML = '';
+    this.visibleNodes.clear();
+  }
+
+  getText() {
+    return this.lines.join('\n') + (this.buffer ? '\n' + this.buffer : '');
+  }
+}
+
+let virtualViewer = null;
 let liveBacklogText  = "";
 
 let initialOffset    = 0;
@@ -284,9 +447,8 @@ function init() {
 
   // Live pipe control listeners
   document.getElementById('btn-terminal-copy')?.addEventListener('click', () => {
-    const pre = document.getElementById('terminal-pre');
-    if (pre) {
-      navigator.clipboard.writeText(pre.innerText);
+    if (virtualViewer) {
+      navigator.clipboard.writeText(virtualViewer.getText());
       const btn = document.getElementById('btn-terminal-copy');
       const old = btn.textContent;
       btn.textContent = "Copied!";
@@ -300,9 +462,8 @@ function init() {
       const blob = new Blob(chunks, { type: 'text/plain;charset=utf-8' });
       triggerSave(blob, currentFile ? currentFile.name : 'stream.log');
     } else {
-      const pre = document.getElementById('terminal-pre');
-      if (pre) {
-        const blob = new Blob([pre.innerText], { type: 'text/plain;charset=utf-8' });
+      if (virtualViewer) {
+        const blob = new Blob([virtualViewer.getText()], { type: 'text/plain;charset=utf-8' });
         triggerSave(blob, currentFile ? currentFile.name : 'stream.log');
       }
     }
@@ -325,8 +486,19 @@ function resetState() {
   useIndexedDB = false;
   if (idb) clearIDB().catch(console.error);
   document.getElementById('done-share-container')?.classList.add('hidden');
-  const pre = document.getElementById('terminal-pre');
-  if (pre) pre.innerHTML = '<span class="term-dim">// Waiting for stream input...</span>';
+  
+  if (!virtualViewer) {
+    virtualViewer = new VirtualLogViewer('.terminal-body', 100000);
+  }
+  if (virtualViewer) {
+    virtualViewer.clear();
+    virtualViewer.append("// Waiting for stream input...\n");
+    const node = virtualViewer.visibleNodes.get(0);
+    if (node) {
+      node.className = "log-line term-dim";
+      node.style.color = "var(--zinc-600)";
+    }
+  }
 }
 
 async function bootstrap() {
@@ -534,8 +706,7 @@ async function startHTTPDownload() {
 async function startHTTPSSE() {
   setState('livepipe');
   const source = new EventSource(apiPath('/api/live/stream'));
-  const pre = document.getElementById('terminal-pre');
-  if (pre) pre.textContent = "";
+  if (virtualViewer) virtualViewer.clear();
 
   const useDiskStream = typeof window.showSaveFilePicker === 'function';
   useIndexedDB = !useDiskStream;
@@ -715,8 +886,7 @@ async function startWebRTC() {
     isLivePipeMode = true;
     setState('livepipe');
     setMode('webrtc', 'WebRTC Live Log');
-    const pre = document.getElementById('terminal-pre');
-    if (pre) pre.textContent = "";
+    if (virtualViewer) virtualViewer.clear();
 
     const useDiskStream = typeof window.showSaveFilePicker === 'function';
     useIndexedDB = !useDiskStream;
@@ -937,17 +1107,8 @@ function triggerSave(blob, name) {
 }
 
 function appendTerminalText(text) {
-  const pre = document.getElementById('terminal-pre');
-  if (!pre) return;
-  
-  pre.appendChild(document.createTextNode(text));
+  if (virtualViewer) virtualViewer.append(text);
   receivedBytes += text.length;
-
-  // Auto-scroll terminal body
-  const body = document.querySelector('.terminal-body');
-  if (body) {
-    body.scrollTop = body.scrollHeight;
-  }
 }
 
 function showDone(name, size, mode) {
