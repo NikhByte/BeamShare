@@ -17,9 +17,17 @@ var styleCSS string
 //go:embed web/app.js
 var appJS string
 
+//go:embed web/sw.js
+var swJS string
+
 // IndexHTML returns the full content of the receiver web page.
 func IndexHTML() string {
 	return indexHTML
+}
+
+// ServiceWorkerJS returns the content of the service worker file.
+func ServiceWorkerJS() string {
+	return swJS
 }
 
 // StaticHandler returns an http.Handler that serves the embedded CSS and JS.

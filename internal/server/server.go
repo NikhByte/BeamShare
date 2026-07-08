@@ -81,6 +81,7 @@ func New(filePath string) (*Server, error) {
 
 	// Core routes.
 	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/sw.js", s.handleServiceWorker)
 	mux.HandleFunc("/api/meta", s.handleMeta)
 	mux.HandleFunc("/api/download", s.handleDownload)
 	mux.HandleFunc("/api/upload", s.handleUpload)
@@ -171,6 +172,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(assets.IndexHTML()))
+}
+
+func (s *Server) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Service-Worker-Allowed", "/")
+	w.Write([]byte(assets.ServiceWorkerJS()))
 }
 
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {

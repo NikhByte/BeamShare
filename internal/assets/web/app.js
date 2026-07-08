@@ -137,13 +137,45 @@ function setMode(mode, label) {
   if (foot) foot.textContent = label;
 }
 
+// ── Service Worker Pipe ───────────────────────────────────────────────────────
+async function getSWPipe(fileMeta) {
+  if (!('serviceWorker' in navigator)) return null;
+  
+  let reg = await navigator.serviceWorker.ready;
+  let sw = reg.active || navigator.serviceWorker.controller;
+  if (!sw) return null;
+
+  const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
+  const channel = new MessageChannel();
+  const port = channel.port1;
+  
+  sw.postMessage({
+    type: 'INIT_PORT',
+    url: swUrl,
+    filename: fileMeta.name,
+    size: fileMeta.size,
+    mime: fileMeta.mime
+  }, [channel.port2]);
+
+  const iframe = document.createElement('iframe');
+  iframe.hidden = true;
+  iframe.src = swUrl;
+  document.body.appendChild(iframe);
+  
+  return port;
+}
 
 const RAM_WARNING_THRESHOLD = 500 * 1024 * 1024; // 500 MB
 
 function checkRamWarning(size) {
   return new Promise((resolve) => {
     const useDiskStream = typeof window.showSaveFilePicker === 'function';
-    if (useDiskStream || size <= RAM_WARNING_THRESHOLD || size === -1) {
+    const swSupported = 'serviceWorker' in navigator;
+    // We shouldn't warn if disk stream, service worker stream, or IndexedDB are used.
+    // Wait, IndexedDB buffering is always used as a fallback now. So maybe we don't need warning?
+    // Actually, IndexedDB is used, but we'll stick to the original logic or improve it:
+    // If we have swSupported, we don't need to warn.
+    if (useDiskStream || swSupported || size <= RAM_WARNING_THRESHOLD || size === -1) {
       resolve(true);
       return;
     }
@@ -175,6 +207,12 @@ function checkRamWarning(size) {
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 function init() {
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(err => {
+      console.warn('Service Worker registration failed:', err);
+    });
+  }
+
   setState('loading');
   setMode('connecting', 'Connecting…');
 
@@ -304,8 +342,15 @@ async function startHTTPDownload() {
 
   // Try to use FileSystem API for streaming to disk if supported
   const useDiskStream = typeof window.showSaveFilePicker === 'function';
-  useIndexedDB = !useDiskStream;
+  const swSupported = 'serviceWorker' in navigator;
+  useIndexedDB = !useDiskStream && !swSupported;
 
+  if (!useDiskStream && !swSupported) {
+    console.warn("Advanced streaming not supported. Large files may cause Out of Memory errors.");
+    alert("Warning: Streaming direct-to-disk is not supported in this browser. Large files may fail due to RAM limits.");
+  }
+
+  let swPipePort = null;
   if (useDiskStream) {
     try {
       diskFileHandle = await window.showSaveFilePicker({
@@ -314,13 +359,15 @@ async function startHTTPDownload() {
       diskWritableStream = await diskFileHandle.createWritable();
       useIndexedDB = false;
     } catch (pickerErr) {
-      console.warn("Direct-to-disk picker cancelled/failed, falling back to IndexedDB:", pickerErr);
+      console.warn("Direct-to-disk picker cancelled/failed, falling back to SW or IndexedDB:", pickerErr);
       diskWritableStream = null;
-      useIndexedDB = true;
+      useIndexedDB = !swSupported;
     }
   }
 
-  if (useIndexedDB) {
+  if (!diskWritableStream && swSupported) {
+    swPipePort = await getSWPipe(currentFile);
+  } else if (!diskWritableStream && useIndexedDB) {
     await clearIDB();
     receivedChunks = [];
   }
@@ -342,6 +389,8 @@ async function startHTTPDownload() {
 
       if (diskWritableStream) {
         await diskWritableStream.write(value);
+      } else if (swPipePort) {
+        swPipePort.postMessage(value);
       } else if (useIndexedDB) {
         await storeChunkIDB(value);
       } else {
@@ -359,6 +408,8 @@ async function startHTTPDownload() {
 
     if (diskWritableStream) {
       await diskWritableStream.close();
+    } else if (swPipePort) {
+      swPipePort.postMessage('EOF');
     } else {
       let finalChunks = receivedChunks;
       if (useIndexedDB) {
@@ -368,7 +419,8 @@ async function startHTTPDownload() {
       triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
     }
 
-    showDone(currentFile.name, currentFile.size, diskWritableStream ? 'LAN HTTP (Direct Disk)' : 'LAN HTTP (IndexedDB)');
+    let modeDesc = diskWritableStream ? 'LAN HTTP (Direct Disk)' : (swPipePort ? 'LAN HTTP (SW Pipe)' : (useIndexedDB ? 'LAN HTTP (IndexedDB)' : 'LAN HTTP (RAM Blob)'));
+    showDone(currentFile.name, currentFile.size, modeDesc);
 
   } catch (err) {
     showError(`Download failed: ${err.message}`);
@@ -531,8 +583,15 @@ async function startWebRTC() {
   } else {
     // ── Direct-to-Disk File transfer over WebRTC data channel ──────────────────
     const useDiskStream = typeof window.showSaveFilePicker === 'function';
-    useIndexedDB = !useDiskStream;
+    const swSupported = 'serviceWorker' in navigator;
+    useIndexedDB = !useDiskStream && !swSupported;
 
+    if (!useDiskStream && !swSupported) {
+      console.warn("Advanced streaming not supported. Large files may cause Out of Memory errors.");
+      alert("Warning: Streaming direct-to-disk is not supported in this browser. Large files may fail due to RAM limits.");
+    }
+
+    let swPipePort = null;
     if (useDiskStream) {
       try {
         diskFileHandle = await window.showSaveFilePicker({
@@ -541,13 +600,15 @@ async function startWebRTC() {
         diskWritableStream = await diskFileHandle.createWritable();
         useIndexedDB = false;
       } catch (pickerErr) {
-        console.warn("WebRTC Direct-to-disk picker cancelled, falling back to IndexedDB:", pickerErr);
+        console.warn("WebRTC Direct-to-disk picker cancelled, falling back to SW or IndexedDB:", pickerErr);
         diskWritableStream = null;
-        useIndexedDB = true;
+        useIndexedDB = !swSupported;
       }
     }
 
-    if (useIndexedDB) {
+    if (!diskWritableStream && swSupported) {
+      swPipePort = await getSWPipe(currentFile);
+    } else if (!diskWritableStream && useIndexedDB) {
       await clearIDB();
       receivedChunks = [];
     }
@@ -565,6 +626,8 @@ async function startWebRTC() {
           if (e.data === "EOF") {
             if (diskWritableStream) {
               await diskWritableStream.close();
+            } else if (swPipePort) {
+              swPipePort.postMessage("EOF");
             } else {
               let finalChunks = receivedChunks;
               if (useIndexedDB) {
@@ -582,6 +645,8 @@ async function startWebRTC() {
         if (diskWritableStream) {
           // Direct disk write
           await diskWritableStream.write(chunk);
+        } else if (swPipePort) {
+          swPipePort.postMessage(chunk);
         } else if (useIndexedDB) {
           // IndexedDB buffer
           await storeChunkIDB(chunk);
@@ -604,7 +669,8 @@ async function startWebRTC() {
       };
     });
 
-    showDone(currentFile.name, currentFile.size, diskWritableStream ? 'WebRTC P2P (Direct Disk)' : 'WebRTC P2P (IndexedDB)');
+    let modeDesc = diskWritableStream ? 'WebRTC P2P (Direct Disk)' : (swPipePort ? 'WebRTC P2P (SW Pipe)' : (useIndexedDB ? 'WebRTC P2P (IndexedDB)' : 'WebRTC P2P (RAM Blob)'));
+    showDone(currentFile.name, currentFile.size, modeDesc);
     pc.close();
   }
 }
