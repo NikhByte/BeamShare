@@ -332,6 +332,30 @@ function resetState() {
 async function bootstrap() {
   const params = new URLSearchParams(window.location.search);
   const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
+  const localURL = params.get('local');
+
+  if (localURL) {
+    try {
+      setLoadingSub('Attempting direct local connection…');
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1500);
+      
+      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      
+      if (res.ok) {
+        console.log("Local connection successful, redirecting...");
+        const newUrl = new URL(localURL);
+        if (params.get('mode')) newUrl.searchParams.set('mode', params.get('mode'));
+        if (params.get('sdp')) newUrl.searchParams.set('sdp', params.get('sdp'));
+        newUrl.hash = window.location.hash;
+        window.location.replace(newUrl.href);
+        return;
+      }
+    } catch (e) {
+      console.warn("Direct local connection failed, falling back to relay:", e);
+    }
+  }
 
   if (isWebRTCMode && typeof RTCPeerConnection !== 'undefined') {
     setLoadingSub('Connecting WebRTC signaling tunnel…');

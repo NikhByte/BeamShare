@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -179,6 +180,31 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 		fileName = fileInfo.Name()
 		fileSize = fileInfo.Size()
 		filePath = absPath
+	}
+
+	// ── Network Probe ─────────────────────────────────────────────────────────
+	if relayURL == "" {
+		fmt.Printf("  %s\n", dimStr("Probing network environment..."))
+		stunServer := "stun.l.google.com:19302"
+		for _, srv := range iceServers {
+			if len(srv.URLs) > 0 {
+				for _, u := range srv.URLs {
+					if strings.HasPrefix(u, "stun:") {
+						stunServer = strings.TrimPrefix(u, "stun:")
+						break
+					}
+				}
+			}
+		}
+
+		// Check if we are behind a NAT
+		isBehindNAT := signaling.CheckNAT(stunServer, server.GetLocalIP())
+		if isBehindNAT {
+			relayURL = "https://relay.magicbeam.app"
+			fmt.Printf("  %s\n", dimStr("NAT detected: automatic relay enabled"))
+		} else {
+			fmt.Printf("  %s\n", dimStr("Local network: direct peer-to-peer available"))
+		}
 	}
 
 	// ── Banner + file metadata ────────────────────────────────────────────────
@@ -507,13 +533,14 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 	ui.PrintDiscovery(localURL, mdnsName)
 
 	if relClient != nil {
-		fmt.Printf("    %s/?s=%s#k=%s    (global relay)\n", relayURL, relSessionID, relKeyStr)
+		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s#k=%s", relayURL, relSessionID, url.QueryEscape(localURL), relKeyStr)
+		fmt.Printf("    %s    (global relay)\n", relayDisplayURL)
 	}
 
 	// ── Print QR ─────────────────────────────────────────────────────────────
 	qrURL := localURL
 	if relClient != nil {
-		qrURL = fmt.Sprintf("%s/?s=%s", relayURL, relSessionID)
+		qrURL = fmt.Sprintf("%s/?s=%s&local=%s", relayURL, relSessionID, url.QueryEscape(localURL))
 		if session != nil {
 			qrURL += "&mode=webrtc&sdp=" + session.CompressedOffer()
 		}

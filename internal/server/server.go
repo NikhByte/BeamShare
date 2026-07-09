@@ -168,7 +168,7 @@ func (s *Server) Mux() *http.ServeMux { return s.mux }
 
 // LocalURL returns the http://lan-ip:port URL for this session.
 func (s *Server) LocalURL() string {
-	return fmt.Sprintf("http://%s:%d", localIP(), s.port)
+	return fmt.Sprintf("http://%s:%d", GetLocalIP(), s.port)
 }
 
 // Port returns the bound port.
@@ -346,7 +346,7 @@ func findFreePort() (int, error) {
 	return port, nil
 }
 
-func localIP() string {
+func GetLocalIP() string {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
 		return "127.0.0.1"

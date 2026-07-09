@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pion/stun"
 	"github.com/pion/webrtc/v3"
 )
 
@@ -219,6 +220,40 @@ func (s *Session) DataChannel() *webrtc.DataChannel { return s.dc }
 
 // Close shuts down the peer connection.
 func (s *Session) Close() error { return s.pc.Close() }
+
+// CheckNAT returns true if the host is behind a NAT, i.e., public IP != local IP.
+// It queries the provided STUN URL and times out after 500ms.
+func CheckNAT(stunURL string, localIP string) bool {
+	c, err := stun.Dial("udp", stunURL)
+	if err != nil {
+		return true // assume NAT on error
+	}
+	defer c.Close()
+
+	msg := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+	ipCh := make(chan string, 1)
+
+	err = c.Start(msg, func(res stun.Event) {
+		if res.Error != nil {
+			return
+		}
+		var xorAddr stun.XORMappedAddress
+		if err := xorAddr.GetFrom(res.Message); err != nil {
+			return
+		}
+		ipCh <- xorAddr.IP.String()
+	})
+	if err != nil {
+		return true // assume NAT on error
+	}
+
+	select {
+	case publicIP := <-ipCh:
+		return publicIP != localIP
+	case <-time.After(500 * time.Millisecond):
+		return true // assume NAT on timeout
+	}
+}
 
 // ─── SDP compression helpers ──────────────────────────────────────────────────
 
