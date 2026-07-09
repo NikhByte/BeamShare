@@ -76,6 +76,7 @@ let diskFileHandle     = null;
 let webrtcDataChannel  = null;
 let currentShareURL    = "";
 let useIndexedDB       = false;
+let useOPFS            = false;
 
 // ── IndexedDB Buffering ────────────────────────────────────────────────────────
 const IDB_NAME = 'GazeTransferDB';
@@ -212,12 +213,13 @@ const RAM_WARNING_THRESHOLD = 500 * 1024 * 1024; // 500 MB
 function checkRamWarning(size) {
   return new Promise((resolve) => {
     const useDiskStream = typeof window.showSaveFilePicker === 'function';
+    const opfsSupported = !!(navigator.storage && navigator.storage.getDirectory);
     const swSupported = 'serviceWorker' in navigator;
-    // We shouldn't warn if disk stream, service worker stream, or IndexedDB are used.
+    // We shouldn't warn if disk stream, OPFS stream, service worker stream, or IndexedDB are used.
     // Wait, IndexedDB buffering is always used as a fallback now. So maybe we don't need warning?
     // Actually, IndexedDB is used, but we'll stick to the original logic or improve it:
-    // If we have swSupported, we don't need to warn.
-    if (useDiskStream || swSupported || size <= RAM_WARNING_THRESHOLD || size === -1) {
+    // If we have swSupported or opfsSupported, we don't need to warn.
+    if (useDiskStream || opfsSupported || swSupported || size <= RAM_WARNING_THRESHOLD || size === -1) {
       resolve(true);
       return;
     }
@@ -323,6 +325,8 @@ function resetState() {
   webrtcDataChannel = null;
   currentShareURL = "";
   useIndexedDB = false;
+  useOPFS = false;
+  navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
   if (idb) clearIDB().catch(console.error);
   document.getElementById('done-share-container')?.classList.add('hidden');
   const pre = document.getElementById('terminal-pre');
@@ -409,10 +413,11 @@ async function startHTTPDownload() {
 
   // Try to use FileSystem API for streaming to disk if supported
   const useDiskStream = typeof window.showSaveFilePicker === 'function';
+  const opfsSupported = !!(navigator.storage && navigator.storage.getDirectory);
   const swSupported = 'serviceWorker' in navigator;
-  useIndexedDB = !useDiskStream && !swSupported;
+  useIndexedDB = !useDiskStream && !opfsSupported && !swSupported;
 
-  if (!useDiskStream && !swSupported) {
+  if (!useDiskStream && !opfsSupported && !swSupported) {
     console.warn("Advanced streaming not supported. Large files may cause Out of Memory errors.");
     alert("Warning: Streaming direct-to-disk is not supported in this browser. Large files may fail due to RAM limits.");
   }
@@ -426,15 +431,40 @@ async function startHTTPDownload() {
       diskWritableStream = await diskFileHandle.createWritable();
       useIndexedDB = false;
     } catch (pickerErr) {
-      console.warn("Direct-to-disk picker cancelled/failed, falling back to SW or IndexedDB:", pickerErr);
+      console.warn("Direct-to-disk picker cancelled/failed, falling back to OPFS, SW, or IndexedDB:", pickerErr);
       diskWritableStream = null;
-      useIndexedDB = !swSupported;
     }
   }
 
-  if (!diskWritableStream && swSupported) {
+  if (!diskWritableStream && opfsSupported) {
+    try {
+      const root = await navigator.storage.getDirectory();
+      try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
+      
+      const estimate = await navigator.storage.estimate();
+      if (estimate && estimate.quota && currentFile.size > (estimate.quota - estimate.usage)) {
+         throw new Error("Device disk is full");
+      }
+      
+      diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
+      diskWritableStream = await diskFileHandle.createWritable();
+      useOPFS = true;
+      useIndexedDB = false;
+    } catch (err) {
+      console.error("OPFS init failed:", err);
+      if (err.message === "Device disk is full") {
+         showError("Not enough disk space for transfer.");
+         return;
+      }
+      diskWritableStream = null;
+      useOPFS = false;
+    }
+  }
+
+  if (!diskWritableStream && swSupported && !useOPFS) {
     swPipePort = await getSWPipe(currentFile);
-  } else if (!diskWritableStream && useIndexedDB) {
+  } else if (!diskWritableStream && (useIndexedDB || !swSupported)) {
+    useIndexedDB = true;
     if (initialOffset === 0) {
       await clearIDB();
     }
@@ -535,6 +565,10 @@ async function startHTTPDownload() {
 
     if (diskWritableStream) {
       await diskWritableStream.close();
+      if (useOPFS) {
+        const file = await diskFileHandle.getFile();
+        triggerSave(file, currentFile.name);
+      }
     } else if (swPipePort) {
       swPipePort.postMessage('EOF');
     } else {
@@ -546,11 +580,15 @@ async function startHTTPDownload() {
       triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
     }
 
-    let modeDesc = diskWritableStream ? 'LAN HTTP (Direct Disk)' : (swPipePort ? 'LAN HTTP (SW Pipe)' : (useIndexedDB ? 'LAN HTTP (IndexedDB)' : 'LAN HTTP (RAM Blob)'));
+    let modeDesc = diskWritableStream ? (useOPFS ? 'LAN HTTP (OPFS)' : 'LAN HTTP (Direct Disk)') : (swPipePort ? 'LAN HTTP (SW Pipe)' : (useIndexedDB ? 'LAN HTTP (IndexedDB)' : 'LAN HTTP (RAM Blob)'));
     showDone(currentFile.name, currentFile.size, modeDesc);
 
   } catch (err) {
-    showError(`Download failed: ${err.message}`);
+    if (err.name === 'QuotaExceededError' || err.message.includes('Quota') || (err.message && err.message.includes('disk is full'))) {
+      showError("Transfer failed: Device disk is full.");
+    } else {
+      showError(`Download failed: ${err.message}`);
+    }
   }
 }
 
@@ -753,10 +791,11 @@ async function startWebRTC() {
   } else {
     // ── Direct-to-Disk File transfer over WebRTC data channel ──────────────────
     const useDiskStream = typeof window.showSaveFilePicker === 'function';
+    const opfsSupported = !!(navigator.storage && navigator.storage.getDirectory);
     const swSupported = 'serviceWorker' in navigator;
-    useIndexedDB = !useDiskStream && !swSupported;
+    useIndexedDB = !useDiskStream && !opfsSupported && !swSupported;
 
-    if (!useDiskStream && !swSupported) {
+    if (!useDiskStream && !opfsSupported && !swSupported) {
       console.warn("Advanced streaming not supported. Large files may cause Out of Memory errors.");
       alert("Warning: Streaming direct-to-disk is not supported in this browser. Large files may fail due to RAM limits.");
     }
@@ -773,15 +812,41 @@ async function startWebRTC() {
         }
         useIndexedDB = false;
       } catch (pickerErr) {
-        console.warn("WebRTC Direct-to-disk picker cancelled, falling back to SW or IndexedDB:", pickerErr);
+        console.warn("WebRTC Direct-to-disk picker cancelled, falling back to OPFS, SW, or IndexedDB:", pickerErr);
         diskWritableStream = null;
-        useIndexedDB = !swSupported;
       }
     }
 
-    if (!diskWritableStream && swSupported) {
+    if (!diskWritableStream && opfsSupported) {
+      try {
+        const root = await navigator.storage.getDirectory();
+        try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
+        
+        const estimate = await navigator.storage.estimate();
+        if (estimate && estimate.quota && currentFile.size > (estimate.quota - estimate.usage)) {
+           throw new Error("Device disk is full");
+        }
+        
+        diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
+        diskWritableStream = await diskFileHandle.createWritable();
+        useOPFS = true;
+        useIndexedDB = false;
+      } catch (err) {
+        console.error("OPFS init failed:", err);
+        if (err.message === "Device disk is full") {
+           showError("Not enough disk space for transfer.");
+           pc.close();
+           return;
+        }
+        diskWritableStream = null;
+        useOPFS = false;
+      }
+    }
+
+    if (!diskWritableStream && swSupported && !useOPFS) {
       swPipePort = await getSWPipe(currentFile);
-    } else if (!diskWritableStream && useIndexedDB) {
+    } else if (!diskWritableStream && (useIndexedDB || !swSupported)) {
+      useIndexedDB = true;
       if (initialOffset === 0) {
         await clearIDB();
       }
@@ -801,45 +866,59 @@ async function startWebRTC() {
       }
 
       dc.onmessage = async (e) => {
-        if (typeof e.data === 'string') {
-          if (e.data === "EOF") {
-            if (diskWritableStream) {
-              await diskWritableStream.close();
-            } else if (swPipePort) {
-              swPipePort.postMessage("EOF");
-            } else {
-              let finalChunks = receivedChunks;
-              if (useIndexedDB) {
-                finalChunks = await getAllChunksIDB();
-                await clearIDB();
+        try {
+          if (typeof e.data === 'string') {
+            if (e.data === "EOF") {
+              if (diskWritableStream) {
+                await diskWritableStream.close();
+                if (useOPFS) {
+                  const file = await diskFileHandle.getFile();
+                  triggerSave(file, currentFile.name);
+                }
+              } else if (swPipePort) {
+                swPipePort.postMessage("EOF");
+              } else {
+                let finalChunks = receivedChunks;
+                if (useIndexedDB) {
+                  finalChunks = await getAllChunksIDB();
+                  await clearIDB();
+                }
+                triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
               }
-              triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
+              resolve();
             }
-            resolve();
+            return;
           }
-          return;
-        }
 
-        const chunk = new Uint8Array(e.data);
-        if (diskWritableStream) {
-          // Direct disk write
-          await diskWritableStream.write(chunk);
-        } else if (swPipePort) {
-          swPipePort.postMessage(chunk);
-        } else if (useIndexedDB) {
-          // IndexedDB buffer
-          await storeChunkIDB(chunk);
-        } else {
-          // RAM buffer
-          receivedChunks.push(chunk);
-        }
+          const chunk = new Uint8Array(e.data);
+          if (diskWritableStream) {
+            // Direct disk write
+            await diskWritableStream.write(chunk);
+          } else if (swPipePort) {
+            swPipePort.postMessage(chunk);
+          } else if (useIndexedDB) {
+            // IndexedDB buffer
+            await storeChunkIDB(chunk);
+          } else {
+            // RAM buffer
+            receivedChunks.push(chunk);
+          }
 
-        receivedBytes += chunk.byteLength;
-        maybeSaveProgress();
-        if (totalBytes > 0) {
-          updateProgress(receivedBytes / totalBytes);
-          updateDLStats(receivedBytes, totalBytes);
-          updateSpeed(receivedBytes);
+          receivedBytes += chunk.byteLength;
+          maybeSaveProgress();
+          if (totalBytes > 0) {
+            updateProgress(receivedBytes / totalBytes);
+            updateDLStats(receivedBytes, totalBytes);
+            updateSpeed(receivedBytes);
+          }
+        } catch (err) {
+          if (err.name === 'QuotaExceededError' || err.message.includes('Quota') || (err.message && err.message.includes('disk is full'))) {
+             showError("Transfer failed: Device disk is full.");
+          } else {
+             showError(`Transfer failed: ${err.message}`);
+          }
+          dc.close();
+          reject(err);
         }
       };
 
@@ -849,7 +928,7 @@ async function startWebRTC() {
       };
     });
 
-    let modeDesc = diskWritableStream ? 'WebRTC P2P (Direct Disk)' : (swPipePort ? 'WebRTC P2P (SW Pipe)' : (useIndexedDB ? 'WebRTC P2P (IndexedDB)' : 'WebRTC P2P (RAM Blob)'));
+    let modeDesc = diskWritableStream ? (useOPFS ? 'WebRTC P2P (OPFS)' : 'WebRTC P2P (Direct Disk)') : (swPipePort ? 'WebRTC P2P (SW Pipe)' : (useIndexedDB ? 'WebRTC P2P (IndexedDB)' : 'WebRTC P2P (RAM Blob)'));
     showDone(currentFile.name, currentFile.size, modeDesc);
     pc.close();
   }
@@ -1000,6 +1079,9 @@ function showDone(name, size, mode) {
 
 function showError(msg) {
   if (useIndexedDB) clearIDB().catch(console.error);
+  if (useOPFS) {
+    navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
+  }
   document.getElementById('error-msg').textContent = msg;
   setState('error');
 }
@@ -1084,6 +1166,9 @@ if (document.readyState === 'loading') {
 }
 
 window.addEventListener('pagehide', () => {
+  if (useOPFS) {
+    navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
+  }
   if (useIndexedDB && idb) {
     // Attempt best-effort synchronous-like clear
     try {
