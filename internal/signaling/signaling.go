@@ -55,13 +55,14 @@ type Session struct {
 	candidates  []webrtc.ICECandidateInit
 	mu          sync.Mutex
 	iceServers  []webrtc.ICEServer
+	discoveryTimeout time.Duration
 
 	// OnOpen is called when the data channel is open and ready to send.
 	OnOpen func(dc *webrtc.DataChannel)
 }
 
 // NewSession creates a new WebRTC PeerConnection configured as the sender.
-func NewSession(iceServers []webrtc.ICEServer) (*Session, error) {
+func NewSession(iceServers []webrtc.ICEServer, discoveryTimeout time.Duration) (*Session, error) {
 	if len(iceServers) == 0 {
 		iceServers = ICEServers
 	}
@@ -75,6 +76,7 @@ func NewSession(iceServers []webrtc.ICEServer) (*Session, error) {
 		pc:          pc,
 		answerReady: make(chan struct{}, 1),
 		iceServers:  iceServers,
+		discoveryTimeout: discoveryTimeout,
 	}
 
 	// Collect trickle ICE candidates as they arrive.
@@ -118,11 +120,11 @@ func (s *Session) CreateOffer(ctx context.Context) (compressedOffer string, err 
 		return "", fmt.Errorf("set local description: %w", err)
 	}
 
-	// Wait for ICE gathering to complete (or timeout after 3s).
+	// Wait for ICE gathering to complete (or timeout).
 	gatherDone := webrtc.GatheringCompletePromise(s.pc)
 	select {
 	case <-gatherDone:
-	case <-time.After(3 * time.Second):
+	case <-time.After(s.discoveryTimeout):
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -155,6 +157,7 @@ func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 			"sdp":        s.rawOffer,
 			"type":       "offer",
 			"iceServers": s.iceServers,
+			"timeout":    s.discoveryTimeout.Milliseconds(),
 		})
 	})
 

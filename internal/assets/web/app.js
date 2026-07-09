@@ -699,13 +699,24 @@ async function startWebRTC() {
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
 
+  setWebRTCSub('Gathering network candidates…');
   // Wait for ICE gathering.
   await new Promise((resolve) => {
     if (pc.iceGatheringState === 'complete') { resolve(); return; }
     pc.addEventListener('icegatheringstatechange', () => {
       if (pc.iceGatheringState === 'complete') resolve();
     });
-    setTimeout(resolve, 3000); // safety timeout
+    
+    // Default to 10 seconds (10000 ms) unless overridden by the sender's offer payload/query param
+    let waitTime = 10000;
+    const urlTimeout = params.get('timeout');
+    if (urlTimeout) {
+      waitTime = parseInt(urlTimeout, 10);
+    } else if (offer.timeout) {
+      waitTime = offer.timeout;
+    }
+    if (waitTime > 60000) waitTime = 60000;
+    setTimeout(resolve, waitTime);
   });
 
   // 4. POST answer to sender.
