@@ -57,8 +57,9 @@ func (c *Client) PushState(offer string, candidates []map[string]interface{}, me
 }
 
 type PollCommand struct {
-	Action string `json:"action"`
-	Answer string `json:"answer"`
+	Action   string `json:"action"`
+	Answer   string `json:"answer"`
+	Filename string `json:"filename"`
 }
 
 func (c *Client) Poll() (*PollCommand, error) {
@@ -98,4 +99,19 @@ func (c *Client) UploadData(filePath string) error {
 	}
 	defer resp.Body.Close()
 	return nil
+}
+
+func (c *Client) DownloadData() (io.ReadCloser, error) {
+	resp, err := c.HTTP.Get(fmt.Sprintf("%s/relay/pull?session=%s", c.BaseURL, c.SessionID))
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for non-200 status code
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("HTTP error: %d", resp.StatusCode)
+	}
+
+	return resp.Body, nil
 }

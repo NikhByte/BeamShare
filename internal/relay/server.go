@@ -20,6 +20,9 @@ type Session struct {
 
 	AnswerReady chan string
 	DownloadReq chan struct{}
+	UploadReq   chan string
+	UploadPipeR *io.PipeReader
+	UploadPipeW *io.PipeWriter
 
 	DataPipeR *io.PipeReader
 	DataPipeW *io.PipeWriter
@@ -53,6 +56,7 @@ func (s *Server) createSession() *Session {
 		ID:          id,
 		AnswerReady: make(chan string, 1),
 		DownloadReq: make(chan struct{}, 1),
+		UploadReq:   make(chan string, 1),
 	}
 	s.sessions[id] = sess
 
@@ -84,6 +88,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux.HandleFunc("/relay/state", s.handleState)
 	mux.HandleFunc("/relay/poll", s.handlePoll)
 	mux.HandleFunc("/relay/data", s.handleData)
+	mux.HandleFunc("/relay/pull", s.handlePull)
 
 	// --- Public UI Endpoints (Receiver -> Relay) ---
 	mux.HandleFunc("/", s.handleUI)
@@ -92,6 +97,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux.HandleFunc("/api/signal/answer", s.handleAnswer)
 	mux.HandleFunc("/api/signal/candidates", s.handleCandidates)
 	mux.HandleFunc("/api/download", s.handleDownload)
+	mux.HandleFunc("/api/upload", s.handleUpload)
 
 	// Add support for QR API since app.js requests it (we can just return an empty image or real one)
 	mux.HandleFunc("/api/qr", s.handleQR)
@@ -152,6 +158,11 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	case <-sess.DownloadReq:
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"action": "download",
+		})
+	case filename := <-sess.UploadReq:
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"action":   "upload",
+			"filename": filename,
 		})
 	case <-r.Context().Done():
 		return
@@ -284,4 +295,90 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 	// A dummy QR API to prevent 404s
 	w.WriteHeader(200)
+}
+
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	sess := s.getSession(r.URL.Query().Get("s"))
+	if sess == nil {
+		sess = s.getSession(r.URL.Query().Get("session")) // try session param just in case
+		if sess == nil {
+			http.Error(w, "not found", 404)
+			return
+		}
+	}
+
+	reader, err := r.MultipartReader()
+	if err != nil {
+		http.Error(w, "multipart reader error", http.StatusBadRequest)
+		return
+	}
+
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			http.Error(w, "read part error", http.StatusBadRequest)
+			return
+		}
+
+		if part.FormName() == "file" {
+			sess.mu.Lock()
+			pr, pw := io.Pipe()
+			sess.UploadPipeR = pr
+			sess.UploadPipeW = pw
+			sess.mu.Unlock()
+
+			// Notify sender
+			select {
+			case sess.UploadReq <- part.FileName():
+			default:
+			}
+
+			// Stream data to pipe
+			_, err = io.Copy(pw, part)
+			pw.CloseWithError(err)
+			part.Close()
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})
+			return
+		}
+		part.Close()
+	}
+	http.Error(w, "no file part found", http.StatusBadRequest)
+}
+
+func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
+	sess := s.getSession(r.URL.Query().Get("session"))
+	if sess == nil {
+		http.Error(w, "not found", 404)
+		return
+	}
+
+	sess.mu.Lock()
+	pr := sess.UploadPipeR
+	sess.mu.Unlock()
+
+	if pr == nil {
+		http.Error(w, "no active upload", 404)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	io.Copy(w, pr)
 }

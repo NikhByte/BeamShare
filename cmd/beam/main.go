@@ -64,7 +64,7 @@ func main() {
 	isPipe := err == nil && (fi.Mode()&os.ModeCharDevice) == 0
 
 	args, iceServers, discoveryTimeout := parseFlags(os.Args[1:])
-	
+
 	if len(args) < 1 {
 		if isPipe {
 			runSend("", iceServers, discoveryTimeout)
@@ -120,7 +120,7 @@ func parseFlags(args []string) ([]string, []webrtc.ICEServer, time.Duration) {
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		
+
 		if strings.HasPrefix(arg, "--stun-server=") {
 			stunServers = append(stunServers, strings.TrimPrefix(arg, "--stun-server="))
 		} else if arg == "--stun-server" {
@@ -177,7 +177,7 @@ func parseFlags(args []string) ([]string, []webrtc.ICEServer, time.Duration) {
 			URLs: stunServers,
 		})
 	}
-	
+
 	if len(turnServers) > 0 {
 		iceServers = append(iceServers, webrtc.ICEServer{
 			URLs:       turnServers,
@@ -319,6 +319,39 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								fmt.Printf("  Error uploading via relay: %v\n", err)
 							} else {
 								fmt.Println("  ✅ Relay Transfer Complete!")
+							}
+						} else if cmd.Action == "upload" {
+							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", cmd.Filename)
+							rc, err := relClient.DownloadData()
+							if err != nil {
+								fmt.Printf("  Error downloading from relay: %v\n", err)
+								continue
+							}
+
+							outName := "received_" + cmd.Filename
+							outFile, err := os.Create(outName)
+							if err != nil {
+								fmt.Printf("  Error creating file: %v\n", err)
+								rc.Close()
+								continue
+							}
+
+							start := time.Now()
+							copied, err := io.Copy(outFile, rc)
+							outFile.Close()
+							rc.Close()
+
+							if err != nil && err != io.EOF {
+								fmt.Printf("\n  Error during transfer: %v\n", err)
+							} else {
+								elapsed := time.Since(start)
+								speed := float64(copied) / elapsed.Seconds()
+								fmt.Printf("  ✅ Relay Upload Complete! Saved to %s in %.1fs (avg %s/s)\n",
+									outName,
+									elapsed.Seconds(),
+									ui.FormatBytes(int64(speed)),
+								)
+								srv.UpdateSharedFile(outName, cmd.Filename, copied)
 							}
 						}
 					}
@@ -571,7 +604,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 			baseHost = receiverURL
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
-		
+
 		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
 		if receiverURL != "" {
 			relayDisplayURL += "&backend=" + url.QueryEscape(relayURL)
