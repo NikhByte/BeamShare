@@ -1340,6 +1340,7 @@ async function startSenderSharing() {
     const shareURL = new URL(window.location.origin);
     shareURL.searchParams.set('s', senderSessionID);
     shareURL.searchParams.set('backend', backend);
+    shareURL.searchParams.set('mode', 'webrtc');
 
     document.getElementById('send-url-input').value = shareURL.href;
     document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
@@ -1366,14 +1367,77 @@ function setupSenderDataChannel() {
     document.getElementById('send-status-label').textContent = "Connecting to peer…";
   };
 
+  let reverseStream = null;
+  let reverseFileHandle = null;
+  let reverseReceived = 0;
+  let reverseTotal = 0;
+  let reverseName = "";
+  let reverseChunks = [];
+
   senderDataChannel.onmessage = async (e) => {
-    if (typeof e.data === 'string' && e.data.startsWith('OFFSET:')) {
-      const offset = parseInt(e.data.split(':')[1], 10);
-      document.getElementById('send-status-label').textContent = "Uploading file…";
-      try {
-        await streamFileToDataChannel(offset);
-      } catch (err) {
-        console.error("WebRTC streaming failed:", err);
+    if (typeof e.data === 'string') {
+      if (e.data.startsWith('OFFSET:')) {
+        const offset = parseInt(e.data.split(':')[1], 10);
+        document.getElementById('send-status-label').textContent = "Uploading file…";
+        try {
+          await streamFileToDataChannel(offset);
+        } catch (err) {
+          console.error("WebRTC streaming failed:", err);
+        }
+      } else if (e.data.startsWith('UPLOAD_META:')) {
+        const parts = e.data.split(':');
+        reverseName = parts[1];
+        reverseTotal = parseInt(parts[2], 10);
+        reverseReceived = 0;
+        reverseChunks = [];
+        
+        document.getElementById('send-link-section').classList.add('hidden');
+        document.getElementById('send-progress-section').classList.remove('hidden');
+        document.getElementById('send-status-label').textContent = "Receiving P2P file…";
+        
+        if (typeof window.showSaveFilePicker === 'function') {
+          try {
+            reverseFileHandle = await window.showSaveFilePicker({ suggestedName: reverseName });
+            reverseStream = await reverseFileHandle.createWritable();
+          } catch (err) {
+            console.warn("Save file picker cancelled or failed", err);
+          }
+        }
+      } else if (e.data === 'UPLOAD_EOF') {
+        if (reverseStream) {
+          await reverseStream.close();
+        } else {
+          const blob = new Blob(reverseChunks);
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = reverseName;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        }
+        document.getElementById('send-status-label').textContent = "Reverse Transfer Complete!";
+      }
+    } else {
+      // Binary chunk
+      const chunk = new Uint8Array(e.data);
+      if (reverseStream) {
+        await reverseStream.write(chunk);
+      } else {
+        reverseChunks.push(chunk);
+      }
+      reverseReceived += chunk.byteLength;
+      
+      const progressCircle = document.getElementById('send-progress-circle');
+      const progressPct = document.getElementById('send-progress-pct');
+      const statsEl = document.getElementById('send-stats');
+      
+      if (reverseTotal > 0) {
+        const progress = reverseReceived / reverseTotal;
+        if (progressPct) progressPct.textContent = `${Math.round(progress * 100)}%`;
+        if (progressCircle) {
+          progressCircle.style.strokeDashoffset = 263.9 - (263.9 * progress);
+        }
+        if (statsEl) statsEl.textContent = `${formatBytes(reverseReceived)} / ${formatBytes(reverseTotal)}`;
       }
     }
   };
@@ -1460,6 +1524,12 @@ async function startSenderPolling(backend) {
         document.getElementById('send-status-label').textContent = "Streaming via HTTP relay…";
         await streamFileToHTTP(backend);
         break;
+      } else if (data.action === 'upload') {
+        document.getElementById('send-link-section').classList.add('hidden');
+        document.getElementById('send-progress-section').classList.remove('hidden');
+        document.getElementById('send-status-label').textContent = "Receiving file from relay…";
+        await receiveFileFromHTTP(backend, data.filename);
+        break;
       }
     } catch (err) {
       console.warn("Polling error:", err);
@@ -1508,6 +1578,71 @@ async function streamFileToHTTP(backend) {
 
   } catch (err) {
     showError(`HTTP upload failed: ${err.message}`);
+  }
+}
+
+async function receiveFileFromHTTP(backend, filename) {
+  const url = `${backend}/relay/pull?session=${senderSessionID}`;
+  
+  try {
+    const useDiskStream = typeof window.showSaveFilePicker === 'function';
+    let writableStream = null;
+    let fileHandle = null;
+    
+    if (useDiskStream) {
+      try {
+        fileHandle = await window.showSaveFilePicker({ suggestedName: filename });
+        writableStream = await fileHandle.createWritable();
+      } catch (e) {
+        console.warn("Save file picker cancelled or failed", e);
+      }
+    }
+    
+    if (!writableStream) {
+      // Fallback: direct download using an anchor tag which offloads streaming to the browser
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      document.getElementById('send-status-label').textContent = "Download started in browser!";
+      return;
+    }
+
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    
+    document.getElementById('send-status-label').textContent = "Downloading file…";
+    const reader = res.body.getReader();
+    let received = 0;
+    
+    const progressCircle = document.getElementById('send-progress-circle');
+    const progressPct = document.getElementById('send-progress-pct');
+    const statsEl = document.getElementById('send-stats');
+    const total = Number(res.headers.get('Content-Length')) || 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await writableStream.write(value);
+      received += value.length;
+      
+      if (total > 0) {
+        const progress = received / total;
+        if (progressPct) progressPct.textContent = `${Math.round(progress * 100)}%`;
+        if (progressCircle) {
+          progressCircle.style.strokeDashoffset = 263.9 - (263.9 * progress);
+        }
+        if (statsEl) statsEl.textContent = `${formatBytes(received)} / ${formatBytes(total)}`;
+      } else {
+        if (statsEl) statsEl.textContent = formatBytes(received);
+      }
+    }
+    await writableStream.close();
+    document.getElementById('send-status-label').textContent = "Transfer Complete!";
+  } catch (err) {
+    showError(`HTTP download failed: ${err.message}`);
   }
 }
 
