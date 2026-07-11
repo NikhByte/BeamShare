@@ -17,13 +17,13 @@ import (
 
 // ANSI colour helpers — gracefully degrade in environments without colour.
 const (
-	reset   = "\033[0m"
-	bold    = "\033[1m"
-	dim     = "\033[2m"
-	cyan    = "\033[36m"
-	green   = "\033[32m"
-	yellow  = "\033[33m"
-	white   = "\033[97m"
+	reset  = "\033[0m"
+	bold   = "\033[1m"
+	dim    = "\033[2m"
+	cyan   = "\033[36m"
+	green  = "\033[32m"
+	yellow = "\033[33m"
+	white  = "\033[97m"
 )
 
 func colorize(color, text string) string {

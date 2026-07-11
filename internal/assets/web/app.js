@@ -37,6 +37,11 @@ function apiPath(path) {
 const STUN_SERVERS    = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
+  {
+    urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443'],
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  }
 ];
 const CIRCUMFERENCE   = 2 * Math.PI * 42; // SVG progress ring
 
@@ -1039,20 +1044,27 @@ async function handleUploadFile(e) {
     receivedBytes = 0;
     updateProgress(0);
 
-    const buffer = await file.arrayBuffer();
     const chunkSize = 65536;
     let offset = 0;
+    const total = file.size;
 
-    while (offset < buffer.byteLength) {
-      const chunk = buffer.slice(offset, offset + chunkSize);
+    while (offset < total) {
+      const chunkBlob = file.slice(offset, offset + chunkSize);
+      const chunkBuffer = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(chunkBlob);
+      });
+
       while (webrtcDataChannel.bufferedAmount > 1024 * 1024) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
-      webrtcDataChannel.send(chunk);
-      offset += chunk.byteLength;
+      webrtcDataChannel.send(chunkBuffer);
+      offset += chunkBuffer.byteLength;
 
-      updateProgress(offset / buffer.byteLength);
-      updateDLStats(offset, buffer.byteLength);
+      updateProgress(offset / total);
+      updateDLStats(offset, total);
       updateSpeed(offset);
     }
 

@@ -116,9 +116,9 @@ func TestWriteLive_Truncation(t *testing.T) {
 	srv.WriteLive(part2)
 
 	backlog := srv.GetLiveBacklog()
-	
+
 	// We expect the first part (which is 'A's) to be truncated because it exceeds 1MB.
-	// Actually, wait, let's look at the logic. 
+	// Actually, wait, let's look at the logic.
 	// len(liveData) = 1048576 + 12 = 1048588
 	// maxLiveBacklog = 1048576
 	// truncateIdx = 1048588 - 1048576 = 12
@@ -126,7 +126,7 @@ func TestWriteLive_Truncation(t *testing.T) {
 	// Since part1 ends at 1048575, \n is at 1048575.
 	// So it finds \n and slices after it.
 	// This means the kept backlog will just be part2!
-	
+
 	// Let's verify.
 	assert.Equal(t, part2, backlog)
 }

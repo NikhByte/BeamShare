@@ -22,14 +22,14 @@ import (
 
 // Server holds the state for one Beam session.
 type Server struct {
-	filePath     string
-	fileName     string
-	fileSize     int64
-	port         int
-	srv          *http.Server
-	mux          *http.ServeMux
-	mu           sync.Mutex
-	downloads    int
+	filePath  string
+	fileName  string
+	fileSize  int64
+	port      int
+	srv       *http.Server
+	mux       *http.ServeMux
+	mu        sync.Mutex
+	downloads int
 
 	// Phase 5: Live Pipe
 	isLivePipe   bool
@@ -127,8 +127,8 @@ func (s *Server) WriteLive(data []byte) {
 				idx++
 			}
 		}
-		
-		// Slice from idx to drop old data. Go's append will automatically reallocate 
+
+		// Slice from idx to drop old data. Go's append will automatically reallocate
 		// when capacity is reached, keeping memory footprint bounded.
 		s.liveData = s.liveData[idx:]
 	}
@@ -440,7 +440,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					totalReceived += int64(n)
-					
+
 					if r.ContentLength > 0 {
 						pct := float64(totalReceived) / float64(r.ContentLength) * 100
 						fmt.Printf("\r  📥 Receiving HTTP Upload: %.1f%% (%s/%s)",
