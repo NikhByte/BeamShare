@@ -352,6 +352,20 @@ async function bootstrap() {
   const params = new URLSearchParams(window.location.search);
   const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
   const localURL = params.get('local');
+  const sessionID = params.get('s');
+
+  // Reset error UI states in case they were previously set
+  const errorLabel = document.querySelector('#state-error .state-label');
+  if (errorLabel) errorLabel.textContent = "Connection error";
+  const retryBtn = document.getElementById('btn-retry');
+  if (retryBtn) retryBtn.classList.remove('hidden');
+
+  if (!localURL && !sessionID) {
+    if (errorLabel) errorLabel.textContent = "Gaze is ready";
+    showError("No active transfer session. Run 'beam send <file>' on the sending device and open the generated link or scan the QR code to receive.");
+    if (retryBtn) retryBtn.classList.add('hidden');
+    return;
+  }
 
   if (localURL) {
     try {
