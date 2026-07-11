@@ -578,10 +578,14 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		relayDisplayURL += "#k=" + relKeyStr
 		fmt.Printf("    %s    (global relay)\n", relayDisplayURL)
+	} else if receiverURL != "" {
+		baseHost := strings.TrimRight(receiverURL, "/")
+		localDisplayURL := fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+		fmt.Printf("    %s    (custom receiver)\n", localDisplayURL)
 	}
 
 	// ── Print QR ─────────────────────────────────────────────────────────────
-	qrURL := localURL
+	var qrURL string
 	if relClient != nil {
 		baseHost := relayURL
 		if receiverURL != "" {
@@ -597,8 +601,19 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 			qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
 		}
 		qrURL += "#k=" + relKeyStr
-	} else if session != nil {
-		qrURL = localURL + fmt.Sprintf("?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+	} else {
+		if receiverURL != "" {
+			baseHost := strings.TrimRight(receiverURL, "/")
+			qrURL = fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+			if session != nil {
+				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+			}
+		} else {
+			qrURL = localURL
+			if session != nil {
+				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+			}
+		}
 	}
 	ui.PrintQR(qrURL)
 

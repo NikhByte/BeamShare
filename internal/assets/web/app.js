@@ -433,13 +433,9 @@ async function bootstrap() {
       clearTimeout(timeoutId);
       
       if (res.ok) {
-        console.log("Local connection successful, redirecting...");
-        const newUrl = new URL(localURL);
-        if (params.get('mode')) newUrl.searchParams.set('mode', params.get('mode'));
-        if (params.get('sdp')) newUrl.searchParams.set('sdp', params.get('sdp'));
-        newUrl.hash = window.location.hash;
-        window.location.replace(newUrl.href);
-        return;
+        console.log("Local connection successful, using as backend...");
+        window.GAZE_BACKEND_URL = localURL;
+        // Do not return, continue to bootstrap flow using localURL as backend
       }
     } catch (e) {
       console.warn("Direct local connection failed, falling back to relay:", e);
