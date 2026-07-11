@@ -859,3 +859,58 @@ body {
 .btn-danger:hover {
   opacity: 0.9;
 }
+
+/* ── Standalone Sender UI styles ── */
+.tab-header {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.75rem;
+}
+.tab-btn {
+  background: none;
+  border: none;
+  color: var(--zinc-400);
+  font-weight: 500;
+  cursor: pointer;
+  padding-bottom: 0.25rem;
+  font-size: 0.95rem;
+  font-family: inherit;
+  transition: all 0.2s ease;
+  position: relative;
+}
+.tab-btn:hover {
+  color: var(--text-hi);
+}
+.tab-btn.active {
+  color: var(--sky-400);
+  font-weight: 600;
+}
+.tab-btn.active::after {
+  content: '';
+  position: absolute;
+  bottom: -0.85rem;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--sky-400);
+}
+.drop-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-md);
+  padding: 2.5rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  background: rgba(24, 24, 27, 0.5);
+}
+.drop-zone:hover, .drop-zone.dragover {
+  border-color: var(--sky-500);
+  background: rgba(14, 165, 233, 0.05);
+}

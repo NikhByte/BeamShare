@@ -156,7 +156,7 @@ function getAllChunksIDB() {
 }
 
 // ── State machine ─────────────────────────────────────────────────────────────
-const STATES = ['loading', 'ready', 'webrtc', 'downloading', 'livepipe', 'done', 'error'];
+const STATES = ['loading', 'ready', 'webrtc', 'downloading', 'livepipe', 'done', 'error', 'send-home', 'send-ready', 'send-sharing'];
 
 function setState(name) {
   STATES.forEach((s) => {
@@ -325,6 +325,55 @@ function init() {
     }
   });
 
+  // Tab Switching Click Listeners
+  const receiveBtn = document.getElementById('tab-receive');
+  const sendBtn = document.getElementById('tab-send');
+  
+  receiveBtn?.addEventListener('click', () => switchTab('receive'));
+  sendBtn?.addEventListener('click', () => switchTab('send'));
+
+  // Sender File drop/select UI handlers
+  const sendDropZone = document.getElementById('send-drop-zone');
+  const senderFileInput = document.getElementById('sender-file-input');
+
+  sendDropZone?.addEventListener('click', () => senderFileInput?.click());
+  senderFileInput?.addEventListener('change', (e) => {
+    handleSenderFileSelect(e.target.files[0]);
+  });
+
+  sendDropZone?.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    sendDropZone.classList.add('dragover');
+  });
+  sendDropZone?.addEventListener('dragleave', () => {
+    sendDropZone.classList.remove('dragover');
+  });
+  sendDropZone?.addEventListener('drop', (e) => {
+    e.preventDefault();
+    sendDropZone.classList.remove('dragover');
+    handleSenderFileSelect(e.dataTransfer.files[0]);
+  });
+
+  // Sender button actions
+  document.getElementById('btn-start-share')?.addEventListener('click', startSenderSharing);
+  document.getElementById('btn-cancel-share')?.addEventListener('click', () => {
+    senderFile = null;
+    setState('send-home');
+  });
+  document.getElementById('btn-stop-share')?.addEventListener('click', stopSenderSharing);
+
+  document.getElementById('btn-copy-send-url')?.addEventListener('click', () => {
+    const input = document.getElementById('send-url-input');
+    if (input) {
+      input.select();
+      navigator.clipboard.writeText(input.value);
+      const btn = document.getElementById('btn-copy-send-url');
+      const old = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => btn.textContent = old, 1500);
+    }
+  });
+
   initSpotlight();
   bootstrap();
 }
@@ -359,6 +408,13 @@ async function bootstrap() {
   if (errorLabel) errorLabel.textContent = "Connection error";
   const retryBtn = document.getElementById('btn-retry');
   if (retryBtn) retryBtn.classList.remove('hidden');
+
+  const tabHeader = document.getElementById('tab-header');
+  if (localURL || sessionID) {
+    if (tabHeader) tabHeader.classList.add('hidden');
+  } else {
+    if (tabHeader) tabHeader.classList.remove('hidden');
+  }
 
   if (!localURL && !sessionID) {
     if (errorLabel) errorLabel.textContent = "Gaze is ready";
@@ -1196,6 +1252,286 @@ function mimeIcon(mime) {
   if (mime?.includes('zip')||mime?.includes('tar')||mime?.includes('gzip'))
     return `<svg width="32" height="32" viewBox="0 0 24 24" ${a} aria-hidden="true"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>`;
   return `<svg width="32" height="32" viewBox="0 0 24 24" ${a} aria-hidden="true"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+}
+
+
+// ── Web Sender States & Functions ──
+let senderFile = null;
+let senderPeerConnection = null;
+let senderDataChannel = null;
+let senderSessionID = null;
+let isSenderPolling = false;
+let senderAborted = false;
+
+function handleSenderFileSelect(file) {
+  if (!file) return;
+  senderFile = file;
+  document.getElementById('sender-file-name').textContent = file.name;
+  document.getElementById('sender-file-size').textContent = formatBytes(file.size);
+  document.getElementById('sender-file-icon-wrap').innerHTML = mimeIcon(file.type);
+  setState('send-ready');
+}
+
+async function startSenderSharing() {
+  senderAborted = false;
+  setState('loading');
+  setLoadingSub('Registering session on relay server…');
+
+  const params = new URLSearchParams(window.location.search);
+  let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
+  if (!backend) {
+    backend = window.location.origin;
+    if (backend.includes('vercel.app')) {
+      backend = 'https://relay.magicbeam.app';
+    }
+  }
+  if (backend.endsWith('/')) {
+    backend = backend.slice(0, -1);
+  }
+
+  try {
+    const regRes = await fetch(`${backend}/relay/register`);
+    if (!regRes.ok) throw new Error(`Register failed: HTTP ${regRes.status}`);
+    const regData = await regRes.json();
+    senderSessionID = regData.session;
+
+    setLoadingSub('Creating WebRTC peer connection…');
+    senderPeerConnection = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+    
+    const localCandidates = [];
+    senderPeerConnection.onicecandidate = (e) => {
+      if (e.candidate) {
+        localCandidates.push(e.candidate.toJSON());
+      }
+    };
+
+    senderDataChannel = senderPeerConnection.createDataChannel("beamshare", { ordered: true });
+    setupSenderDataChannel();
+
+    const offer = await senderPeerConnection.createOffer();
+    await senderPeerConnection.setLocalDescription(offer);
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    setLoadingSub('Publishing SDP offer to relay…');
+    const stateRes = await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        offer: senderPeerConnection.localDescription.sdp,
+        candidates: localCandidates,
+        meta: {
+          name: senderFile.name,
+          size: senderFile.size,
+          mime: senderFile.type || 'application/octet-stream'
+        }
+      })
+    });
+    if (!stateRes.ok) throw new Error(`Publish state failed: HTTP ${stateRes.status}`);
+
+    const shareURL = new URL(window.location.origin);
+    shareURL.searchParams.set('s', senderSessionID);
+    shareURL.searchParams.set('backend', backend);
+
+    document.getElementById('send-url-input').value = shareURL.href;
+    document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
+    
+    document.getElementById('send-link-section').classList.remove('hidden');
+    document.getElementById('send-progress-section').classList.add('hidden');
+    document.getElementById('send-status-label').textContent = "Waiting for receiver…";
+
+    setMode('sender', 'P2P Sender Mode');
+    setState('send-sharing');
+
+    startSenderPolling(backend);
+
+  } catch (err) {
+    showError(`Sender setup failed: ${err.message}`);
+  }
+}
+
+function setupSenderDataChannel() {
+  senderDataChannel.onopen = () => {
+    console.log("WebRTC data channel is open!");
+    document.getElementById('send-link-section').classList.add('hidden');
+    document.getElementById('send-progress-section').classList.remove('hidden');
+    document.getElementById('send-status-label').textContent = "Connecting to peer…";
+  };
+
+  senderDataChannel.onmessage = async (e) => {
+    if (typeof e.data === 'string' && e.data.startsWith('OFFSET:')) {
+      const offset = parseInt(e.data.split(':')[1], 10);
+      document.getElementById('send-status-label').textContent = "Uploading file…";
+      try {
+        await streamFileToDataChannel(offset);
+      } catch (err) {
+        console.error("WebRTC streaming failed:", err);
+      }
+    }
+  };
+
+  senderDataChannel.onclose = () => {
+    console.log("Data channel closed");
+  };
+}
+
+async function streamFileToDataChannel(initialOffset) {
+  const chunkSize = 65536;
+  let offset = initialOffset;
+  const total = senderFile.size;
+
+  const progressCircle = document.getElementById('send-progress-circle');
+  const progressPct = document.getElementById('send-progress-pct');
+  const statsEl = document.getElementById('send-stats');
+
+  while (offset < total && !senderAborted) {
+    if (senderDataChannel.readyState !== 'open') {
+      throw new Error("Data channel is no longer open");
+    }
+
+    const chunkBlob = senderFile.slice(offset, offset + chunkSize);
+    const chunkBuffer = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(chunkBlob);
+    });
+
+    while (senderDataChannel.bufferedAmount > 1024 * 1024) {
+      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    senderDataChannel.send(chunkBuffer);
+    offset += chunkBuffer.byteLength;
+
+    const progress = offset / total;
+    if (progressPct) progressPct.textContent = `${Math.round(progress * 100)}%`;
+    if (progressCircle) {
+      const strokeDashoffset = 263.9 - (263.9 * progress);
+      progressCircle.style.strokeDashoffset = strokeDashoffset;
+    }
+    if (statsEl) {
+      statsEl.textContent = `${formatBytes(offset)} / ${formatBytes(total)}`;
+    }
+  }
+
+  if (senderAborted) return;
+
+  while (senderDataChannel.bufferedAmount > 0) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  senderDataChannel.send("EOF");
+  document.getElementById('send-status-label').textContent = "Transfer Complete!";
+}
+
+async function startSenderPolling(backend) {
+  if (isSenderPolling) return;
+  isSenderPolling = true;
+
+  while (isSenderPolling && !senderAborted) {
+    try {
+      const pollRes = await fetch(`${backend}/relay/poll?session=${senderSessionID}`);
+      if (!pollRes.ok) {
+        if (pollRes.status === 404) {
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+
+      const data = await pollRes.json();
+      if (data.action === 'answer') {
+        await senderPeerConnection.setRemoteDescription(new RTCSessionDescription({
+          type: 'answer',
+          sdp: data.answer
+        }));
+      } else if (data.action === 'download') {
+        document.getElementById('send-link-section').classList.add('hidden');
+        document.getElementById('send-progress-section').classList.remove('hidden');
+        document.getElementById('send-status-label').textContent = "Streaming via HTTP relay…";
+        await streamFileToHTTP(backend);
+        break;
+      }
+    } catch (err) {
+      console.warn("Polling error:", err);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+  isSenderPolling = false;
+}
+
+async function streamFileToHTTP(backend) {
+  const progressCircle = document.getElementById('send-progress-circle');
+  const progressPct = document.getElementById('send-progress-pct');
+  const statsEl = document.getElementById('send-stats');
+
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        const progress = e.loaded / e.total;
+        if (progressPct) progressPct.textContent = `${Math.round(progress * 100)}%`;
+        if (progressCircle) {
+          const strokeDashoffset = 263.9 - (263.9 * progress);
+          progressCircle.style.strokeDashoffset = strokeDashoffset;
+        }
+        if (statsEl) {
+          statsEl.textContent = `${formatBytes(e.loaded)} / ${formatBytes(e.total)}`;
+        }
+      }
+    };
+
+    const uploadPromise = new Promise((resolve, reject) => {
+      xhr.onload = () => {
+        if (xhr.status === 200) {
+          document.getElementById('send-status-label').textContent = "Transfer Complete!";
+          resolve();
+        } else {
+          reject(new Error(`HTTP ${xhr.status}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("Network error during HTTP fallback upload"));
+    });
+
+    xhr.open('POST', `${backend}/relay/data?session=${senderSessionID}`, true);
+    xhr.send(senderFile);
+    await uploadPromise;
+
+  } catch (err) {
+    showError(`HTTP upload failed: ${err.message}`);
+  }
+}
+
+function stopSenderSharing() {
+  senderAborted = true;
+  isSenderPolling = false;
+  
+  if (senderDataChannel) {
+    try { senderDataChannel.close(); } catch(e){}
+    senderDataChannel = null;
+  }
+  if (senderPeerConnection) {
+    try { senderPeerConnection.close(); } catch(e){}
+    senderPeerConnection = null;
+  }
+  
+  resetState();
+  switchTab('send');
+}
+
+function switchTab(tab) {
+  const receiveBtn = document.getElementById('tab-receive');
+  const sendBtn = document.getElementById('tab-send');
+  if (tab === 'receive') {
+    receiveBtn?.classList.add('active');
+    sendBtn?.classList.remove('active');
+    bootstrap();
+  } else {
+    sendBtn?.classList.add('active');
+    receiveBtn?.classList.remove('active');
+    setState('send-home');
+  }
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
