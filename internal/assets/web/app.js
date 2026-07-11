@@ -1,4 +1,19 @@
-function apiPath(path) { const s = new URLSearchParams(window.location.search).get('s'); if (s) { return path.includes('?') ? path + '&s=' + s : path + '?s=' + s; } return path; }
+function apiPath(path) {
+  const params = new URLSearchParams(window.location.search);
+  let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
+  if (backend && backend.endsWith('/')) {
+    backend = backend.slice(0, -1);
+  }
+  const s = params.get('s');
+  let fullPath = path;
+  if (s) {
+    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+  }
+  if (backend) {
+    return backend + fullPath;
+  }
+  return fullPath;
+}
 /**
  * app.js — Gaze Receiver (Phase 4 & 5: Direct-to-Disk + Live Pipe)
  *

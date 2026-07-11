@@ -31,21 +31,31 @@ var (
 	channelsMu     sync.Mutex
 	liveFinished   bool
 	relayURL       string
+	receiverURL    string
 )
 
 func main() {
 	relayURL = os.Getenv("BEAM_RELAY_URL")
+	receiverURL = os.Getenv("BEAM_RECEIVER_URL")
 
 	// Parse args to extract --relay if present
 	var newArgs []string
 	for i := 0; i < len(os.Args); i++ {
-		if os.Args[i] == "--relay" && i+1 < len(os.Args) {
+		arg := os.Args[i]
+		if arg == "--relay" && i+1 < len(os.Args) {
 			relayURL = os.Args[i+1]
 			i++ // skip next
-		} else if strings.HasPrefix(os.Args[i], "--relay=") {
-			relayURL = strings.TrimPrefix(os.Args[i], "--relay=")
+		} else if strings.HasPrefix(arg, "--relay=") {
+			relayURL = strings.TrimPrefix(arg, "--relay=")
+		} else if (arg == "--receiver" || arg == "--receiver-url") && i+1 < len(os.Args) {
+			receiverURL = os.Args[i+1]
+			i++ // skip next
+		} else if strings.HasPrefix(arg, "--receiver=") {
+			receiverURL = strings.TrimPrefix(arg, "--receiver=")
+		} else if strings.HasPrefix(arg, "--receiver-url=") {
+			receiverURL = strings.TrimPrefix(arg, "--receiver-url=")
 		} else {
-			newArgs = append(newArgs, os.Args[i])
+			newArgs = append(newArgs, arg)
 		}
 	}
 	os.Args = newArgs
@@ -556,14 +566,33 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	ui.PrintDiscovery(localURL, mdnsName)
 
 	if relClient != nil {
-		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s#k=%s", relayURL, relSessionID, url.QueryEscape(localURL), relKeyStr)
+		baseHost := relayURL
+		if receiverURL != "" {
+			baseHost = receiverURL
+		}
+		baseHost = strings.TrimRight(baseHost, "/")
+		
+		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		if receiverURL != "" {
+			relayDisplayURL += "&backend=" + url.QueryEscape(relayURL)
+		}
+		relayDisplayURL += "#k=" + relKeyStr
 		fmt.Printf("    %s    (global relay)\n", relayDisplayURL)
 	}
 
 	// ── Print QR ─────────────────────────────────────────────────────────────
 	qrURL := localURL
 	if relClient != nil {
-		qrURL = fmt.Sprintf("%s/?s=%s&local=%s", relayURL, relSessionID, url.QueryEscape(localURL))
+		baseHost := relayURL
+		if receiverURL != "" {
+			baseHost = receiverURL
+		}
+		baseHost = strings.TrimRight(baseHost, "/")
+
+		qrURL = fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		if receiverURL != "" {
+			qrURL += "&backend=" + url.QueryEscape(relayURL)
+		}
 		if session != nil {
 			qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
 		}
