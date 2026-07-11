@@ -1,9 +1,25 @@
-function apiPath(path) {
+function getBackendURL() {
   const params = new URLSearchParams(window.location.search);
   let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
+  if (!backend) {
+    backend = window.location.origin;
+    if (backend.includes('vercel.app') || backend.startsWith('file://')) {
+      backend = 'https://beamshare.onrender.com';
+    } else if (backend.includes('localhost') || backend.includes('127.0.0.1')) {
+      if (window.location.port !== '8080') {
+        backend = 'http://localhost:8080';
+      }
+    }
+  }
   if (backend && backend.endsWith('/')) {
     backend = backend.slice(0, -1);
   }
+  return backend;
+}
+
+function apiPath(path) {
+  const backend = getBackendURL();
+  const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
   let fullPath = path;
   if (s) {
@@ -1273,17 +1289,7 @@ async function startSenderSharing() {
   setState('loading');
   setLoadingSub('Registering session on relay server…');
 
-  const params = new URLSearchParams(window.location.search);
-  let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
-  if (!backend) {
-    backend = window.location.origin;
-    if (backend.includes('vercel.app')) {
-      backend = 'https://relay.magicbeam.app';
-    }
-  }
-  if (backend.endsWith('/')) {
-    backend = backend.slice(0, -1);
-  }
+  const backend = getBackendURL();
 
   try {
     const regRes = await fetch(`${backend}/relay/register`);

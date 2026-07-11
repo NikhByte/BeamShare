@@ -233,7 +233,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		// Check if we are behind a NAT
 		isBehindNAT := signaling.CheckNAT(stunServer, server.GetLocalIP())
 		if isBehindNAT {
-			relayURL = "https://relay.magicbeam.app"
+			relayURL = "https://beamshare.onrender.com"
 			fmt.Printf("  %s\n", dimStr("NAT detected: automatic relay enabled"))
 		} else {
 			fmt.Printf("  %s\n", dimStr("Local network: direct peer-to-peer available"))

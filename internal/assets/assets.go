@@ -20,6 +20,9 @@ var appJS string
 //go:embed web/sw.js
 var swJS string
 
+//go:embed web/pako.min.js
+var pakoJS string
+
 // IndexHTML returns the full content of the receiver web page.
 func IndexHTML() string {
 	return indexHTML
@@ -28,6 +31,21 @@ func IndexHTML() string {
 // ServiceWorkerJS returns the content of the service worker file.
 func ServiceWorkerJS() string {
 	return swJS
+}
+
+// StyleCSS returns the style.css content.
+func StyleCSS() string {
+	return styleCSS
+}
+
+// AppJS returns the app.js content.
+func AppJS() string {
+	return appJS
+}
+
+// PakoJS returns the pako.min.js content.
+func PakoJS() string {
+	return pakoJS
 }
 
 // StaticHandler returns an http.Handler that serves the embedded CSS and JS.
@@ -41,6 +59,9 @@ func StaticHandler() http.Handler {
 		case "app.js":
 			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 			w.Write([]byte(appJS))
+		case "pako.min.js":
+			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+			w.Write([]byte(pakoJS))
 		default:
 			http.NotFound(w, r)
 		}
