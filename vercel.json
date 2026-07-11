@@ -1,0 +1,23 @@
+{
+  "buildCommand": "mkdir -p public && cp -r internal/assets/web/* public/",
+  "outputDirectory": "public",
+  "cleanUrls": true,
+  "rewrites": [
+    { "source": "/static/style.css", "destination": "/style.css" },
+    { "source": "/static/app.js", "destination": "/app.js" },
+    { "source": "/static/pako.min.js", "destination": "/pako.min.js" },
+    { "source": "/sw.js", "destination": "/sw.js" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/sw.js",
+      "headers": [
+        {
+          "key": "Service-Worker-Allowed",
+          "value": "/"
+        }
+      ]
+    }
+  ]
+}
