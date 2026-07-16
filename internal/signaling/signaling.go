@@ -278,45 +278,59 @@ func minifySDP(sdp string) string {
 	}
 
 	lines := strings.Split(sdp, "\r\n")
-	var out []string
-	
-	hasPreferred := false
-	if preferredIPStr != "" {
-		for _, line := range lines {
-			if strings.HasPrefix(line, "a=candidate") && strings.Contains(line, "typ host") && strings.Contains(line, " "+preferredIPStr+" ") {
-				hasPreferred = true
-				break
+
+	var preferredHostCandidate string
+	var fallbackHostCandidate string
+	var srflxCandidate string
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "a=candidate") {
+			minLine := line
+			if idx := strings.Index(minLine, " raddr"); idx > 0 {
+				minLine = minLine[:idx]
+			}
+			if strings.Contains(line, "typ host") {
+				if fallbackHostCandidate == "" {
+					fallbackHostCandidate = minLine
+				}
+				if preferredIPStr != "" && strings.Contains(line, " "+preferredIPStr+" ") && preferredHostCandidate == "" {
+					preferredHostCandidate = minLine
+				}
+			} else if strings.Contains(line, "typ srflx") {
+				if srflxCandidate == "" {
+					srflxCandidate = minLine
+				}
 			}
 		}
 	}
 
-	hasHostCandidate := false
+	hostCandidate := preferredHostCandidate
+	if hostCandidate == "" {
+		hostCandidate = fallbackHostCandidate
+	}
+
+	var out []string
+	candidatesInserted := false
+
 	for _, line := range lines {
 		// Remove unneeded verbosity
 		if strings.HasPrefix(line, "a=extmap") || strings.HasPrefix(line, "a=msid") || strings.HasPrefix(line, "a=ice-options") || strings.HasPrefix(line, "b=") || strings.HasPrefix(line, "a=sctp-port") {
 			continue
 		}
-		// Minify candidate lines to remove redundant fields (raddr, rport, etc.)
-		if strings.HasPrefix(line, "a=candidate") {
-			if !strings.Contains(line, "typ host") {
-				continue
-			}
-			
-			if hasPreferred && preferredIPStr != "" {
-				if !strings.Contains(line, " "+preferredIPStr+" ") {
-					continue
-				}
-			}
 
-			// Keep only the first host candidate to save space in the QR code
-			if hasHostCandidate {
-				continue
+		if strings.HasPrefix(line, "a=candidate") {
+			if !candidatesInserted {
+				if hostCandidate != "" {
+					out = append(out, hostCandidate)
+				}
+				if srflxCandidate != "" {
+					out = append(out, srflxCandidate)
+				}
+				candidatesInserted = true
 			}
-			hasHostCandidate = true
-			if idx := strings.Index(line, " raddr"); idx > 0 {
-				line = line[:idx]
-			}
+			continue
 		}
+
 		out = append(out, line)
 	}
 	return strings.Join(out, "\r\n")
