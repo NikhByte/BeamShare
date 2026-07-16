@@ -262,12 +262,45 @@ func CheckNAT(stunURL string, localIP string) bool {
 
 func getOutboundIP() net.IP {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err == nil {
+		defer conn.Close()
+		localAddr := conn.LocalAddr().(*net.UDPAddr)
+		return localAddr.IP
+	}
+
+	// Fallback to searching local interfaces
+	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
 	}
-	defer conn.Close()
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	return localAddr.IP
+
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+				continue
+			}
+			ip4 := ip.To4()
+			if ip4 != nil {
+				return ip4
+			}
+		}
+	}
+
+	return nil
 }
 
 func minifySDP(sdp string) string {
@@ -305,6 +338,16 @@ func minifySDP(sdp string) string {
 			if hasPreferred && preferredIPStr != "" {
 				if !strings.Contains(line, " "+preferredIPStr+" ") {
 					continue
+				}
+			} else {
+				// Filter out loopback and link-local IPv4 candidates
+				parts := strings.Fields(line)
+				if len(parts) > 4 {
+					ipStr := parts[4]
+					ip := net.ParseIP(ipStr)
+					if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.To4() == nil {
+						continue
+					}
 				}
 			}
 
