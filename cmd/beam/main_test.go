@@ -6,8 +6,8 @@ import (
 )
 
 func TestParseFlags(t *testing.T) {
-	argsIn := []string{"--stun-server=stun:1", "--stun-server", "stun:2", "--turn-server=turn:1", "--turn-username", "user", "--turn-credential=pass", "send", "file.txt"}
-	cleanArgs, iceServers := parseFlags(argsIn)
+	argsIn := []string{"--stun-server=stun:1", "--stun-server", "stun:2", "--turn-server=turn:1", "--turn-username", "user", "--turn-credential=pass", "--discovery-timeout=15", "send", "file.txt"}
+	cleanArgs, iceServers, discoveryTimeout := parseFlags(argsIn)
 
 	expectedArgs := []string{"send", "file.txt"}
 	if !reflect.DeepEqual(cleanArgs, expectedArgs) {
@@ -28,5 +28,9 @@ func TestParseFlags(t *testing.T) {
 
 	if iceServers[1].Username != "user" || iceServers[1].Credential != "pass" {
 		t.Fatalf("expected turn auth, got user=%v pass=%v", iceServers[1].Username, iceServers[1].Credential)
+	}
+	
+	if discoveryTimeout != 15*1000*1000*1000 { // 15 seconds
+		t.Fatalf("expected discovery timeout 15s, got %v", discoveryTimeout)
 	}
 }

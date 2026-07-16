@@ -20,11 +20,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/pion/stun"
 	"github.com/pion/webrtc/v3"
 )
 
@@ -53,13 +55,14 @@ type Session struct {
 	candidates  []webrtc.ICECandidateInit
 	mu          sync.Mutex
 	iceServers  []webrtc.ICEServer
+	discoveryTimeout time.Duration
 
 	// OnOpen is called when the data channel is open and ready to send.
 	OnOpen func(dc *webrtc.DataChannel)
 }
 
 // NewSession creates a new WebRTC PeerConnection configured as the sender.
-func NewSession(iceServers []webrtc.ICEServer) (*Session, error) {
+func NewSession(iceServers []webrtc.ICEServer, discoveryTimeout time.Duration) (*Session, error) {
 	if len(iceServers) == 0 {
 		iceServers = ICEServers
 	}
@@ -73,6 +76,7 @@ func NewSession(iceServers []webrtc.ICEServer) (*Session, error) {
 		pc:          pc,
 		answerReady: make(chan struct{}, 1),
 		iceServers:  iceServers,
+		discoveryTimeout: discoveryTimeout,
 	}
 
 	// Collect trickle ICE candidates as they arrive.
@@ -116,11 +120,11 @@ func (s *Session) CreateOffer(ctx context.Context) (compressedOffer string, err 
 		return "", fmt.Errorf("set local description: %w", err)
 	}
 
-	// Wait for ICE gathering to complete (or timeout after 3s).
+	// Wait for ICE gathering to complete (or timeout).
 	gatherDone := webrtc.GatheringCompletePromise(s.pc)
 	select {
 	case <-gatherDone:
-	case <-time.After(3 * time.Second):
+	case <-time.After(s.discoveryTimeout):
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -153,6 +157,7 @@ func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 			"sdp":        s.rawOffer,
 			"type":       "offer",
 			"iceServers": s.iceServers,
+			"timeout":    s.discoveryTimeout.Milliseconds(),
 		})
 	})
 
@@ -219,31 +224,113 @@ func (s *Session) DataChannel() *webrtc.DataChannel { return s.dc }
 // Close shuts down the peer connection.
 func (s *Session) Close() error { return s.pc.Close() }
 
+// CheckNAT returns true if the host is behind a NAT, i.e., public IP != local IP.
+// It queries the provided STUN URL and times out after 500ms.
+func CheckNAT(stunURL string, localIP string) bool {
+	c, err := stun.Dial("udp", stunURL)
+	if err != nil {
+		return true // assume NAT on error
+	}
+	defer c.Close()
+
+	msg := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+	ipCh := make(chan string, 1)
+
+	err = c.Start(msg, func(res stun.Event) {
+		if res.Error != nil {
+			return
+		}
+		var xorAddr stun.XORMappedAddress
+		if err := xorAddr.GetFrom(res.Message); err != nil {
+			return
+		}
+		ipCh <- xorAddr.IP.String()
+	})
+	if err != nil {
+		return true // assume NAT on error
+	}
+
+	select {
+	case publicIP := <-ipCh:
+		return publicIP != localIP
+	case <-time.After(500 * time.Millisecond):
+		return true // assume NAT on timeout
+	}
+}
+
 // ─── SDP compression helpers ──────────────────────────────────────────────────
 
+func getOutboundIP() net.IP {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP
+}
+
 func minifySDP(sdp string) string {
+	preferredIP := getOutboundIP()
+	preferredIPStr := ""
+	if preferredIP != nil {
+		preferredIPStr = preferredIP.String()
+	}
+
 	lines := strings.Split(sdp, "\r\n")
+
+	var preferredHostCandidate string
+	var fallbackHostCandidate string
+	var srflxCandidate string
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "a=candidate") {
+			minLine := line
+			if idx := strings.Index(minLine, " raddr"); idx > 0 {
+				minLine = minLine[:idx]
+			}
+			if strings.Contains(line, "typ host") {
+				if fallbackHostCandidate == "" {
+					fallbackHostCandidate = minLine
+				}
+				if preferredIPStr != "" && strings.Contains(line, " "+preferredIPStr+" ") && preferredHostCandidate == "" {
+					preferredHostCandidate = minLine
+				}
+			} else if strings.Contains(line, "typ srflx") {
+				if srflxCandidate == "" {
+					srflxCandidate = minLine
+				}
+			}
+		}
+	}
+
+	hostCandidate := preferredHostCandidate
+	if hostCandidate == "" {
+		hostCandidate = fallbackHostCandidate
+	}
+
 	var out []string
-	hasHostCandidate := false
+	candidatesInserted := false
+
 	for _, line := range lines {
 		// Remove unneeded verbosity
 		if strings.HasPrefix(line, "a=extmap") || strings.HasPrefix(line, "a=msid") || strings.HasPrefix(line, "a=ice-options") || strings.HasPrefix(line, "b=") || strings.HasPrefix(line, "a=sctp-port") {
 			continue
 		}
-		// Minify candidate lines to remove redundant fields (raddr, rport, etc.)
+
 		if strings.HasPrefix(line, "a=candidate") {
-			// Keep only the first host candidate to save space in the QR code
-			if !strings.Contains(line, "typ host") {
-				continue
+			if !candidatesInserted {
+				if hostCandidate != "" {
+					out = append(out, hostCandidate)
+				}
+				if srflxCandidate != "" {
+					out = append(out, srflxCandidate)
+				}
+				candidatesInserted = true
 			}
-			if hasHostCandidate {
-				continue
-			}
-			hasHostCandidate = true
-			if idx := strings.Index(line, " raddr"); idx > 0 {
-				line = line[:idx]
-			}
+			continue
 		}
+
 		out = append(out, line)
 	}
 	return strings.Join(out, "\r\n")

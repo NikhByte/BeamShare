@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -30,21 +31,32 @@ var (
 	channelsMu     sync.Mutex
 	liveFinished   bool
 	relayURL       string
+	receiverURL    string
+	liveBufferSize int = 10 * 1024 * 1024 // 10MB
 )
 
 func main() {
 	relayURL = os.Getenv("BEAM_RELAY_URL")
+	receiverURL = os.Getenv("BEAM_RECEIVER_URL")
 
 	// Parse args to extract --relay if present
 	var newArgs []string
 	for i := 0; i < len(os.Args); i++ {
-		if os.Args[i] == "--relay" && i+1 < len(os.Args) {
+		arg := os.Args[i]
+		if arg == "--relay" && i+1 < len(os.Args) {
 			relayURL = os.Args[i+1]
 			i++ // skip next
-		} else if strings.HasPrefix(os.Args[i], "--relay=") {
-			relayURL = strings.TrimPrefix(os.Args[i], "--relay=")
+		} else if strings.HasPrefix(arg, "--relay=") {
+			relayURL = strings.TrimPrefix(arg, "--relay=")
+		} else if (arg == "--receiver" || arg == "--receiver-url") && i+1 < len(os.Args) {
+			receiverURL = os.Args[i+1]
+			i++ // skip next
+		} else if strings.HasPrefix(arg, "--receiver=") {
+			receiverURL = strings.TrimPrefix(arg, "--receiver=")
+		} else if strings.HasPrefix(arg, "--receiver-url=") {
+			receiverURL = strings.TrimPrefix(arg, "--receiver-url=")
 		} else {
-			newArgs = append(newArgs, os.Args[i])
+			newArgs = append(newArgs, arg)
 		}
 	}
 	os.Args = newArgs
@@ -52,11 +64,11 @@ func main() {
 	fi, err := os.Stdin.Stat()
 	isPipe := err == nil && (fi.Mode()&os.ModeCharDevice) == 0
 
-	args, iceServers := parseFlags(os.Args[1:])
+	args, iceServers, discoveryTimeout := parseFlags(os.Args[1:])
 	
 	if len(args) < 1 {
 		if isPipe {
-			runSend("", iceServers)
+			runSend("", iceServers, discoveryTimeout)
 			os.Exit(0)
 		}
 		printHelp()
@@ -68,23 +80,23 @@ func main() {
 	case "send":
 		if len(args) < 2 {
 			if isPipe {
-				runSend("", iceServers)
+				runSend("", iceServers, discoveryTimeout)
 				os.Exit(0)
 			}
 			fmt.Fprintln(os.Stderr, "beam: 'send' requires a file path or piped stdin")
 			os.Exit(1)
 		}
-		runSend(args[1], iceServers)
+		runSend(args[1], iceServers, discoveryTimeout)
 	case "version", "--version", "-v":
 		fmt.Printf("beam version %s\n", version)
 	case "help", "--help", "-h":
 		printHelp()
 	default:
 		if _, err := os.Stat(cmd); err == nil {
-			runSend(cmd, iceServers)
+			runSend(cmd, iceServers, discoveryTimeout)
 		} else {
 			if isPipe {
-				runSend("", iceServers)
+				runSend("", iceServers, discoveryTimeout)
 				os.Exit(0)
 			}
 			fmt.Fprintf(os.Stderr, "beam: unknown command/file '%s'\nRun 'beam help' for usage.\n", cmd)
@@ -93,12 +105,19 @@ func main() {
 	}
 }
 
-func parseFlags(args []string) ([]string, []webrtc.ICEServer) {
+func parseFlags(args []string) ([]string, []webrtc.ICEServer, time.Duration) {
 	var cleanArgs []string
 	var stunServers []string
 	var turnServers []string
 	var turnUsername string
 	var turnCredential string
+	var discoveryTimeout = 10 * time.Second
+
+	if envVal := os.Getenv("BEAM_DISCOVERY_TIMEOUT"); envVal != "" {
+		if val, err := strconv.Atoi(envVal); err == nil {
+			discoveryTimeout = time.Duration(val) * time.Second
+		}
+	}
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -131,9 +150,37 @@ func parseFlags(args []string) ([]string, []webrtc.ICEServer) {
 				turnCredential = args[i+1]
 				i++
 			}
+		} else if strings.HasPrefix(arg, "--discovery-timeout=") {
+			valStr := strings.TrimPrefix(arg, "--discovery-timeout=")
+			if val, err := strconv.Atoi(valStr); err == nil {
+				discoveryTimeout = time.Duration(val) * time.Second
+			}
+		} else if arg == "--discovery-timeout" {
+			if i+1 < len(args) {
+				if val, err := strconv.Atoi(args[i+1]); err == nil {
+					discoveryTimeout = time.Duration(val) * time.Second
+				}
+				i++
+			}
+		} else if strings.HasPrefix(arg, "--buffer-size=") {
+			valStr := strings.TrimPrefix(arg, "--buffer-size=")
+			if val, err := strconv.Atoi(valStr); err == nil {
+				liveBufferSize = val
+			}
+		} else if arg == "--buffer-size" {
+			if i+1 < len(args) {
+				if val, err := strconv.Atoi(args[i+1]); err == nil {
+					liveBufferSize = val
+				}
+				i++
+			}
 		} else {
 			cleanArgs = append(cleanArgs, arg)
 		}
+	}
+
+	if discoveryTimeout > 60*time.Second {
+		discoveryTimeout = 60 * time.Second
 	}
 
 	var iceServers []webrtc.ICEServer
@@ -152,10 +199,10 @@ func parseFlags(args []string) ([]string, []webrtc.ICEServer) {
 		})
 	}
 
-	return cleanArgs, iceServers
+	return cleanArgs, iceServers, discoveryTimeout
 }
 
-func runSend(filePath string, iceServers []webrtc.ICEServer) {
+func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout time.Duration) {
 	var isLive bool
 	var fileName string
 	var fileSize int64
@@ -181,12 +228,37 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 		filePath = absPath
 	}
 
+	// ── Network Probe ─────────────────────────────────────────────────────────
+	if relayURL == "" {
+		fmt.Printf("  %s\n", dimStr("Probing network environment..."))
+		stunServer := "stun.l.google.com:19302"
+		for _, srv := range iceServers {
+			if len(srv.URLs) > 0 {
+				for _, u := range srv.URLs {
+					if strings.HasPrefix(u, "stun:") {
+						stunServer = strings.TrimPrefix(u, "stun:")
+						break
+					}
+				}
+			}
+		}
+
+		// Check if we are behind a NAT
+		isBehindNAT := signaling.CheckNAT(stunServer, server.GetLocalIP())
+		if isBehindNAT {
+			relayURL = "https://beamshare.onrender.com"
+			fmt.Printf("  %s\n", dimStr("NAT detected: automatic relay enabled"))
+		} else {
+			fmt.Printf("  %s\n", dimStr("Local network: direct peer-to-peer available"))
+		}
+	}
+
 	// ── Banner + file metadata ────────────────────────────────────────────────
 	ui.PrintBanner()
 	ui.PrintFileMeta(fileName, fileSize)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
-	srv, err := server.New(filePath)
+	srv, err := server.New(filePath, liveBufferSize)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "beam: %v\n", err)
 		os.Exit(1)
@@ -215,11 +287,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 
 	// ── Phase 3: WebRTC signaling session ─────────────────────────────────────
 	fmt.Printf("  %s\n", dimStr("Setting up WebRTC session…"))
-	session, err := signaling.NewSession(iceServers)
+	session, err := signaling.NewSession(iceServers, discoveryTimeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  warn: WebRTC unavailable (%v) — HTTP-only mode\n", err)
 	} else {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), discoveryTimeout+2*time.Second)
 		defer cancel()
 		_, offerErr := session.CreateOffer(ctx)
 		if offerErr != nil {
@@ -507,19 +579,54 @@ func runSend(filePath string, iceServers []webrtc.ICEServer) {
 	ui.PrintDiscovery(localURL, mdnsName)
 
 	if relClient != nil {
-		fmt.Printf("    %s/?s=%s#k=%s    (global relay)\n", relayURL, relSessionID, relKeyStr)
+		baseHost := relayURL
+		if receiverURL != "" {
+			baseHost = receiverURL
+		}
+		baseHost = strings.TrimRight(baseHost, "/")
+		
+		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		if receiverURL != "" {
+			relayDisplayURL += "&backend=" + url.QueryEscape(relayURL)
+		}
+		relayDisplayURL += "#k=" + relKeyStr
+		fmt.Printf("    %s    (global relay)\n", relayDisplayURL)
+	} else if receiverURL != "" {
+		baseHost := strings.TrimRight(receiverURL, "/")
+		localDisplayURL := fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+		fmt.Printf("    %s    (custom receiver)\n", localDisplayURL)
 	}
 
 	// ── Print QR ─────────────────────────────────────────────────────────────
-	qrURL := localURL
+	var qrURL string
 	if relClient != nil {
-		qrURL = fmt.Sprintf("%s/?s=%s", relayURL, relSessionID)
+		baseHost := relayURL
+		if receiverURL != "" {
+			baseHost = receiverURL
+		}
+		baseHost = strings.TrimRight(baseHost, "/")
+
+		qrURL = fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		if receiverURL != "" {
+			qrURL += "&backend=" + url.QueryEscape(relayURL)
+		}
 		if session != nil {
-			qrURL += "&mode=webrtc&offer=" + session.CompressedOffer()
+			qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
 		}
 		qrURL += "#k=" + relKeyStr
-	} else if session != nil {
-		qrURL = localURL + "?mode=webrtc&offer=" + session.CompressedOffer()
+	} else {
+		if receiverURL != "" {
+			baseHost := strings.TrimRight(receiverURL, "/")
+			qrURL = fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+			if session != nil {
+				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+			}
+		} else {
+			qrURL = localURL
+			if session != nil {
+				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+			}
+		}
 	}
 	ui.PrintQR(qrURL)
 
@@ -589,6 +696,8 @@ func printHelp() {
     --turn-server      Custom TURN server URL (can be specified multiple times)
     --turn-username    TURN server username for authentication
     --turn-credential  TURN server credential/password for authentication
+
+    --discovery-timeout Custom ICE gathering timeout in seconds (default 10, max 60)
 
   HOW IT WORKS:
     Phase 1  Local HTTP server + embedded Gaze web UI

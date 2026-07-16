@@ -1,4 +1,35 @@
-function apiPath(path) { const s = new URLSearchParams(window.location.search).get('s'); if (s) { return path.includes('?') ? path + '&s=' + s : path + '?s=' + s; } return path; }
+function getBackendURL() {
+  const params = new URLSearchParams(window.location.search);
+  let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
+  if (!backend) {
+    backend = window.location.origin;
+    if (backend.includes('vercel.app') || backend.startsWith('file://')) {
+      backend = 'https://beamshare.onrender.com';
+    } else if (backend.includes('localhost') || backend.includes('127.0.0.1')) {
+      if (window.location.port !== '8080') {
+        backend = 'http://localhost:8080';
+      }
+    }
+  }
+  if (backend && backend.endsWith('/')) {
+    backend = backend.slice(0, -1);
+  }
+  return backend;
+}
+
+function apiPath(path) {
+  const backend = getBackendURL();
+  const params = new URLSearchParams(window.location.search);
+  const s = params.get('s');
+  let fullPath = path;
+  if (s) {
+    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+  }
+  if (backend) {
+    return backend + fullPath;
+  }
+  return fullPath;
+}
 /**
  * app.js — Gaze Receiver (Phase 4 & 5: Direct-to-Disk + Live Pipe)
  *
@@ -239,6 +270,7 @@ let diskFileHandle     = null;
 let webrtcDataChannel  = null;
 let currentShareURL    = "";
 let useIndexedDB       = false;
+let useOPFS            = false;
 
 // ── IndexedDB Buffering ────────────────────────────────────────────────────────
 const IDB_NAME = 'GazeTransferDB';
@@ -303,7 +335,7 @@ function getAllChunksIDB() {
 }
 
 // ── State machine ─────────────────────────────────────────────────────────────
-const STATES = ['loading', 'ready', 'webrtc', 'downloading', 'livepipe', 'done', 'error'];
+const STATES = ['loading', 'ready', 'webrtc', 'downloading', 'livepipe', 'done', 'error', 'send-home', 'send-ready', 'send-sharing'];
 
 function setState(name) {
   STATES.forEach((s) => {
@@ -375,12 +407,13 @@ const RAM_WARNING_THRESHOLD = 500 * 1024 * 1024; // 500 MB
 function checkRamWarning(size) {
   return new Promise((resolve) => {
     const useDiskStream = typeof window.showSaveFilePicker === 'function';
+    const opfsSupported = !!(navigator.storage && navigator.storage.getDirectory);
     const swSupported = 'serviceWorker' in navigator;
-    // We shouldn't warn if disk stream, service worker stream, or IndexedDB are used.
+    // We shouldn't warn if disk stream, OPFS stream, service worker stream, or IndexedDB are used.
     // Wait, IndexedDB buffering is always used as a fallback now. So maybe we don't need warning?
     // Actually, IndexedDB is used, but we'll stick to the original logic or improve it:
-    // If we have swSupported, we don't need to warn.
-    if (useDiskStream || swSupported || size <= RAM_WARNING_THRESHOLD || size === -1) {
+    // If we have swSupported or opfsSupported, we don't need to warn.
+    if (useDiskStream || opfsSupported || swSupported || size <= RAM_WARNING_THRESHOLD || size === -1) {
       resolve(true);
       return;
     }
@@ -469,6 +502,55 @@ function init() {
     }
   });
 
+  // Tab Switching Click Listeners
+  const receiveBtn = document.getElementById('tab-receive');
+  const sendBtn = document.getElementById('tab-send');
+  
+  receiveBtn?.addEventListener('click', () => switchTab('receive'));
+  sendBtn?.addEventListener('click', () => switchTab('send'));
+
+  // Sender File drop/select UI handlers
+  const sendDropZone = document.getElementById('send-drop-zone');
+  const senderFileInput = document.getElementById('sender-file-input');
+
+  sendDropZone?.addEventListener('click', () => senderFileInput?.click());
+  senderFileInput?.addEventListener('change', (e) => {
+    handleSenderFileSelect(e.target.files[0]);
+  });
+
+  sendDropZone?.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    sendDropZone.classList.add('dragover');
+  });
+  sendDropZone?.addEventListener('dragleave', () => {
+    sendDropZone.classList.remove('dragover');
+  });
+  sendDropZone?.addEventListener('drop', (e) => {
+    e.preventDefault();
+    sendDropZone.classList.remove('dragover');
+    handleSenderFileSelect(e.dataTransfer.files[0]);
+  });
+
+  // Sender button actions
+  document.getElementById('btn-start-share')?.addEventListener('click', startSenderSharing);
+  document.getElementById('btn-cancel-share')?.addEventListener('click', () => {
+    senderFile = null;
+    setState('send-home');
+  });
+  document.getElementById('btn-stop-share')?.addEventListener('click', stopSenderSharing);
+
+  document.getElementById('btn-copy-send-url')?.addEventListener('click', () => {
+    const input = document.getElementById('send-url-input');
+    if (input) {
+      input.select();
+      navigator.clipboard.writeText(input.value);
+      const btn = document.getElementById('btn-copy-send-url');
+      const old = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => btn.textContent = old, 1500);
+    }
+  });
+
   initSpotlight();
   bootstrap();
 }
@@ -484,6 +566,8 @@ function resetState() {
   webrtcDataChannel = null;
   currentShareURL = "";
   useIndexedDB = false;
+  useOPFS = false;
+  navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
   if (idb) clearIDB().catch(console.error);
   document.getElementById('done-share-container')?.classList.add('hidden');
   
@@ -503,7 +587,48 @@ function resetState() {
 
 async function bootstrap() {
   const params = new URLSearchParams(window.location.search);
-  const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('offer');
+  const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
+  const localURL = params.get('local');
+  const sessionID = params.get('s');
+
+  // Reset error UI states in case they were previously set
+  const errorLabel = document.querySelector('#state-error .state-label');
+  if (errorLabel) errorLabel.textContent = "Connection error";
+  const retryBtn = document.getElementById('btn-retry');
+  if (retryBtn) retryBtn.classList.remove('hidden');
+
+  const tabHeader = document.getElementById('tab-header');
+  if (localURL || sessionID) {
+    if (tabHeader) tabHeader.classList.add('hidden');
+  } else {
+    if (tabHeader) tabHeader.classList.remove('hidden');
+  }
+
+  if (!localURL && !sessionID) {
+    if (errorLabel) errorLabel.textContent = "Gaze is ready";
+    showError("No active transfer session. Run 'beam send <file>' on the sending device and open the generated link or scan the QR code to receive.");
+    if (retryBtn) retryBtn.classList.add('hidden');
+    return;
+  }
+
+  if (localURL) {
+    try {
+      setLoadingSub('Attempting direct local connection…');
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1500);
+      
+      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      
+      if (res.ok) {
+        console.log("Local connection successful, using as backend...");
+        window.GAZE_BACKEND_URL = localURL;
+        // Do not return, continue to bootstrap flow using localURL as backend
+      }
+    } catch (e) {
+      console.warn("Direct local connection failed, falling back to relay:", e);
+    }
+  }
 
   if (isWebRTCMode && typeof RTCPeerConnection !== 'undefined') {
     setLoadingSub('Connecting WebRTC signaling tunnel…');
@@ -557,10 +682,11 @@ async function startHTTPDownload() {
 
   // Try to use FileSystem API for streaming to disk if supported
   const useDiskStream = typeof window.showSaveFilePicker === 'function';
+  const opfsSupported = !!(navigator.storage && navigator.storage.getDirectory);
   const swSupported = 'serviceWorker' in navigator;
-  useIndexedDB = !useDiskStream && !swSupported;
+  useIndexedDB = !useDiskStream && !opfsSupported && !swSupported;
 
-  if (!useDiskStream && !swSupported) {
+  if (!useDiskStream && !opfsSupported && !swSupported) {
     console.warn("Advanced streaming not supported. Large files may cause Out of Memory errors.");
     alert("Warning: Streaming direct-to-disk is not supported in this browser. Large files may fail due to RAM limits.");
   }
@@ -574,15 +700,40 @@ async function startHTTPDownload() {
       diskWritableStream = await diskFileHandle.createWritable();
       useIndexedDB = false;
     } catch (pickerErr) {
-      console.warn("Direct-to-disk picker cancelled/failed, falling back to SW or IndexedDB:", pickerErr);
+      console.warn("Direct-to-disk picker cancelled/failed, falling back to OPFS, SW, or IndexedDB:", pickerErr);
       diskWritableStream = null;
-      useIndexedDB = !swSupported;
     }
   }
 
-  if (!diskWritableStream && swSupported) {
+  if (!diskWritableStream && opfsSupported) {
+    try {
+      const root = await navigator.storage.getDirectory();
+      try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
+      
+      const estimate = await navigator.storage.estimate();
+      if (estimate && estimate.quota && currentFile.size > (estimate.quota - estimate.usage)) {
+         throw new Error("Device disk is full");
+      }
+      
+      diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
+      diskWritableStream = await diskFileHandle.createWritable();
+      useOPFS = true;
+      useIndexedDB = false;
+    } catch (err) {
+      console.error("OPFS init failed:", err);
+      if (err.message === "Device disk is full") {
+         showError("Not enough disk space for transfer.");
+         return;
+      }
+      diskWritableStream = null;
+      useOPFS = false;
+    }
+  }
+
+  if (!diskWritableStream && swSupported && !useOPFS) {
     swPipePort = await getSWPipe(currentFile);
-  } else if (!diskWritableStream && useIndexedDB) {
+  } else if (!diskWritableStream && (useIndexedDB || !swSupported)) {
+    useIndexedDB = true;
     if (initialOffset === 0) {
       await clearIDB();
     }
@@ -683,6 +834,10 @@ async function startHTTPDownload() {
 
     if (diskWritableStream) {
       await diskWritableStream.close();
+      if (useOPFS) {
+        const file = await diskFileHandle.getFile();
+        triggerSave(file, currentFile.name);
+      }
     } else if (swPipePort) {
       swPipePort.postMessage('EOF');
     } else {
@@ -694,11 +849,15 @@ async function startHTTPDownload() {
       triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
     }
 
-    let modeDesc = diskWritableStream ? 'LAN HTTP (Direct Disk)' : (swPipePort ? 'LAN HTTP (SW Pipe)' : (useIndexedDB ? 'LAN HTTP (IndexedDB)' : 'LAN HTTP (RAM Blob)'));
+    let modeDesc = diskWritableStream ? (useOPFS ? 'LAN HTTP (OPFS)' : 'LAN HTTP (Direct Disk)') : (swPipePort ? 'LAN HTTP (SW Pipe)' : (useIndexedDB ? 'LAN HTTP (IndexedDB)' : 'LAN HTTP (RAM Blob)'));
     showDone(currentFile.name, currentFile.size, modeDesc);
 
   } catch (err) {
-    showError(`Download failed: ${err.message}`);
+    if (err.name === 'QuotaExceededError' || err.message.includes('Quota') || (err.message && err.message.includes('disk is full'))) {
+      showError("Transfer failed: Device disk is full.");
+    } else {
+      showError(`Download failed: ${err.message}`);
+    }
   }
 }
 
@@ -758,27 +917,9 @@ async function decompressOffer(base64Str) {
   for (let i = 0; i < len; i++) {
     bytes[i] = binStr.charCodeAt(i);
   }
-  const ds = new DecompressionStream('deflate');
-  const writer = ds.writable.getWriter();
-  writer.write(bytes);
-  writer.close();
   
-  const reader = ds.readable.getReader();
-  const chunks = [];
-  while(true) {
-    const {done, value} = await reader.read();
-    if(done) break;
-    chunks.push(value);
-  }
-  
-  const totalLength = chunks.reduce((acc, c) => acc + c.length, 0);
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for(let c of chunks) {
-    result.set(c, offset);
-    offset += c.length;
-  }
-  return new TextDecoder().decode(result);
+  const decompressed = pako.inflate(bytes);
+  return new TextDecoder().decode(decompressed);
 }
 
 // ── WebRTC P2P mode ───────────────────────────────────────────────────────────
@@ -789,7 +930,7 @@ async function startWebRTC() {
   // 1. Fetch the full SDP offer from the server.
   let offer;
   const params = new URLSearchParams(window.location.search);
-  const embeddedOffer = params.get('offer');
+  const embeddedOffer = params.get('sdp') || params.get('offer');
 
   if (embeddedOffer) {
     setWebRTCSub('Decoding embedded SDP offer…');
@@ -826,13 +967,24 @@ async function startWebRTC() {
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
 
+  setWebRTCSub('Gathering network candidates…');
   // Wait for ICE gathering.
   await new Promise((resolve) => {
     if (pc.iceGatheringState === 'complete') { resolve(); return; }
     pc.addEventListener('icegatheringstatechange', () => {
       if (pc.iceGatheringState === 'complete') resolve();
     });
-    setTimeout(resolve, 3000); // safety timeout
+    
+    // Default to 10 seconds (10000 ms) unless overridden by the sender's offer payload/query param
+    let waitTime = 10000;
+    const urlTimeout = params.get('timeout');
+    if (urlTimeout) {
+      waitTime = parseInt(urlTimeout, 10);
+    } else if (offer.timeout) {
+      waitTime = offer.timeout;
+    }
+    if (waitTime > 60000) waitTime = 60000;
+    setTimeout(resolve, waitTime);
   });
 
   // 4. POST answer to sender.
@@ -917,10 +1069,11 @@ async function startWebRTC() {
   } else {
     // ── Direct-to-Disk File transfer over WebRTC data channel ──────────────────
     const useDiskStream = typeof window.showSaveFilePicker === 'function';
+    const opfsSupported = !!(navigator.storage && navigator.storage.getDirectory);
     const swSupported = 'serviceWorker' in navigator;
-    useIndexedDB = !useDiskStream && !swSupported;
+    useIndexedDB = !useDiskStream && !opfsSupported && !swSupported;
 
-    if (!useDiskStream && !swSupported) {
+    if (!useDiskStream && !opfsSupported && !swSupported) {
       console.warn("Advanced streaming not supported. Large files may cause Out of Memory errors.");
       alert("Warning: Streaming direct-to-disk is not supported in this browser. Large files may fail due to RAM limits.");
     }
@@ -937,15 +1090,41 @@ async function startWebRTC() {
         }
         useIndexedDB = false;
       } catch (pickerErr) {
-        console.warn("WebRTC Direct-to-disk picker cancelled, falling back to SW or IndexedDB:", pickerErr);
+        console.warn("WebRTC Direct-to-disk picker cancelled, falling back to OPFS, SW, or IndexedDB:", pickerErr);
         diskWritableStream = null;
-        useIndexedDB = !swSupported;
       }
     }
 
-    if (!diskWritableStream && swSupported) {
+    if (!diskWritableStream && opfsSupported) {
+      try {
+        const root = await navigator.storage.getDirectory();
+        try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
+        
+        const estimate = await navigator.storage.estimate();
+        if (estimate && estimate.quota && currentFile.size > (estimate.quota - estimate.usage)) {
+           throw new Error("Device disk is full");
+        }
+        
+        diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
+        diskWritableStream = await diskFileHandle.createWritable();
+        useOPFS = true;
+        useIndexedDB = false;
+      } catch (err) {
+        console.error("OPFS init failed:", err);
+        if (err.message === "Device disk is full") {
+           showError("Not enough disk space for transfer.");
+           pc.close();
+           return;
+        }
+        diskWritableStream = null;
+        useOPFS = false;
+      }
+    }
+
+    if (!diskWritableStream && swSupported && !useOPFS) {
       swPipePort = await getSWPipe(currentFile);
-    } else if (!diskWritableStream && useIndexedDB) {
+    } else if (!diskWritableStream && (useIndexedDB || !swSupported)) {
+      useIndexedDB = true;
       if (initialOffset === 0) {
         await clearIDB();
       }
@@ -965,45 +1144,59 @@ async function startWebRTC() {
       }
 
       dc.onmessage = async (e) => {
-        if (typeof e.data === 'string') {
-          if (e.data === "EOF") {
-            if (diskWritableStream) {
-              await diskWritableStream.close();
-            } else if (swPipePort) {
-              swPipePort.postMessage("EOF");
-            } else {
-              let finalChunks = receivedChunks;
-              if (useIndexedDB) {
-                finalChunks = await getAllChunksIDB();
-                await clearIDB();
+        try {
+          if (typeof e.data === 'string') {
+            if (e.data === "EOF") {
+              if (diskWritableStream) {
+                await diskWritableStream.close();
+                if (useOPFS) {
+                  const file = await diskFileHandle.getFile();
+                  triggerSave(file, currentFile.name);
+                }
+              } else if (swPipePort) {
+                swPipePort.postMessage("EOF");
+              } else {
+                let finalChunks = receivedChunks;
+                if (useIndexedDB) {
+                  finalChunks = await getAllChunksIDB();
+                  await clearIDB();
+                }
+                triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
               }
-              triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
+              resolve();
             }
-            resolve();
+            return;
           }
-          return;
-        }
 
-        const chunk = new Uint8Array(e.data);
-        if (diskWritableStream) {
-          // Direct disk write
-          await diskWritableStream.write(chunk);
-        } else if (swPipePort) {
-          swPipePort.postMessage(chunk);
-        } else if (useIndexedDB) {
-          // IndexedDB buffer
-          await storeChunkIDB(chunk);
-        } else {
-          // RAM buffer
-          receivedChunks.push(chunk);
-        }
+          const chunk = new Uint8Array(e.data);
+          if (diskWritableStream) {
+            // Direct disk write
+            await diskWritableStream.write(chunk);
+          } else if (swPipePort) {
+            swPipePort.postMessage(chunk);
+          } else if (useIndexedDB) {
+            // IndexedDB buffer
+            await storeChunkIDB(chunk);
+          } else {
+            // RAM buffer
+            receivedChunks.push(chunk);
+          }
 
-        receivedBytes += chunk.byteLength;
-        maybeSaveProgress();
-        if (totalBytes > 0) {
-          updateProgress(receivedBytes / totalBytes);
-          updateDLStats(receivedBytes, totalBytes);
-          updateSpeed(receivedBytes);
+          receivedBytes += chunk.byteLength;
+          maybeSaveProgress();
+          if (totalBytes > 0) {
+            updateProgress(receivedBytes / totalBytes);
+            updateDLStats(receivedBytes, totalBytes);
+            updateSpeed(receivedBytes);
+          }
+        } catch (err) {
+          if (err.name === 'QuotaExceededError' || err.message.includes('Quota') || (err.message && err.message.includes('disk is full'))) {
+             showError("Transfer failed: Device disk is full.");
+          } else {
+             showError(`Transfer failed: ${err.message}`);
+          }
+          dc.close();
+          reject(err);
         }
       };
 
@@ -1013,7 +1206,7 @@ async function startWebRTC() {
       };
     });
 
-    let modeDesc = diskWritableStream ? 'WebRTC P2P (Direct Disk)' : (swPipePort ? 'WebRTC P2P (SW Pipe)' : (useIndexedDB ? 'WebRTC P2P (IndexedDB)' : 'WebRTC P2P (RAM Blob)'));
+    let modeDesc = diskWritableStream ? (useOPFS ? 'WebRTC P2P (OPFS)' : 'WebRTC P2P (Direct Disk)') : (swPipePort ? 'WebRTC P2P (SW Pipe)' : (useIndexedDB ? 'WebRTC P2P (IndexedDB)' : 'WebRTC P2P (RAM Blob)'));
     showDone(currentFile.name, currentFile.size, modeDesc);
     pc.close();
   }
@@ -1149,6 +1342,9 @@ function showDone(name, size, mode) {
 
 function showError(msg) {
   if (useIndexedDB) clearIDB().catch(console.error);
+  if (useOPFS) {
+    navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
+  }
   document.getElementById('error-msg').textContent = msg;
   setState('error');
 }
@@ -1225,6 +1421,276 @@ function mimeIcon(mime) {
   return `<svg width="32" height="32" viewBox="0 0 24 24" ${a} aria-hidden="true"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
 }
 
+
+// ── Web Sender States & Functions ──
+let senderFile = null;
+let senderPeerConnection = null;
+let senderDataChannel = null;
+let senderSessionID = null;
+let isSenderPolling = false;
+let senderAborted = false;
+
+function handleSenderFileSelect(file) {
+  if (!file) return;
+  senderFile = file;
+  document.getElementById('sender-file-name').textContent = file.name;
+  document.getElementById('sender-file-size').textContent = formatBytes(file.size);
+  document.getElementById('sender-file-icon-wrap').innerHTML = mimeIcon(file.type);
+  setState('send-ready');
+}
+
+async function startSenderSharing() {
+  senderAborted = false;
+  setState('loading');
+  setLoadingSub('Registering session on relay server…');
+
+  const backend = getBackendURL();
+
+  try {
+    const regRes = await fetch(`${backend}/relay/register`);
+    if (!regRes.ok) throw new Error(`Register failed: HTTP ${regRes.status}`);
+    const regData = await regRes.json();
+    senderSessionID = regData.session;
+
+    setLoadingSub('Creating WebRTC peer connection…');
+    senderPeerConnection = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+    
+    const localCandidates = [];
+    senderPeerConnection.onicecandidate = (e) => {
+      if (e.candidate) {
+        localCandidates.push(e.candidate.toJSON());
+      }
+    };
+
+    senderDataChannel = senderPeerConnection.createDataChannel("beamshare", { ordered: true });
+    setupSenderDataChannel();
+
+    const offer = await senderPeerConnection.createOffer();
+    await senderPeerConnection.setLocalDescription(offer);
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    setLoadingSub('Publishing SDP offer to relay…');
+    const stateRes = await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        offer: senderPeerConnection.localDescription.sdp,
+        candidates: localCandidates,
+        meta: {
+          name: senderFile.name,
+          size: senderFile.size,
+          mime: senderFile.type || 'application/octet-stream'
+        }
+      })
+    });
+    if (!stateRes.ok) throw new Error(`Publish state failed: HTTP ${stateRes.status}`);
+
+    const shareURL = new URL(window.location.origin);
+    shareURL.searchParams.set('s', senderSessionID);
+    shareURL.searchParams.set('backend', backend);
+
+    document.getElementById('send-url-input').value = shareURL.href;
+    document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
+    
+    document.getElementById('send-link-section').classList.remove('hidden');
+    document.getElementById('send-progress-section').classList.add('hidden');
+    document.getElementById('send-status-label').textContent = "Waiting for receiver…";
+
+    setMode('sender', 'P2P Sender Mode');
+    setState('send-sharing');
+
+    startSenderPolling(backend);
+
+  } catch (err) {
+    showError(`Sender setup failed: ${err.message}`);
+  }
+}
+
+function setupSenderDataChannel() {
+  senderDataChannel.onopen = () => {
+    console.log("WebRTC data channel is open!");
+    document.getElementById('send-link-section').classList.add('hidden');
+    document.getElementById('send-progress-section').classList.remove('hidden');
+    document.getElementById('send-status-label').textContent = "Connecting to peer…";
+  };
+
+  senderDataChannel.onmessage = async (e) => {
+    if (typeof e.data === 'string' && e.data.startsWith('OFFSET:')) {
+      const offset = parseInt(e.data.split(':')[1], 10);
+      document.getElementById('send-status-label').textContent = "Uploading file…";
+      try {
+        await streamFileToDataChannel(offset);
+      } catch (err) {
+        console.error("WebRTC streaming failed:", err);
+      }
+    }
+  };
+
+  senderDataChannel.onclose = () => {
+    console.log("Data channel closed");
+  };
+}
+
+async function streamFileToDataChannel(initialOffset) {
+  const chunkSize = 65536;
+  let offset = initialOffset;
+  const total = senderFile.size;
+
+  const progressCircle = document.getElementById('send-progress-circle');
+  const progressPct = document.getElementById('send-progress-pct');
+  const statsEl = document.getElementById('send-stats');
+
+  while (offset < total && !senderAborted) {
+    if (senderDataChannel.readyState !== 'open') {
+      throw new Error("Data channel is no longer open");
+    }
+
+    const chunkBlob = senderFile.slice(offset, offset + chunkSize);
+    const chunkBuffer = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(chunkBlob);
+    });
+
+    while (senderDataChannel.bufferedAmount > 1024 * 1024) {
+      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    senderDataChannel.send(chunkBuffer);
+    offset += chunkBuffer.byteLength;
+
+    const progress = offset / total;
+    if (progressPct) progressPct.textContent = `${Math.round(progress * 100)}%`;
+    if (progressCircle) {
+      const strokeDashoffset = 263.9 - (263.9 * progress);
+      progressCircle.style.strokeDashoffset = strokeDashoffset;
+    }
+    if (statsEl) {
+      statsEl.textContent = `${formatBytes(offset)} / ${formatBytes(total)}`;
+    }
+  }
+
+  if (senderAborted) return;
+
+  while (senderDataChannel.bufferedAmount > 0) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  senderDataChannel.send("EOF");
+  document.getElementById('send-status-label').textContent = "Transfer Complete!";
+}
+
+async function startSenderPolling(backend) {
+  if (isSenderPolling) return;
+  isSenderPolling = true;
+
+  while (isSenderPolling && !senderAborted) {
+    try {
+      const pollRes = await fetch(`${backend}/relay/poll?session=${senderSessionID}`);
+      if (!pollRes.ok) {
+        if (pollRes.status === 404) {
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+
+      const data = await pollRes.json();
+      if (data.action === 'answer') {
+        await senderPeerConnection.setRemoteDescription(new RTCSessionDescription({
+          type: 'answer',
+          sdp: data.answer
+        }));
+      } else if (data.action === 'download') {
+        document.getElementById('send-link-section').classList.add('hidden');
+        document.getElementById('send-progress-section').classList.remove('hidden');
+        document.getElementById('send-status-label').textContent = "Streaming via HTTP relay…";
+        await streamFileToHTTP(backend);
+        break;
+      }
+    } catch (err) {
+      console.warn("Polling error:", err);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+  isSenderPolling = false;
+}
+
+async function streamFileToHTTP(backend) {
+  const progressCircle = document.getElementById('send-progress-circle');
+  const progressPct = document.getElementById('send-progress-pct');
+  const statsEl = document.getElementById('send-stats');
+
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        const progress = e.loaded / e.total;
+        if (progressPct) progressPct.textContent = `${Math.round(progress * 100)}%`;
+        if (progressCircle) {
+          const strokeDashoffset = 263.9 - (263.9 * progress);
+          progressCircle.style.strokeDashoffset = strokeDashoffset;
+        }
+        if (statsEl) {
+          statsEl.textContent = `${formatBytes(e.loaded)} / ${formatBytes(e.total)}`;
+        }
+      }
+    };
+
+    const uploadPromise = new Promise((resolve, reject) => {
+      xhr.onload = () => {
+        if (xhr.status === 200) {
+          document.getElementById('send-status-label').textContent = "Transfer Complete!";
+          resolve();
+        } else {
+          reject(new Error(`HTTP ${xhr.status}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("Network error during HTTP fallback upload"));
+    });
+
+    xhr.open('POST', `${backend}/relay/data?session=${senderSessionID}`, true);
+    xhr.send(senderFile);
+    await uploadPromise;
+
+  } catch (err) {
+    showError(`HTTP upload failed: ${err.message}`);
+  }
+}
+
+function stopSenderSharing() {
+  senderAborted = true;
+  isSenderPolling = false;
+  
+  if (senderDataChannel) {
+    try { senderDataChannel.close(); } catch(e){}
+    senderDataChannel = null;
+  }
+  if (senderPeerConnection) {
+    try { senderPeerConnection.close(); } catch(e){}
+    senderPeerConnection = null;
+  }
+  
+  resetState();
+  switchTab('send');
+}
+
+function switchTab(tab) {
+  const receiveBtn = document.getElementById('tab-receive');
+  const sendBtn = document.getElementById('tab-send');
+  if (tab === 'receive') {
+    receiveBtn?.classList.add('active');
+    sendBtn?.classList.remove('active');
+    bootstrap();
+  } else {
+    sendBtn?.classList.add('active');
+    receiveBtn?.classList.remove('active');
+    setState('send-home');
+  }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', init);
@@ -1233,6 +1699,9 @@ if (document.readyState === 'loading') {
 }
 
 window.addEventListener('pagehide', () => {
+  if (useOPFS) {
+    navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
+  }
   if (useIndexedDB && idb) {
     // Attempt best-effort synchronous-like clear
     try {

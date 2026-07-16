@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: beamshare-relay
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
