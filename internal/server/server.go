@@ -84,6 +84,8 @@ func New(filePath string) (*Server, error) {
 	// Core routes.
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/sw.js", s.handleServiceWorker)
+	mux.HandleFunc("/robots.txt", assets.RobotsTxtHandler)
+	mux.HandleFunc("/sitemap.xml", assets.SitemapXMLHandler)
 	mux.HandleFunc("/api/meta", s.handleMeta)
 	mux.HandleFunc("/api/download", s.handleDownload)
 	mux.HandleFunc("/api/upload", s.handleUpload)
