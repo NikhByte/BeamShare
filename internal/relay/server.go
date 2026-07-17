@@ -6,6 +6,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -183,7 +184,19 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(assets.ServiceWorkerJS()))
 		return
 	}
-	assets.StaticHandler().ServeHTTP(w, r)
+	if r.URL.Path == "/robots.txt" {
+		assets.RobotsTxtHandler(w, r)
+		return
+	}
+	if r.URL.Path == "/sitemap.xml" {
+		assets.SitemapXMLHandler(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/static/") {
+		http.StripPrefix("/static/", assets.StaticHandler()).ServeHTTP(w, r)
+		return
+	}
+	http.NotFound(w, r)
 }
 
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {

@@ -67,3 +67,46 @@ func StaticHandler() http.Handler {
 		}
 	})
 }
+
+// RobotsTxtHandler serves a dynamic robots.txt file.
+func RobotsTxtHandler(w http.ResponseWriter, r *http.Request) {
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	host := r.Host
+	if host == "" {
+		host = "localhost"
+	}
+
+	content := "User-agent: *\n" +
+		"Allow: /\n" +
+		"Sitemap: " + scheme + "://" + host + "/sitemap.xml\n"
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte(content))
+}
+
+// SitemapXMLHandler serves a dynamic sitemap.xml file.
+func SitemapXMLHandler(w http.ResponseWriter, r *http.Request) {
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	host := r.Host
+	if host == "" {
+		host = "localhost"
+	}
+
+	content := `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>` + scheme + `://` + host + `/</loc>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>`
+
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.Write([]byte(content))
+}
