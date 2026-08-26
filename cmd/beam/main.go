@@ -32,6 +32,7 @@ var (
 	liveFinished   bool
 	relayURL       string
 	receiverURL    string
+	liveBufferSize int = 10 * 1024 * 1024 // 10MB
 )
 
 func main() {
@@ -161,6 +162,18 @@ func parseFlags(args []string) ([]string, []webrtc.ICEServer, time.Duration) {
 				}
 				i++
 			}
+		} else if strings.HasPrefix(arg, "--buffer-size=") {
+			valStr := strings.TrimPrefix(arg, "--buffer-size=")
+			if val, err := strconv.Atoi(valStr); err == nil {
+				liveBufferSize = val
+			}
+		} else if arg == "--buffer-size" {
+			if i+1 < len(args) {
+				if val, err := strconv.Atoi(args[i+1]); err == nil {
+					liveBufferSize = val
+				}
+				i++
+			}
 		} else {
 			cleanArgs = append(cleanArgs, arg)
 		}
@@ -245,7 +258,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	ui.PrintFileMeta(fileName, fileSize)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
-	srv, err := server.New(filePath)
+	srv, err := server.New(filePath, liveBufferSize)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "beam: %v\n", err)
 		os.Exit(1)

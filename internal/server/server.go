@@ -3,7 +3,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/beamshare/beam/internal/assets"
 	qrcode "github.com/skip2/go-qrcode"
@@ -32,10 +30,10 @@ type Server struct {
 	downloads    int
 
 	// Phase 5: Live Pipe
-	isLivePipe   bool
-	liveData     []byte
-	liveClients  []chan []byte
-	liveFinished bool
+	isLivePipe     bool
+	liveBuf        *RingBuffer
+	liveClients    []chan []byte
+	liveFinished   bool
 }
 
 // FileMeta is the JSON response for /api/meta.
@@ -47,7 +45,7 @@ type FileMeta struct {
 
 // New creates and configures a new Server. If filePath is empty,
 // it runs in Live Pipe mode.
-func New(filePath string) (*Server, error) {
+func New(filePath string, bufferSize int) (*Server, error) {
 	var fileName string
 	var fileSize int64
 	var isLive bool
@@ -73,12 +71,16 @@ func New(filePath string) (*Server, error) {
 	mux := http.NewServeMux()
 
 	s := &Server{
-		filePath:   filePath,
-		fileName:   fileName,
-		fileSize:   fileSize,
-		port:       port,
-		mux:        mux,
-		isLivePipe: isLive,
+		filePath:       filePath,
+		fileName:       fileName,
+		fileSize:       fileSize,
+		port:           port,
+		mux:            mux,
+		isLivePipe:     isLive,
+	}
+
+	if isLive {
+		s.liveBuf = NewRingBuffer(bufferSize)
 	}
 
 	// Core routes.
@@ -114,25 +116,8 @@ func (s *Server) WriteLive(data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.liveData = append(s.liveData, data...)
-
-	const maxLiveBacklog = 1 * 1024 * 1024 // 1MB
-	if len(s.liveData) > maxLiveBacklog {
-		truncateIdx := len(s.liveData) - maxLiveBacklog
-		nlIdx := bytes.IndexByte(s.liveData[truncateIdx:], '\n')
-		idx := truncateIdx
-		if nlIdx >= 0 {
-			idx += nlIdx + 1
-		} else {
-			// Fallback: ensure we don't truncate in the middle of a UTF-8 multi-byte character
-			for idx < len(s.liveData) && !utf8.RuneStart(s.liveData[idx]) {
-				idx++
-			}
-		}
-		
-		// Slice from idx to drop old data. Go's append will automatically reallocate 
-		// when capacity is reached, keeping memory footprint bounded.
-		s.liveData = s.liveData[idx:]
+	if s.liveBuf != nil {
+		s.liveBuf.Write(data)
 	}
 
 	for _, ch := range s.liveClients {
@@ -160,9 +145,10 @@ func (s *Server) CloseLive() {
 func (s *Server) GetLiveBacklog() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data := make([]byte, len(s.liveData))
-	copy(data, s.liveData)
-	return data
+	if s.liveBuf != nil {
+		return s.liveBuf.Bytes()
+	}
+	return nil
 }
 
 // Mux returns the underlying ServeMux.
@@ -233,8 +219,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	if s.isLivePipe {
 		s.mu.Lock()
-		data := make([]byte, len(s.liveData))
-		copy(data, s.liveData)
+		var data []byte
+		if s.liveBuf != nil {
+			data = s.liveBuf.Bytes()
+		}
 		s.mu.Unlock()
 
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, s.fileName))
@@ -274,14 +262,17 @@ func (s *Server) handleLiveStream(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	// Send backlog first
-	if len(s.liveData) > 0 {
-		backlogEvent := map[string]interface{}{
-			"type":    "backlog",
-			"payload": string(s.liveData),
-		}
-		if jsonBytes, err := json.Marshal(backlogEvent); err == nil {
-			fmt.Fprintf(w, "data: %s\n\n", string(jsonBytes))
-			flusher.Flush()
+	if s.liveBuf != nil {
+		backlog := s.liveBuf.Bytes()
+		if len(backlog) > 0 {
+			backlogEvent := map[string]interface{}{
+				"type":    "backlog",
+				"payload": string(backlog),
+			}
+			if jsonBytes, err := json.Marshal(backlogEvent); err == nil {
+				fmt.Fprintf(w, "data: %s\n\n", string(jsonBytes))
+				flusher.Flush()
+			}
 		}
 	}
 
@@ -560,4 +551,82 @@ func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(pngBytes)))
 	w.Write(pngBytes)
+}
+
+// RingBuffer is a byte-based circular buffer used to store a fixed size of the most recent live stream data.
+type RingBuffer struct {
+	buf    []byte
+	head   int // read index
+	tail   int // write index
+	isFull bool
+}
+
+// NewRingBuffer creates a RingBuffer of the specified size.
+func NewRingBuffer(size int) *RingBuffer {
+	return &RingBuffer{
+		buf: make([]byte, size),
+	}
+}
+
+// Write appends bytes to the ring buffer, overwriting the oldest data if necessary.
+func (r *RingBuffer) Write(p []byte) (n int, err error) {
+	if len(p) >= len(r.buf) {
+		// Just keep the last len(r.buf) bytes
+		p = p[len(p)-len(r.buf):]
+		copy(r.buf, p)
+		r.head = 0
+		r.tail = 0
+		r.isFull = true
+		return len(p), nil
+	}
+
+	avail := len(r.buf) - r.tail
+	if len(p) <= avail {
+		copy(r.buf[r.tail:], p)
+		r.tail += len(p)
+		if r.tail == len(r.buf) {
+			r.tail = 0
+			r.isFull = true
+		}
+	} else {
+		copy(r.buf[r.tail:], p[:avail])
+		copy(r.buf, p[avail:])
+		r.tail = len(p) - avail
+		r.isFull = true
+	}
+
+	if r.isFull {
+		r.head = r.tail
+	}
+
+	return len(p), nil
+}
+
+// Bytes returns the ordered contents of the buffer, optionally trimmed to start at the first newline.
+func (r *RingBuffer) Bytes() []byte {
+	if !r.isFull {
+		if r.tail == 0 {
+			return nil
+		}
+		res := make([]byte, r.tail)
+		copy(res, r.buf[:r.tail])
+		return res
+	}
+
+	res := make([]byte, len(r.buf))
+	copy(res, r.buf[r.head:])
+	copy(res[len(r.buf)-r.head:], r.buf[:r.head])
+	
+	// Trim to the first newline to avoid partial lines
+	idx := -1
+	for i := 0; i < len(res); i++ {
+		if res[i] == '\n' {
+			idx = i
+			break
+		}
+	}
+	if idx != -1 && idx < len(res)-1 {
+		return res[idx+1:]
+	}
+	return res
 }

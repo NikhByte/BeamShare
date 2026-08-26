@@ -39,7 +39,7 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 	const fileSize = 2 * 1024 * 1024 * 1024
 
 	// Start a test server
-	srv, err := New("")
+	srv, err := New("", 10*1024*1024)
 	require.NoError(t, err)
 
 	ts := httptest.NewServer(srv.Mux())
@@ -98,7 +98,7 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 }
 
 func TestWriteLive_Truncation(t *testing.T) {
-	srv, err := New("")
+	srv, err := New("", 1024*1024)
 	require.NoError(t, err)
 
 	// Max live backlog is 1 * 1024 * 1024 (1MB)
