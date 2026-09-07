@@ -73,7 +73,7 @@ type Session struct {
 
 // NewSession creates a new WebRTC PeerConnection configured as the sender.
 func NewSession(iceServers []webrtc.ICEServer, discoveryTimeout time.Duration) (*Session, error) {
-	if len(iceServers) == 0 {
+	if iceServers == nil {
 		iceServers = ICEServers
 	}
 	config := webrtc.Configuration{ICEServers: iceServers}

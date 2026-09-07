@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -96,11 +97,7 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 	require.NoError(t, err)
 
 	// Receiver starts downloading
-	testHTTPClient := &http.Client{
-		Transport: &http.Transport{
-			DisableKeepAlives: true,
-		},
-	}
+	receiverClient := &http.Client{}
 
 	downloadCtx, downloadCancel := context.WithCancel(context.Background())
 	defer downloadCancel()
@@ -109,16 +106,26 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 	require.NoError(t, err)
 
 	downloadErrCh := make(chan error, 1)
+	var downloadBytesReceived atomic.Int64
 
 	go func() {
-		resp, err := testHTTPClient.Do(reqDownload)
+		resp, err := receiverClient.Do(reqDownload)
 		if err != nil {
 			downloadErrCh <- err
 			return
 		}
 		defer resp.Body.Close()
-		_, err = io.Copy(io.Discard, resp.Body)
-		downloadErrCh <- err
+		buf := make([]byte, 32*1024)
+		for {
+			n, errRead := resp.Body.Read(buf)
+			if n > 0 {
+				downloadBytesReceived.Add(int64(n))
+			}
+			if errRead != nil {
+				downloadErrCh <- errRead
+				return
+			}
+		}
 	}()
 
 	// Wait until download handler has attached pipes to session
@@ -133,21 +140,21 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 	}, 3*time.Second, 10*time.Millisecond, "Download pipe not initialized in time")
 
 	// Sender starts uploading infinite data
+	senderClient := &http.Client{}
+
 	uploadCtx, uploadCancel := context.WithCancel(context.Background())
 	defer uploadCancel()
 
 	infiniteReader, writer := io.Pipe()
-	var bytesWritten atomic.Int64
 
 	go func() {
 		defer writer.Close()
 		buf := make([]byte, 64*1024)
 		for {
-			n, err := writer.Write(buf)
-			if err != nil {
+			_, errWrite := writer.Write(buf)
+			if errWrite != nil {
 				return
 			}
-			bytesWritten.Add(int64(n))
 		}
 	}()
 
@@ -156,19 +163,23 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 
 	uploadErrCh := make(chan error, 1)
 	go func() {
-		resp, err := testHTTPClient.Do(reqUpload)
+		resp, err := senderClient.Do(reqUpload)
 		if err != nil {
 			uploadErrCh <- err
 			return
 		}
-		resp.Body.Close()
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			uploadErrCh <- fmt.Errorf("unexpected status %d", resp.StatusCode)
+			return
+		}
 		uploadErrCh <- nil
 	}()
 
-	// Wait until upload streaming has actively started writing bytes
+	// Wait until download stream has actively received streaming data
 	require.Eventually(t, func() bool {
-		return bytesWritten.Load() > 0
-	}, 3*time.Second, 10*time.Millisecond, "Upload streaming did not start in time")
+		return downloadBytesReceived.Load() > 0
+	}, 5*time.Second, 10*time.Millisecond, "Data streaming did not start in time")
 
 	// Simulate abrupt receiver disconnect by canceling download context
 	startDisconnect := time.Now()
