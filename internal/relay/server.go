@@ -50,6 +50,12 @@ func (s *Session) ClosePipes(err error) {
 	}
 }
 
+func (s *Session) IsPipeReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.DataPipeR != nil && s.DataPipeW != nil
+}
+
 type Server struct {
 	sessions        map[string]*Session
 	sessionTTL      time.Duration
@@ -439,10 +445,27 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// Stream data from sender to receiver
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 
-	_, err := io.Copy(w, pr)
-	if err != nil {
-		sess.ClosePipes(err)
+	buf := make([]byte, 32*1024)
+	for {
+		n, errRead := pr.Read(buf)
+		if n > 0 {
+			_, errWrite := w.Write(buf[:n])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			if errWrite != nil {
+				sess.ClosePipes(errWrite)
+				break
+			}
+		}
+		if errRead != nil {
+			sess.ClosePipes(errRead)
+			break
+		}
 	}
 }
 

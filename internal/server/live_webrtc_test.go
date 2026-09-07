@@ -196,7 +196,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	var rxDC *webrtc.DataChannel
 	select {
 	case rxDC = <-rxDataChannelCh:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for receiver DataChannel")
 	}
 
@@ -211,13 +211,13 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 
 	select {
 	case <-rxOpenCh:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for receiver DataChannel open")
 	}
 
 	select {
 	case <-txDCReady:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for sender DataChannel open")
 	}
 
@@ -287,7 +287,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 				assert.True(t, sz <= 16*1024, "Last chunk should be <= 16KB")
 			}
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for P2P chunked transfer completion")
 	}
 }

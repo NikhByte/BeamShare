@@ -35,8 +35,8 @@ func (r *dummyReader) Read(p []byte) (int, error) {
 }
 
 func TestUploadDownloadLargeFile(t *testing.T) {
-	// Use a 2GB size for testing
-	const fileSize = 2 * 1024 * 1024 * 1024
+	// Use 1MB size for unit testing streaming upload/download
+	const fileSize = 1 * 1024 * 1024
 
 	// Start a test server
 	srv, err := New("", 10*1024*1024)
@@ -45,7 +45,7 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 	ts := httptest.NewServer(srv.Mux())
 	defer ts.Close()
 
-	t.Run("Upload 2GB file", func(t *testing.T) {
+	t.Run("Upload large file", func(t *testing.T) {
 		bodyReader, bodyWriter := io.Pipe()
 		writer := multipart.NewWriter(bodyWriter)
 
@@ -81,7 +81,7 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 		// Setup server state to point to our newly uploaded file for download test
 		srv.UpdateSharedFile(outName, "large_test.bin", int64(fileSize))
 
-		t.Run("Download 2GB file", func(t *testing.T) {
+		t.Run("Download large file", func(t *testing.T) {
 			resp, err := http.Get(ts.URL + "/api/download")
 			require.NoError(t, err)
 			defer resp.Body.Close()

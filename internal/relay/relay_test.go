@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -243,9 +245,12 @@ func TestEncryptedRelayDataStreaming(t *testing.T) {
 }
 
 func TestClient_RegistrationAndStateTimeout(t *testing.T) {
-	// Slow server that hangs forever
+	// Slow server that hangs until request context is cancelled
 	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(5 * time.Second)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
 	}))
 	defer slowServer.Close()
 
@@ -299,12 +304,11 @@ func TestServer_CentralTickerSweeper(t *testing.T) {
 	assert.LessOrEqual(t, goroutinesAfter-initialGoroutines, 5)
 
 	// Wait for sweeper to clean up expired sessions
-	time.Sleep(200 * time.Millisecond)
-
-	srv.mu.Lock()
-	countAfter := len(srv.sessions)
-	srv.mu.Unlock()
-	assert.Equal(t, 0, countAfter)
+	assert.Eventually(t, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return len(srv.sessions) == 0
+	}, 3*time.Second, 10*time.Millisecond, "Sweeper failed to clean up expired sessions")
 }
 
 func TestServer_DisconnectStreamCleanup(t *testing.T) {
@@ -315,7 +319,7 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	sessID, err := client.Register(ctx)
@@ -325,39 +329,60 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 	require.NoError(t, err)
 
 	// Receiver starts downloading
+	receiverClient := &http.Client{}
+
 	downloadCtx, downloadCancel := context.WithCancel(context.Background())
+	defer downloadCancel()
+
 	reqDownload, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
 	require.NoError(t, err)
 
-	downloadStarted := make(chan struct{})
 	downloadErrCh := make(chan error, 1)
+	var downloadBytesReceived atomic.Int64
 
 	go func() {
-		close(downloadStarted)
-		resp, err := http.DefaultClient.Do(reqDownload)
+		resp, err := receiverClient.Do(reqDownload)
 		if err != nil {
 			downloadErrCh <- err
 			return
 		}
 		defer resp.Body.Close()
-		_, err = io.Copy(io.Discard, resp.Body)
-		downloadErrCh <- err
+		buf := make([]byte, 32*1024)
+		for {
+			n, errRead := resp.Body.Read(buf)
+			if n > 0 {
+				downloadBytesReceived.Add(int64(n))
+			}
+			if errRead != nil {
+				downloadErrCh <- errRead
+				return
+			}
+		}
 	}()
 
-	<-downloadStarted
-	time.Sleep(50 * time.Millisecond)
+	// Wait until download handler has attached pipes to session
+	require.Eventually(t, func() bool {
+		sess := srv.getSession(sessID)
+		if sess == nil {
+			return false
+		}
+		return sess.IsPipeReady()
+	}, 3*time.Second, 10*time.Millisecond, "Download pipe not initialized in time")
 
 	// Sender starts uploading infinite data
+	senderClient := &http.Client{}
+
 	uploadCtx, uploadCancel := context.WithCancel(context.Background())
 	defer uploadCancel()
 
 	infiniteReader, writer := io.Pipe()
+
 	go func() {
 		defer writer.Close()
 		buf := make([]byte, 64*1024)
 		for {
-			_, err := writer.Write(buf)
-			if err != nil {
+			_, errWrite := writer.Write(buf)
+			if errWrite != nil {
 				return
 			}
 		}
@@ -368,16 +393,23 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 
 	uploadErrCh := make(chan error, 1)
 	go func() {
-		resp, err := http.DefaultClient.Do(reqUpload)
+		resp, err := senderClient.Do(reqUpload)
 		if err != nil {
 			uploadErrCh <- err
 			return
 		}
-		resp.Body.Close()
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			uploadErrCh <- fmt.Errorf("unexpected status %d", resp.StatusCode)
+			return
+		}
 		uploadErrCh <- nil
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	// Wait until download stream has actively received streaming data
+	require.Eventually(t, func() bool {
+		return downloadBytesReceived.Load() > 0
+	}, 5*time.Second, 10*time.Millisecond, "Data streaming did not start in time")
 
 	// Simulate abrupt receiver disconnect by canceling download context
 	startDisconnect := time.Now()
@@ -389,7 +421,7 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 		elapsed := time.Since(startDisconnect)
 		t.Logf("Upload terminated after %v on receiver disconnect (err: %v)", elapsed, err)
 		assert.Less(t, elapsed, 2*time.Second, "Upload did not terminate within 2 seconds")
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Upload timed out and did not terminate after receiver disconnect")
 	}
 

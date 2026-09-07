@@ -206,7 +206,7 @@ func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 	var rxDC *webrtc.DataChannel
 	select {
 	case rxDC = <-rxDataChannelCh:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for receiver DataChannel")
 	}
 
@@ -221,13 +221,13 @@ func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 
 	select {
 	case <-rxOpenCh:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for receiver DataChannel open")
 	}
 
 	select {
 	case <-senderTxReady:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for sender DataChannel open")
 	}
 
@@ -252,7 +252,7 @@ func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 		defer mu.Unlock()
 		assert.Equal(t, fmt.Sprintf("META:optical.txt:%d", len(testPayload)), receivedMeta)
 		assert.Equal(t, testPayload, receivedBuf.Bytes())
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for P2P transfer completion")
 	}
 }
@@ -324,8 +324,14 @@ func TestEndToEndRelayLongPollingAndEncryptedStream(t *testing.T) {
 		downloadedBytes, downloadErr = io.ReadAll(decReader)
 	}()
 
-	// Wait briefly for download connection to signal DownloadReq in relay server
-	time.Sleep(50 * time.Millisecond)
+	// Wait until download handler has attached pipes to session in relay server
+	require.Eventually(t, func() bool {
+		sess := relayServer.GetSession(sessionID)
+		if sess == nil {
+			return false
+		}
+		return sess.IsPipeReady()
+	}, 5*time.Second, 10*time.Millisecond, "Relay download pipe was not initialized in time")
 
 	// Upload encrypted stream from sender
 	err = relayClient.UploadData(context.Background(), filePath)

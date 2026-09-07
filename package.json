@@ -1,0 +1,25 @@
+{
+  "name": "beamshare",
+  "version": "1.0.0",
+  "description": "> **Unstoppable P2P file transfer that works even on restricted college Wi-Fi.**",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test internal/assets/web/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NikhByte/BeamShare.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/NikhByte/BeamShare/issues"
+  },
+  "homepage": "https://github.com/NikhByte/BeamShare#readme",
+  "devDependencies": {
+    "jsdom": "^30.0.1",
+    "pako": "^3.0.1"
+  }
+}
