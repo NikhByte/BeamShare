@@ -2,7 +2,7 @@ name: Continuous Integration
 
 on:
   push:
-    branches: [ main, "jules/**" ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
 
@@ -38,22 +38,7 @@ jobs:
         run: npm ci
 
       - name: Run Go Unit Tests
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if ! go test -v ./... > test.log 2>&1; then
-            cat test.log
-            COMMENT_BODY=$(jq -n --arg body "### ❌ Go Test Failure Log (${{ matrix.os }})
-\`\`\`
-$(tail -n 120 test.log)
-\`\`\`" '{body: $body}')
-            curl -s -H "Authorization: token $GH_TOKEN" \
-              -H "Content-Type: application/json" \
-              -X POST \
-              -d "$COMMENT_BODY" \
-              "https://api.github.com/repos/${{ github.repository }}/issues/22/comments" || true
-            exit 1
-          fi
+        run: go test -v ./...
 
       - name: Run JavaScript Web Receiver Tests
         run: npm test
