@@ -63,7 +63,7 @@ type Session struct {
 
 // NewSession creates a new WebRTC PeerConnection configured as the sender.
 func NewSession(iceServers []webrtc.ICEServer, discoveryTimeout time.Duration) (*Session, error) {
-	if len(iceServers) == 0 {
+	if iceServers == nil {
 		iceServers = ICEServers
 	}
 	config := webrtc.Configuration{ICEServers: iceServers}
@@ -385,9 +385,9 @@ func minifySDP(sdp string) string {
 	return strings.Join(out, "\r\n")
 }
 
-// compressSDP applies zlib deflate + URL-safe base64 to reduce SDP size
+// CompressSDP applies zlib deflate + URL-safe base64 to reduce SDP size
 // so it fits in a single scannable QR code (≈1500 bytes max at Version 40).
-func compressSDP(sdp string) (string, error) {
+func CompressSDP(sdp string) (string, error) {
 	sdp = minifySDP(sdp)
 	var buf bytes.Buffer
 	w, err := zlib.NewWriterLevel(&buf, zlib.BestCompression)
@@ -401,6 +401,10 @@ func compressSDP(sdp string) (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(buf.Bytes()), nil
+}
+
+func compressSDP(sdp string) (string, error) {
+	return CompressSDP(sdp)
 }
 
 // DecompressSDP reverses compressSDP — used by the browser (via JS atob +
@@ -457,4 +461,12 @@ func (s *Session) RawOffer() string {
 
 func (s *Session) OnICEConnectionStateChange(f func(webrtc.ICEConnectionState)) {
 	s.pc.OnICEConnectionStateChange(f)
+}
+
+func (s *Session) OnICECandidate(f func(*webrtc.ICECandidate)) {
+	s.pc.OnICECandidate(f)
+}
+
+func (s *Session) AddICECandidate(c webrtc.ICECandidateInit) error {
+	return s.pc.AddICECandidate(c)
 }

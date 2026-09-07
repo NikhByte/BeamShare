@@ -39,10 +39,14 @@ func NewServer() *Server {
 	}
 }
 
-func (s *Server) getSession(id string) *Session {
+func (s *Server) GetSession(id string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sessions[id]
+}
+
+func (s *Server) getSession(id string) *Session {
+	return s.GetSession(id)
 }
 
 func (s *Server) createSession() *Session {
@@ -274,6 +278,11 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	sess.DataPipeW = pw
 	sess.mu.Unlock()
 
+	go func() {
+		<-r.Context().Done()
+		pr.CloseWithError(r.Context().Err())
+	}()
+
 	// Notify sender
 	select {
 	case sess.DownloadReq <- struct{}{}:
@@ -283,13 +292,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// Stream data from sender to receiver
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	sess.mu.Lock()
-	metaSize := sess.Meta["size"]
-	sess.mu.Unlock()
-	if metaSize != nil {
-		w.Header().Set("Content-Length", fmt.Sprintf("%v", metaSize))
-	}
 
 	io.Copy(w, pr)
 }
