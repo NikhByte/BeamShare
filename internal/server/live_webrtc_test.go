@@ -106,7 +106,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	}
 
 	// Create receiver PeerConnection (offline)
-	rxPC, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	rxPC, err := signaling.NewWebRTCAPI().NewPeerConnection(webrtc.Configuration{})
 	require.NoError(t, err)
 	defer rxPC.Close()
 
@@ -127,8 +127,23 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	var eofReceived = make(chan struct{})
 	var chunkSizes []int
 
+	rxOpenCh := make(chan struct{})
 	rxDataChannelCh := make(chan *webrtc.DataChannel, 1)
 	rxPC.OnDataChannel(func(dc *webrtc.DataChannel) {
+		dc.OnOpen(func() {
+			select {
+			case <-rxOpenCh:
+			default:
+				close(rxOpenCh)
+			}
+		})
+		if dc.ReadyState() == webrtc.DataChannelStateOpen {
+			select {
+			case <-rxOpenCh:
+			default:
+				close(rxOpenCh)
+			}
+		}
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -200,14 +215,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 		t.Fatal("timed out waiting for receiver DataChannel")
 	}
 
-	rxOpenCh := make(chan struct{})
-	if rxDC.ReadyState() == webrtc.DataChannelStateOpen {
-		close(rxOpenCh)
-	} else {
-		rxDC.OnOpen(func() {
-			close(rxOpenCh)
-		})
-	}
+	_ = rxDC
 
 	select {
 	case <-rxOpenCh:

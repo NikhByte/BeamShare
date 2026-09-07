@@ -63,7 +63,7 @@ func TestLocalHTTPSignaling(t *testing.T) {
 
 	t.Run("POST /api/signal/answer", func(t *testing.T) {
 		// Create a receiver peer connection to generate a valid SDP answer
-		rxPC, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+		rxPC, err := NewWebRTCAPI().NewPeerConnection(webrtc.Configuration{})
 		require.NoError(t, err)
 		defer rxPC.Close()
 
@@ -240,7 +240,7 @@ func TestSignalingHandlers(t *testing.T) {
 		t.Fatalf("failed to decode candidates: %v", err)
 	}
 
-	pcReceiver, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	pcReceiver, err := NewWebRTCAPI().NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatalf("failed to create receiver peer connection: %v", err)
 	}
