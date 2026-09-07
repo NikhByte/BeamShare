@@ -45,6 +45,16 @@ var ICEServers = []webrtc.ICEServer{
 	},
 }
 
+// Signaler defines the interface for WebRTC signaling sessions.
+type Signaler interface {
+	CreateOffer(ctx context.Context) (string, error)
+	CompressedOffer() string
+	RegisterHandlers(mux *http.ServeMux)
+	WaitForAnswer(ctx context.Context) error
+	DataChannel() *webrtc.DataChannel
+	Close() error
+}
+
 // Session holds the state of one WebRTC sender session.
 type Session struct {
 	pc          *webrtc.PeerConnection
@@ -224,6 +234,17 @@ func (s *Session) DataChannel() *webrtc.DataChannel { return s.dc }
 // Close shuts down the peer connection.
 func (s *Session) Close() error { return s.pc.Close() }
 
+// NATProber is a function interface for checking NAT status without network calls.
+type NATProber func(stunURL, localIP string) bool
+
+// CheckNATWithProber checks NAT status using a custom prober function if provided.
+func CheckNATWithProber(stunURL string, localIP string, prober NATProber) bool {
+	if prober != nil {
+		return prober(stunURL, localIP)
+	}
+	return CheckNAT(stunURL, localIP)
+}
+
 // CheckNAT returns true if the host is behind a NAT, i.e., public IP != local IP.
 // It queries the provided STUN URL and times out after 500ms.
 func CheckNAT(stunURL string, localIP string) bool {
@@ -260,7 +281,13 @@ func CheckNAT(stunURL string, localIP string) bool {
 
 // ─── SDP compression helpers ──────────────────────────────────────────────────
 
+var outboundIPFinder = defaultGetOutboundIP
+
 func getOutboundIP() net.IP {
+	return outboundIPFinder()
+}
+
+func defaultGetOutboundIP() net.IP {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err == nil {
 		defer conn.Close()

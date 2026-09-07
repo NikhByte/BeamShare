@@ -11,12 +11,19 @@ import (
 	"time"
 )
 
+// HTTPClient defines an abstract HTTP transport interface for relay operations.
+type HTTPClient interface {
+	Do(req *http.Request) (*http.Response, error)
+	Get(url string) (*http.Response, error)
+	Post(url, contentType string, body io.Reader) (*http.Response, error)
+}
+
 type Client struct {
 	Key []byte
 
 	BaseURL   string
 	SessionID string
-	HTTP      *http.Client
+	HTTP      HTTPClient
 }
 
 func NewClient(url string) *Client {

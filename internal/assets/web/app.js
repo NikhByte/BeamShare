@@ -1692,23 +1692,43 @@ function switchTab(tab) {
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', init);
-} else {
-  init();
+if (typeof window !== 'undefined' && !window.__BEAM_TEST_ENV__) {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
 }
 
-window.addEventListener('pagehide', () => {
-  if (useOPFS) {
-    navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
-  }
-  if (useIndexedDB && idb) {
-    // Attempt best-effort synchronous-like clear
-    try {
-      const tx = idb.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).clear();
-    } catch (e) {
-      // Ignore errors on unload
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => {
+    if (useOPFS) {
+      navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
     }
-  }
-});
+    if (useIndexedDB && idb) {
+      // Attempt best-effort synchronous-like clear
+      try {
+        const tx = idb.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).clear();
+      } catch (e) {
+        // Ignore errors on unload
+      }
+    }
+  });
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    decompressOffer,
+    setState,
+    renderFileCard,
+    updateProgress,
+    VirtualLogViewer,
+    startHTTPSSE,
+    getBackendURL,
+    apiPath,
+    formatBytes,
+    mimeLabel,
+    resetState
+  };
+}
