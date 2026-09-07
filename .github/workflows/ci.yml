@@ -35,7 +35,8 @@ jobs:
         run: npm ci
 
       - name: Run Go Unit Tests
-        run: go test -v ./...
+        run: |
+          go test -v ./... > test.log 2>&1 || (echo "### Go Test Failure Log" >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && cat test.log >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && exit 1)
 
       - name: Run JavaScript Web Receiver Tests
         run: npm test
