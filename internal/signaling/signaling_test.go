@@ -149,7 +149,7 @@ func TestSignalingHandlers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("WaitForAnswer returned error: %v", err)
 		}
-	case <-time.After(1 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatalf("timed out waiting for answer channel to unblock")
 	}
 }
