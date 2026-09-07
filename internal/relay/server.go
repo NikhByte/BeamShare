@@ -25,23 +25,123 @@ type Session struct {
 	DataPipeR *io.PipeReader
 	DataPipeW *io.PipeWriter
 
-	mu sync.Mutex
+	expiresAt time.Time
+	mu        sync.Mutex
+}
+
+func (s *Session) ClosePipes(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.DataPipeW != nil {
+		if err != nil {
+			s.DataPipeW.CloseWithError(err)
+		} else {
+			s.DataPipeW.Close()
+		}
+		s.DataPipeW = nil
+	}
+	if s.DataPipeR != nil {
+		if err != nil {
+			s.DataPipeR.CloseWithError(err)
+		} else {
+			s.DataPipeR.Close()
+		}
+		s.DataPipeR = nil
+	}
 }
 
 type Server struct {
-	sessions map[string]*Session
-	mu       sync.Mutex
+	sessions        map[string]*Session
+	sessionTTL      time.Duration
+	cleanupInterval time.Duration
+	stopChan        chan struct{}
+	ticker          *time.Ticker
+	wg              sync.WaitGroup
+	mu              sync.Mutex
 }
 
 func NewServer() *Server {
-	return &Server{
-		sessions: make(map[string]*Session),
+	return NewServerWithConfig(2*time.Hour, 1*time.Minute)
+}
+
+func NewServerWithConfig(ttl, cleanupInterval time.Duration) *Server {
+	s := &Server{
+		sessions:        make(map[string]*Session),
+		sessionTTL:      ttl,
+		cleanupInterval: cleanupInterval,
+		stopChan:        make(chan struct{}),
+	}
+	s.startSweeper()
+	return s
+}
+
+func (s *Server) startSweeper() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.startSweeperLocked()
+}
+
+func (s *Server) startSweeperLocked() {
+	if s.cleanupInterval <= 0 || s.ticker != nil {
+		return
+	}
+	if s.stopChan == nil {
+		s.stopChan = make(chan struct{})
+	}
+	ticker := time.NewTicker(s.cleanupInterval)
+	s.ticker = ticker
+
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		for {
+			select {
+			case <-ticker.C:
+				s.SweepExpiredSessions()
+			case <-s.stopChan:
+				return
+			}
+		}
+	}()
+}
+
+func (s *Server) Stop() {
+	s.mu.Lock()
+	if s.ticker != nil {
+		s.ticker.Stop()
+		close(s.stopChan)
+		s.ticker = nil
+	}
+	s.mu.Unlock()
+	s.wg.Wait()
+}
+
+func (s *Server) SweepExpiredSessions() {
+	s.mu.Lock()
+	now := time.Now()
+	var expired []*Session
+	for id, sess := range s.sessions {
+		sess.mu.Lock()
+		exp := sess.expiresAt
+		sess.mu.Unlock()
+		if !exp.IsZero() && now.After(exp) {
+			expired = append(expired, sess)
+			delete(s.sessions, id)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, sess := range expired {
+		sess.ClosePipes(fmt.Errorf("session expired"))
 	}
 }
 
 func (s *Server) GetSession(id string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sessions == nil {
+		return nil
+	}
 	return s.sessions[id]
 }
 
@@ -53,21 +153,25 @@ func (s *Server) createSession() *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.sessions == nil {
+		s.sessions = make(map[string]*Session)
+	}
+	if s.sessionTTL <= 0 {
+		s.sessionTTL = 2 * time.Hour
+	}
+	if s.cleanupInterval <= 0 {
+		s.cleanupInterval = 1 * time.Minute
+	}
+	s.startSweeperLocked()
+
 	id := fmt.Sprintf("%06d", rand.Intn(1000000))
 	sess := &Session{
 		ID:          id,
 		AnswerReady: make(chan string, 1),
 		DownloadReq: make(chan struct{}, 1),
+		expiresAt:   time.Now().Add(s.sessionTTL),
 	}
 	s.sessions[id] = sess
-
-	// Optional: cleanup after timeout
-	go func() {
-		time.Sleep(2 * time.Hour)
-		s.mu.Lock()
-		delete(s.sessions, id)
-		s.mu.Unlock()
-	}()
 
 	return sess
 }
@@ -165,13 +269,42 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	sess := s.getSession(r.URL.Query().Get("session"))
-	if sess == nil || sess.DataPipeW == nil {
+	if sess == nil {
+		http.Error(w, "not found", 404)
+		return
+	}
+
+	sess.mu.Lock()
+	pw := sess.DataPipeW
+	pr := sess.DataPipeR
+	sess.mu.Unlock()
+
+	if pw == nil || pr == nil {
 		http.Error(w, "not found or pipe not ready", 404)
 		return
 	}
 
-	_, err := io.Copy(sess.DataPipeW, r.Body)
-	sess.DataPipeW.CloseWithError(err)
+	defer func() {
+		sess.ClosePipes(fmt.Errorf("data handler completed"))
+	}()
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-r.Context().Done():
+			sess.ClosePipes(fmt.Errorf("sender context cancelled: %w", r.Context().Err()))
+		case <-done:
+		}
+	}()
+
+	_, err := io.Copy(pw, r.Body)
+	if err != nil {
+		sess.ClosePipes(err)
+	} else {
+		pw.Close()
+	}
 }
 
 // --- Receiver Handlers ---
@@ -272,15 +405,29 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess.mu.Lock()
 	pr, pw := io.Pipe()
+
+	sess.mu.Lock()
+	if sess.DataPipeR != nil || sess.DataPipeW != nil {
+		sess.ClosePipes(fmt.Errorf("replaced by new download request"))
+	}
 	sess.DataPipeR = pr
 	sess.DataPipeW = pw
 	sess.mu.Unlock()
 
+	defer func() {
+		sess.ClosePipes(fmt.Errorf("download handler completed"))
+	}()
+
+	done := make(chan struct{})
+	defer close(done)
+
 	go func() {
-		<-r.Context().Done()
-		pr.CloseWithError(r.Context().Err())
+		select {
+		case <-r.Context().Done():
+			sess.ClosePipes(fmt.Errorf("receiver context cancelled: %w", r.Context().Err()))
+		case <-done:
+		}
 	}()
 
 	// Notify sender
@@ -293,7 +440,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	io.Copy(w, pr)
+	_, err := io.Copy(w, pr)
+	if err != nil {
+		sess.ClosePipes(err)
+	}
 }
 
 func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {

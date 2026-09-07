@@ -266,14 +266,14 @@ func TestEndToEndRelayLongPollingAndEncryptedStream(t *testing.T) {
 	relayClient := relay.NewClient(ts.URL)
 
 	// 1. Session registration and state push
-	sessionID, err := relayClient.Register()
+	sessionID, err := relayClient.Register(context.Background())
 	require.NoError(t, err)
 	require.NotEmpty(t, sessionID)
 
 	candidates := []map[string]interface{}{{"candidate": "cand-1"}}
 	meta := map[string]interface{}{"fileName": "test.txt", "fileSize": 100}
 
-	err = relayClient.PushState("sample-offer-sdp", candidates, meta)
+	err = relayClient.PushState(context.Background(), "sample-offer-sdp", candidates, meta)
 	require.NoError(t, err)
 
 	// Verify relay session state stored in server
@@ -328,7 +328,7 @@ func TestEndToEndRelayLongPollingAndEncryptedStream(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Upload encrypted stream from sender
-	err = relayClient.UploadData(filePath)
+	err = relayClient.UploadData(context.Background(), filePath)
 	require.NoError(t, err)
 
 	wg.Wait()

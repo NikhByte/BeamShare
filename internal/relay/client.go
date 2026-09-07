@@ -2,11 +2,13 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"time"
 )
 
 type Client struct {
@@ -21,17 +23,40 @@ func NewClient(url string) *Client {
 	return &Client{
 		BaseURL: url,
 		HTTP: &http.Client{
-			Timeout: 0, // No timeout for long polling/streaming
+			Timeout: 0, // No global timeout for long polling/streaming
 		},
 	}
 }
 
-func (c *Client) Register() (string, error) {
-	resp, err := c.HTTP.Post(c.BaseURL+"/relay/register", "application/json", nil)
+func ensureTimeout(ctx context.Context, defaultTimeout time.Duration) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && defaultTimeout > 0 {
+		return context.WithTimeout(ctx, defaultTimeout)
+	}
+	return ctx, func() {}
+}
+
+func (c *Client) Register(ctx context.Context) (string, error) {
+	reqCtx, cancel := ensureTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.BaseURL+"/relay/register", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("relay register failed with status: %d", resp.StatusCode)
+	}
 
 	var result map[string]string
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -41,18 +66,35 @@ func (c *Client) Register() (string, error) {
 	return c.SessionID, nil
 }
 
-func (c *Client) PushState(offer string, candidates []map[string]interface{}, meta map[string]interface{}) error {
+func (c *Client) PushState(ctx context.Context, offer string, candidates []map[string]interface{}, meta map[string]interface{}) error {
+	reqCtx, cancel := ensureTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	body := map[string]interface{}{
 		"offer":      offer,
 		"candidates": candidates,
 		"meta":       meta,
 	}
-	b, _ := json.Marshal(body)
-	resp, err := c.HTTP.Post(fmt.Sprintf("%s/relay/state?session=%s", c.BaseURL, c.SessionID), "application/json", bytes.NewReader(b))
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, fmt.Sprintf("%s/relay/state?session=%s", c.BaseURL, c.SessionID), bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("relay state failed with status: %d", resp.StatusCode)
+	}
 	return nil
 }
 
@@ -61,13 +103,26 @@ type PollCommand struct {
 	Answer string `json:"answer"`
 }
 
-func (c *Client) Poll() (*PollCommand, error) {
-	// Long poll
-	resp, err := c.HTTP.Get(fmt.Sprintf("%s/relay/poll?session=%s", c.BaseURL, c.SessionID))
+func (c *Client) Poll(ctx context.Context) (*PollCommand, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/relay/poll?session=%s", c.BaseURL, c.SessionID), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("relay poll failed with status: %d", resp.StatusCode)
+	}
+
 	var cmd PollCommand
 	if err := json.NewDecoder(resp.Body).Decode(&cmd); err != nil {
 		return nil, err
@@ -75,7 +130,11 @@ func (c *Client) Poll() (*PollCommand, error) {
 	return &cmd, nil
 }
 
-func (c *Client) UploadData(filePath string) error {
+func (c *Client) UploadData(ctx context.Context, filePath string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -90,12 +149,20 @@ func (c *Client) UploadData(filePath string) error {
 		}
 	}
 
-	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/relay/data?session=%s", c.BaseURL, c.SessionID), r)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/relay/data?session=%s", c.BaseURL, c.SessionID), r)
+	if err != nil {
+		return err
+	}
 	req.Header.Set("Content-Type", "application/octet-stream")
+
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("relay upload failed with status: %d", resp.StatusCode)
+	}
 	return nil
 }
