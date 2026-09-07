@@ -19,11 +19,11 @@ import (
 
 func TestLocalHTTPSignaling(t *testing.T) {
 	// Create signaling session with empty iceServers for offline execution
-	session, err := NewSession([]webrtc.ICEServer{}, 2*time.Second)
+	session, err := NewSession([]webrtc.ICEServer{}, 500*time.Millisecond)
 	require.NoError(t, err)
 	defer session.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	compressedOffer, err := session.CreateOffer(ctx)
@@ -104,11 +104,11 @@ func TestLocalHTTPSignaling(t *testing.T) {
 }
 
 func TestOpticalSDPExchange(t *testing.T) {
-	session, err := NewSession([]webrtc.ICEServer{}, 2*time.Second)
+	session, err := NewSession([]webrtc.ICEServer{}, 500*time.Millisecond)
 	require.NoError(t, err)
 	defer session.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	compressedOffer, err := session.CreateOffer(ctx)

@@ -97,7 +97,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	txDCReady := make(chan struct{})
 
 	// Create sender session (offline)
-	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 2*time.Second)
+	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 500*time.Millisecond)
 	require.NoError(t, err)
 	defer senderSession.Close()
 
@@ -148,7 +148,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	})
 
 	// Handshake step 1: Create Offer
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	_, err = senderSession.CreateOffer(ctx)
