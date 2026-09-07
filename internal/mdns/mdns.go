@@ -8,12 +8,10 @@
 package mdns
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/grandcat/zeroconf"
 )
@@ -125,13 +123,10 @@ func (b *Broadcaster) Start() error {
 	return nil
 }
 
-// Stop deregisters the mDNS service. It blocks until the goodbye packet
-// has been sent (up to 1 second).
+// Stop deregisters the mDNS service.
 func (b *Broadcaster) Stop() {
 	if b.server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
 		b.server.Shutdown()
-		<-ctx.Done()
+		b.server = nil
 	}
 }
