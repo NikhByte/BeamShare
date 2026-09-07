@@ -427,3 +427,31 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 
 	infiniteReader.Close()
 }
+
+func TestSessionIDGenerationAndCollisionResolution(t *testing.T) {
+	srv := NewServer()
+
+	// Verify default session ID has 128-bit hex entropy (32 characters)
+	sess1 := srv.createSession()
+	assert.Len(t, sess1.ID, 32)
+	assert.Regexp(t, "^[0-9a-f]{32}$", sess1.ID)
+
+	sess2 := srv.createSession()
+	assert.NotEqual(t, sess1.ID, sess2.ID)
+
+	// Test collision resolution retry loop
+	callCount := 0
+	srv.SessionIDGenerator = func() string {
+		callCount++
+		if callCount == 1 {
+			return sess1.ID // Force a collision on first attempt
+		}
+		return "unique-session-id-after-retry"
+	}
+
+	sess3 := srv.createSession()
+	assert.Equal(t, "unique-session-id-after-retry", sess3.ID)
+	assert.Equal(t, 2, callCount)
+	// Ensure original session was NOT overwritten
+	assert.Equal(t, sess1, srv.GetSession(sess1.ID))
+}

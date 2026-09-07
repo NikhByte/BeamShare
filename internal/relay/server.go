@@ -1,10 +1,11 @@
 package relay
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -57,13 +58,14 @@ func (s *Session) IsPipeReady() bool {
 }
 
 type Server struct {
-	sessions        map[string]*Session
-	sessionTTL      time.Duration
-	cleanupInterval time.Duration
-	stopChan        chan struct{}
-	ticker          *time.Ticker
-	wg              sync.WaitGroup
-	mu              sync.Mutex
+	sessions           map[string]*Session
+	sessionTTL         time.Duration
+	cleanupInterval    time.Duration
+	stopChan           chan struct{}
+	ticker             *time.Ticker
+	wg                 sync.WaitGroup
+	SessionIDGenerator func() string
+	mu                 sync.Mutex
 }
 
 func NewServer() *Server {
@@ -170,7 +172,23 @@ func (s *Server) createSession() *Session {
 	}
 	s.startSweeperLocked()
 
-	id := fmt.Sprintf("%06d", rand.Intn(1000000))
+	var id string
+	for {
+		if s.SessionIDGenerator != nil {
+			id = s.SessionIDGenerator()
+		} else {
+			b := make([]byte, 16)
+			if _, err := rand.Read(b); err != nil {
+				id = fmt.Sprintf("%x", time.Now().UnixNano())
+			} else {
+				id = hex.EncodeToString(b)
+			}
+		}
+		if _, exists := s.sessions[id]; !exists {
+			break
+		}
+	}
+
 	sess := &Session{
 		ID:          id,
 		AnswerReady: make(chan string, 1),

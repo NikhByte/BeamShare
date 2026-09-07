@@ -41,7 +41,9 @@ func (er *EncryptingReader) Read(p []byte) (int, error) {
 	n, err := er.r.Read(er.chunk)
 	if n > 0 {
 		nonce := make([]byte, er.gcm.NonceSize())
-		io.ReadFull(rand.Reader, nonce)
+		if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+			return 0, err
+		}
 
 		ciphertext := er.gcm.Seal(nil, nonce, er.chunk[:n], nil)
 
