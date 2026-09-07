@@ -258,27 +258,36 @@ func (s *Server) handleLiveStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+	flusher.Flush()
 
 	ch := make(chan []byte, 100)
 
+	var backlog []byte
+	var finished bool
+
 	s.mu.Lock()
-	// Send backlog first
 	if s.liveBuf != nil {
-		backlog := s.liveBuf.Bytes()
-		if len(backlog) > 0 {
-			backlogEvent := map[string]interface{}{
-				"type":    "backlog",
-				"payload": string(backlog),
-			}
-			if jsonBytes, err := json.Marshal(backlogEvent); err == nil {
-				fmt.Fprintf(w, "data: %s\n\n", string(jsonBytes))
-				flusher.Flush()
-			}
+		backlog = s.liveBuf.Bytes()
+	}
+	finished = s.liveFinished
+	if !finished {
+		s.liveClients = append(s.liveClients, ch)
+	}
+	s.mu.Unlock()
+
+	// Send backlog outside mutex
+	if len(backlog) > 0 {
+		backlogEvent := map[string]interface{}{
+			"type":    "backlog",
+			"payload": string(backlog),
+		}
+		if jsonBytes, err := json.Marshal(backlogEvent); err == nil {
+			fmt.Fprintf(w, "data: %s\n\n", string(jsonBytes))
+			flusher.Flush()
 		}
 	}
 
-	if s.liveFinished {
-		s.mu.Unlock()
+	if finished {
 		eofEvent := map[string]interface{}{"type": "eof"}
 		if jsonBytes, err := json.Marshal(eofEvent); err == nil {
 			fmt.Fprintf(w, "data: %s\n\n", string(jsonBytes))
@@ -286,9 +295,6 @@ func (s *Server) handleLiveStream(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-
-	s.liveClients = append(s.liveClients, ch)
-	s.mu.Unlock()
 
 	defer func() {
 		s.mu.Lock()
@@ -538,6 +544,10 @@ func (s *Server) UpdateSharedFile(filePath string, fileName string, fileSize int
 	s.fileSize = fileSize
 	s.isLivePipe = false
 	s.liveFinished = true
+	for _, ch := range s.liveClients {
+		close(ch)
+	}
+	s.liveClients = nil
 }
 
 func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {

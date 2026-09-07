@@ -1,12 +1,14 @@
 package server
 
 import (
+	"context"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -184,4 +186,39 @@ func TestUploadPathTraversalAndPermissions(t *testing.T) {
 			assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 		})
 	}
+}
+
+func TestLiveStream_ClientCleanupOnUpdateSharedFile(t *testing.T) {
+	srv, err := New("", 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/live/stream", nil)
+	require.NoError(t, err)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Ensure client is registered
+	require.Eventually(t, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return len(srv.liveClients) == 1
+	}, 1*time.Second, 10*time.Millisecond)
+
+	// Calling UpdateSharedFile must close all active clients and clear liveClients slice
+	srv.UpdateSharedFile("new_file.txt", "new_file.txt", 100)
+
+	srv.mu.Lock()
+	clientsLen := len(srv.liveClients)
+	srv.mu.Unlock()
+	assert.Equal(t, 0, clientsLen)
 }

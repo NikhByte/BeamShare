@@ -259,10 +259,30 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		sess.Offer = req.Offer
 	}
 	if req.Candidates != nil {
-		sess.Candidates = req.Candidates
+		sanitizedCandidates := make([]map[string]interface{}, 0, len(req.Candidates))
+		for _, c := range req.Candidates {
+			if c != nil {
+				sanitizedCandidates = append(sanitizedCandidates, c)
+			}
+		}
+		sess.Candidates = sanitizedCandidates
 	}
 	if req.Meta != nil {
-		sess.Meta = req.Meta
+		sanitizedMeta := make(map[string]interface{})
+		for k, v := range req.Meta {
+			if k == "" {
+				continue
+			}
+			switch val := v.(type) {
+			case string:
+				sanitizedMeta[k] = val
+			case float64:
+				sanitizedMeta[k] = int64(val)
+			case int64, int, bool:
+				sanitizedMeta[k] = val
+			}
+		}
+		sess.Meta = sanitizedMeta
 	}
 	sess.mu.Unlock()
 
@@ -367,9 +387,17 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.mu.Lock()
-	defer sess.mu.Unlock()
+	meta := sess.Meta
+	if meta == nil {
+		meta = map[string]interface{}{
+			"name": "unknown",
+			"size": int64(0),
+			"mime": "application/octet-stream",
+		}
+	}
+	sess.mu.Unlock()
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(sess.Meta)
+	json.NewEncoder(w).Encode(meta)
 }
 
 func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
@@ -417,9 +445,13 @@ func (s *Server) handleCandidates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.mu.Lock()
-	defer sess.mu.Unlock()
+	candidates := sess.Candidates
+	if candidates == nil {
+		candidates = []map[string]interface{}{}
+	}
+	sess.mu.Unlock()
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(sess.Candidates)
+	json.NewEncoder(w).Encode(candidates)
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
