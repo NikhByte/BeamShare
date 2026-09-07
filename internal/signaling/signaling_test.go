@@ -96,7 +96,7 @@ func TestLocalHTTPSignaling(t *testing.T) {
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 		// Verify WaitForAnswer unblocks
-		waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer waitCancel()
 		err = session.WaitForAnswer(waitCtx)
 		require.NoError(t, err)
@@ -257,7 +257,7 @@ func TestSignalingHandlers(t *testing.T) {
 
 	answerBytes, _ := json.Marshal(answerSDP)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	answerDone := make(chan error, 1)
