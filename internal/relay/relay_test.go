@@ -325,6 +325,12 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 	require.NoError(t, err)
 
 	// Receiver starts downloading
+	testHTTPClient := &http.Client{
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
+	}
+
 	downloadCtx, downloadCancel := context.WithCancel(context.Background())
 	reqDownload, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
 	require.NoError(t, err)
@@ -334,7 +340,7 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 
 	go func() {
 		close(downloadStarted)
-		resp, err := http.DefaultClient.Do(reqDownload)
+		resp, err := testHTTPClient.Do(reqDownload)
 		if err != nil {
 			downloadErrCh <- err
 			return
@@ -368,7 +374,7 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 
 	uploadErrCh := make(chan error, 1)
 	go func() {
-		resp, err := http.DefaultClient.Do(reqUpload)
+		resp, err := testHTTPClient.Do(reqUpload)
 		if err != nil {
 			uploadErrCh <- err
 			return

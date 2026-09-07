@@ -74,7 +74,7 @@ describe('Gaze Web Receiver Test Suite', () => {
     global.navigator = window.navigator;
     global.location = window.location;
     global.URLSearchParams = window.URLSearchParams;
-    global.TextDecoder = utilTextDecoder;
+    global.TextDecoder = require('util').TextDecoder;
     global.atob = (str) => Buffer.from(str, 'base64').toString('binary');
     global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
     window.atob = global.atob;
@@ -88,10 +88,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     delete require.cache[require.resolve('./app.js')];
     app = require('./app.js');
   });
-
-  function utilTextDecoder() {
-    return new (require('util').TextDecoder)();
-  }
 
   test('SDP Decompression (zlib + URL-safe Base64)', async () => {
     const originalSDP = "v=0\r\no=- 123456 2 IN IP4 127.0.0.1\r\ns=BeamShare Test Offer\r\nt=0 0\r\n";
