@@ -136,13 +136,17 @@ func (s *Server) SweepExpiredSessions() {
 	}
 }
 
-func (s *Server) getSession(id string) *Session {
+func (s *Server) GetSession(id string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sessions == nil {
 		return nil
 	}
 	return s.sessions[id]
+}
+
+func (s *Server) getSession(id string) *Session {
+	return s.GetSession(id)
 }
 
 func (s *Server) createSession() *Session {
@@ -409,7 +413,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.DataPipeR = pr
 	sess.DataPipeW = pw
-	metaSize := sess.Meta["size"]
 	sess.mu.Unlock()
 
 	defer func() {
@@ -436,19 +439,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// Stream data from sender to receiver
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	if metaSize != nil {
-		switch v := metaSize.(type) {
-		case int64:
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", v))
-		case int:
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", v))
-		case float64:
-			w.Header().Set("Content-Length", fmt.Sprintf("%.0f", v))
-		default:
-			w.Header().Set("Content-Length", fmt.Sprintf("%v", v))
-		}
-	}
 
 	_, err := io.Copy(w, pr)
 	if err != nil {
