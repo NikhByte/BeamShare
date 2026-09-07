@@ -339,7 +339,7 @@ func getOutboundIP() net.IP {
 }
 
 func defaultGetOutboundIP() net.IP {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
+	conn, err := net.DialTimeout("udp", "8.8.8.8:80", 200*time.Millisecond)
 	if err == nil {
 		defer conn.Close()
 		if udpAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
