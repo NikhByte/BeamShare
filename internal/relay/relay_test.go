@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -299,12 +300,11 @@ func TestServer_CentralTickerSweeper(t *testing.T) {
 	assert.LessOrEqual(t, goroutinesAfter-initialGoroutines, 5)
 
 	// Wait for sweeper to clean up expired sessions
-	time.Sleep(200 * time.Millisecond)
-
-	srv.mu.Lock()
-	countAfter := len(srv.sessions)
-	srv.mu.Unlock()
-	assert.Equal(t, 0, countAfter)
+	assert.Eventually(t, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return len(srv.sessions) == 0
+	}, 3*time.Second, 10*time.Millisecond, "Sweeper failed to clean up expired sessions")
 }
 
 func TestServer_DisconnectStreamCleanup(t *testing.T) {
@@ -315,7 +315,7 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	sessID, err := client.Register(ctx)
@@ -332,14 +332,14 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 	}
 
 	downloadCtx, downloadCancel := context.WithCancel(context.Background())
+	defer downloadCancel()
+
 	reqDownload, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
 	require.NoError(t, err)
 
-	downloadStarted := make(chan struct{})
 	downloadErrCh := make(chan error, 1)
 
 	go func() {
-		close(downloadStarted)
 		resp, err := testHTTPClient.Do(reqDownload)
 		if err != nil {
 			downloadErrCh <- err
@@ -350,22 +350,33 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 		downloadErrCh <- err
 	}()
 
-	<-downloadStarted
-	time.Sleep(50 * time.Millisecond)
+	// Wait until download handler has attached pipes to session
+	require.Eventually(t, func() bool {
+		sess := srv.getSession(sessID)
+		if sess == nil {
+			return false
+		}
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.DataPipeW != nil && sess.DataPipeR != nil
+	}, 3*time.Second, 10*time.Millisecond, "Download pipe not initialized in time")
 
 	// Sender starts uploading infinite data
 	uploadCtx, uploadCancel := context.WithCancel(context.Background())
 	defer uploadCancel()
 
 	infiniteReader, writer := io.Pipe()
+	var bytesWritten atomic.Int64
+
 	go func() {
 		defer writer.Close()
 		buf := make([]byte, 64*1024)
 		for {
-			_, err := writer.Write(buf)
+			n, err := writer.Write(buf)
 			if err != nil {
 				return
 			}
+			bytesWritten.Add(int64(n))
 		}
 	}()
 
@@ -383,7 +394,10 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 		uploadErrCh <- nil
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	// Wait until upload streaming has actively started writing bytes
+	require.Eventually(t, func() bool {
+		return bytesWritten.Load() > 0
+	}, 3*time.Second, 10*time.Millisecond, "Upload streaming did not start in time")
 
 	// Simulate abrupt receiver disconnect by canceling download context
 	startDisconnect := time.Now()
@@ -395,7 +409,7 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 		elapsed := time.Since(startDisconnect)
 		t.Logf("Upload terminated after %v on receiver disconnect (err: %v)", elapsed, err)
 		assert.Less(t, elapsed, 2*time.Second, "Upload did not terminate within 2 seconds")
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Upload timed out and did not terminate after receiver disconnect")
 	}
 
