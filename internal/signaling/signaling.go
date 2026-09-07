@@ -30,19 +30,12 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
-// ICEServers are the ICE servers used for NAT traversal discovery and relay.
+// ICEServers are the default ICE servers used for NAT traversal.
+// TURN servers and credentials should be explicitly supplied via configuration
+// or CLI flags to prevent unauthorized usage and credential leakage.
 var ICEServers = []webrtc.ICEServer{
 	{URLs: []string{"stun:stun.l.google.com:19302"}},
 	{URLs: []string{"stun:stun1.l.google.com:19302"}},
-	{
-		URLs: []string{
-			"turn:openrelay.metered.ca:80",
-			"turn:openrelay.metered.ca:443",
-			"turn:openrelay.metered.ca:443?transport=tcp",
-		},
-		Username:   "openrelayproject",
-		Credential: "openrelayproject",
-	},
 }
 
 // Signaler defines the interface for WebRTC signaling sessions.
