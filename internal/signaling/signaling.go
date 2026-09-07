@@ -440,12 +440,18 @@ func minifySDP(sdp string) string {
 		}
 	}
 
-	hostCandidate := preferredHostCandidate
-	if hostCandidate == "" {
-		hostCandidate = fallbackHostCandidate
+	var outCandidates []string
+	if preferredHostCandidate != "" {
+		outCandidates = append(outCandidates, preferredHostCandidate)
 	}
-	if hostCandidate == "" {
-		hostCandidate = anyHostCandidate
+	if fallbackHostCandidate != "" && fallbackHostCandidate != preferredHostCandidate {
+		outCandidates = append(outCandidates, fallbackHostCandidate)
+	}
+	if len(outCandidates) == 0 && anyHostCandidate != "" {
+		outCandidates = append(outCandidates, anyHostCandidate)
+	}
+	if srflxCandidate != "" {
+		outCandidates = append(outCandidates, srflxCandidate)
 	}
 
 	var out []string
@@ -459,12 +465,7 @@ func minifySDP(sdp string) string {
 
 		if strings.HasPrefix(line, "a=candidate") {
 			if !candidatesInserted {
-				if hostCandidate != "" {
-					out = append(out, hostCandidate)
-				}
-				if srflxCandidate != "" {
-					out = append(out, srflxCandidate)
-				}
+				out = append(out, outCandidates...)
 				candidatesInserted = true
 			}
 			continue

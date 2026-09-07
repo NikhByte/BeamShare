@@ -724,6 +724,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 type seekingReader struct {
