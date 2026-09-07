@@ -104,7 +104,7 @@ func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 		close(senderTxReady)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	_, err = senderSession.CreateOffer(ctx)

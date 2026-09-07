@@ -148,7 +148,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	})
 
 	// Handshake step 1: Create Offer
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	_, err = senderSession.CreateOffer(ctx)

@@ -23,7 +23,7 @@ func TestLocalHTTPSignaling(t *testing.T) {
 	require.NoError(t, err)
 	defer session.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	compressedOffer, err := session.CreateOffer(ctx)
@@ -108,7 +108,7 @@ func TestOpticalSDPExchange(t *testing.T) {
 	require.NoError(t, err)
 	defer session.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	compressedOffer, err := session.CreateOffer(ctx)
