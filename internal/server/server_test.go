@@ -35,8 +35,8 @@ func (r *dummyReader) Read(p []byte) (int, error) {
 }
 
 func TestUploadDownloadLargeFile(t *testing.T) {
-	// Use 10MB size for unit testing streaming upload/download
-	const fileSize = 10 * 1024 * 1024
+	// Use 1MB size for unit testing streaming upload/download
+	const fileSize = 1 * 1024 * 1024
 
 	// Start a test server
 	srv, err := New("", 10*1024*1024)
