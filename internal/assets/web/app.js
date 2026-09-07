@@ -5,10 +5,6 @@ function getBackendURL() {
     backend = window.location.origin;
     if (backend.includes('vercel.app') || backend.startsWith('file://')) {
       backend = 'https://beamshare.onrender.com';
-    } else if (backend.includes('localhost') || backend.includes('127.0.0.1')) {
-      if (window.location.port !== '8080') {
-        backend = 'http://localhost:8080';
-      }
     }
   }
   if (backend && backend.endsWith('/')) {
@@ -588,8 +584,14 @@ function resetState() {
 async function bootstrap() {
   const params = new URLSearchParams(window.location.search);
   const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
-  const localURL = params.get('local');
+  let localURL = params.get('local');
   const sessionID = params.get('s');
+
+  if (!localURL && !sessionID) {
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || /^(\d{1,3}\.){3}\d{1,3}$/.test(window.location.hostname)) {
+      localURL = window.location.origin;
+    }
+  }
 
   // Reset error UI states in case they were previously set
   const errorLabel = document.querySelector('#state-error .state-label');
@@ -770,66 +772,67 @@ async function startHTTPDownload() {
 
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
 
+      if (value && value.length > 0) {
+        if (decryptionKey) {
+          let newBuffer = new Uint8Array(encBuffer.length + value.length);
+          newBuffer.set(encBuffer, 0);
+          newBuffer.set(value, encBuffer.length);
+          encBuffer = newBuffer;
 
-      if (decryptionKey) {
-        let newBuffer = new Uint8Array(encBuffer.length + value.length);
-        newBuffer.set(encBuffer, 0);
-        newBuffer.set(value, encBuffer.length);
-        encBuffer = newBuffer;
-
-        while (encBuffer.length >= 4) {
-          const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-          const frameLen = dv.getUint32(0, false);
-          if (encBuffer.length >= 4 + frameLen) {
-            const frame = encBuffer.slice(4, 4 + frameLen);
-            encBuffer = encBuffer.slice(4 + frameLen);
-            
-            const nonce = frame.slice(0, 12);
-            const ciphertext = frame.slice(12);
-            const decrypted = await crypto.subtle.decrypt(
-              { name: "AES-GCM", iv: nonce },
-              decryptionKey,
-              ciphertext
-            );
-            const decValue = new Uint8Array(decrypted);
-            
-            if (diskWritableStream) {
-              await diskWritableStream.write(decValue);
-            } else if (swPipePort) {
-              swPipePort.postMessage(decValue);
-            } else if (useIndexedDB) {
-              await storeChunkIDB(decValue);
+          while (encBuffer.length >= 4) {
+            const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+            const frameLen = dv.getUint32(0, false);
+            if (encBuffer.length >= 4 + frameLen) {
+              const frame = encBuffer.slice(4, 4 + frameLen);
+              encBuffer = encBuffer.slice(4 + frameLen);
+              
+              const nonce = new Uint8Array(frame.subarray(0, 12));
+              const ciphertext = new Uint8Array(frame.subarray(12));
+              const decrypted = await crypto.subtle.decrypt(
+                { name: "AES-GCM", iv: nonce },
+                decryptionKey,
+                ciphertext
+              );
+              const decValue = new Uint8Array(decrypted);
+              
+              if (diskWritableStream) {
+                await diskWritableStream.write(decValue);
+              } else if (swPipePort) {
+                swPipePort.postMessage(decValue);
+              } else if (useIndexedDB) {
+                await storeChunkIDB(decValue);
+              } else {
+                receivedChunks.push(decValue);
+              }
+              received += decValue.length;
             } else {
-              receivedChunks.push(decValue);
+              break;
             }
-            received += decValue.length;
-          } else {
-            break;
           }
-        }
-      } else {
-        if (diskWritableStream) {
-          await diskWritableStream.write(value);
-        } else if (swPipePort) {
-          swPipePort.postMessage(value);
-        } else if (useIndexedDB) {
-          await storeChunkIDB(value);
         } else {
-          receivedChunks.push(value);
+          if (diskWritableStream) {
+            await diskWritableStream.write(value);
+          } else if (swPipePort) {
+            swPipePort.postMessage(value);
+          } else if (useIndexedDB) {
+            await storeChunkIDB(value);
+          } else {
+            receivedChunks.push(value);
+          }
+          received += value.length;
         }
-        received += value.length;
+
+        receivedBytes = received;
+        maybeSaveProgress();
+        if (totalBytes > 0) {
+          updateProgress(received / totalBytes);
+          updateDLStats(received, totalBytes);
+          updateSpeed(received);
+        }
       }
 
-
-      receivedBytes = received;
-      maybeSaveProgress();
-      if (totalBytes > 0) {
-        updateProgress(received / totalBytes);
-        updateDLStats(received, totalBytes);
-        updateSpeed(received);
-      }
+      if (done) break;
     }
 
     if (diskWritableStream) {
@@ -955,7 +958,8 @@ async function startWebRTC() {
   markStep('step-offer');
 
   // 2. Create peer connection and set remote description.
-  const pc = new RTCPeerConnection({ iceServers: offer.iceServers || STUN_SERVERS });
+  const iceServers = params.get('no_stun') ? [] : (offer.iceServers || STUN_SERVERS);
+  const pc = new RTCPeerConnection({ iceServers });
 
   // Also fetch file meta in parallel.
   const metaPromise = fetch(apiPath('/api/meta')).then(r => r.json());

@@ -20,5 +20,10 @@ node_modules/
 
 # Project specific
 /beam
+/bin
+/node_modules
+/test-results
+/playwright-report
+/tmp-test-data
 received_*
 .DS_Store
