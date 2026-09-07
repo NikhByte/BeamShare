@@ -249,7 +249,7 @@ func TestClient_RegistrationAndStateTimeout(t *testing.T) {
 	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
-		case <-time.After(5 * time.Second):
+		case <-time.After(1 * time.Second):
 		}
 	}))
 	defer slowServer.Close()
