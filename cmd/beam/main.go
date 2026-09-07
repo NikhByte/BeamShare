@@ -264,6 +264,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		os.Exit(1)
 	}
 
+	mainCtx, mainCancel := context.WithCancel(context.Background())
+	defer mainCancel()
+
 	var relClient *relay.Client
 	var relSessionID string
 	var relKey []byte
@@ -277,8 +280,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		relClient.Key = relKey
 		relKeyStr = base64.URLEncoding.EncodeToString(relKey)
 
+		regCtx, regCancel := context.WithTimeout(mainCtx, 10*time.Second)
 		var err error
-		relSessionID, err = relClient.Register()
+		relSessionID, err = relClient.Register(regCtx)
+		regCancel()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  warn: Relay connection failed (%v)\n", err)
 			relClient = nil
@@ -309,17 +314,30 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 						"sdpMLineIndex": c.SDPMLineIndex,
 					})
 				}
-				relClient.PushState(session.RawOffer(), mCands, map[string]interface{}{
+				pushCtx, pushCancel := context.WithTimeout(mainCtx, 10*time.Second)
+				errPush := relClient.PushState(pushCtx, session.RawOffer(), mCands, map[string]interface{}{
 					"name": fileName,
 					"size": fileSize,
 					"mime": "application/octet-stream",
 				})
+				pushCancel()
+				if errPush != nil {
+					fmt.Fprintf(os.Stderr, "  warn: Relay PushState failed (%v)\n", errPush)
+				}
 
 				// Poll for answer and download commands
 				go func() {
 					for {
-						cmd, err := relClient.Poll()
+						select {
+						case <-mainCtx.Done():
+							return
+						default:
+						}
+						cmd, err := relClient.Poll(mainCtx)
 						if err != nil {
+							if mainCtx.Err() != nil {
+								return
+							}
 							time.Sleep(1 * time.Second)
 							continue
 						}
@@ -327,9 +345,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							session.ProvideAnswer(cmd.Answer)
 						} else if cmd.Action == "download" {
 							fmt.Println("\n  [Relay] Bridge active! Streaming data via relay...")
-							err = relClient.UploadData(filePath)
+							err = relClient.UploadData(mainCtx, filePath)
 							if err != nil {
-								fmt.Printf("  Error uploading via relay: %v\n", err)
+								if mainCtx.Err() == nil {
+									fmt.Printf("  Error uploading via relay: %v\n", err)
+								}
 							} else {
 								fmt.Println("  ✅ Relay Transfer Complete!")
 							}
@@ -653,6 +673,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	go func() {
 		<-quit
 		fmt.Println("\n  beam: shutting down…")
+		mainCancel()
 		broadcaster.Stop()
 		if session != nil {
 			session.Close()
