@@ -122,7 +122,7 @@ func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 	assert.True(t, strings.HasPrefix(decompressedOffer, "v=0"))
 	assert.True(t, strings.Contains(decompressedOffer, "m=application"))
 
-	rxPC, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	rxPC, err := signaling.NewWebRTCAPI().NewPeerConnection(webrtc.Configuration{})
 	require.NoError(t, err)
 	defer rxPC.Close()
 
@@ -143,8 +143,23 @@ func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 	var receivedMeta string
 	eofReceived := make(chan struct{})
 
+	rxOpenCh := make(chan struct{})
 	rxDataChannelCh := make(chan *webrtc.DataChannel, 1)
 	rxPC.OnDataChannel(func(dc *webrtc.DataChannel) {
+		dc.OnOpen(func() {
+			select {
+			case <-rxOpenCh:
+			default:
+				close(rxOpenCh)
+			}
+		})
+		if dc.ReadyState() == webrtc.DataChannelStateOpen {
+			select {
+			case <-rxOpenCh:
+			default:
+				close(rxOpenCh)
+			}
+		}
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -210,14 +225,7 @@ func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 		t.Fatal("timed out waiting for receiver DataChannel")
 	}
 
-	rxOpenCh := make(chan struct{})
-	if rxDC.ReadyState() == webrtc.DataChannelStateOpen {
-		close(rxOpenCh)
-	} else {
-		rxDC.OnOpen(func() {
-			close(rxOpenCh)
-		})
-	}
+	_ = rxDC
 
 	select {
 	case <-rxOpenCh:
