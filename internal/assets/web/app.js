@@ -719,6 +719,7 @@ async function startHTTPDownload() {
       
       diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
       diskWritableStream = await diskFileHandle.createWritable();
+      await diskWritableStream.truncate(0);
       useOPFS = true;
       useIndexedDB = false;
     } catch (err) {
@@ -760,13 +761,19 @@ async function startHTTPDownload() {
     let encBuffer = new Uint8Array(0);
     if (window.location.hash.includes('k=')) {
       try {
-        const b64 = window.location.hash.split('k=')[1].split('&')[0];
-        const raw = Uint8Array.from(atob(b64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+        let b64 = window.location.hash.split('k=')[1].split('&')[0];
+        b64 = decodeURIComponent(b64).replace(/-/g, '+').replace(/_/g, '/');
+        while (b64.length % 4 !== 0) {
+          b64 += '=';
+        }
+        const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
         decryptionKey = await crypto.subtle.importKey(
           "raw", raw, { name: "AES-GCM" }, false, ["decrypt"]
         );
       } catch(e) {
         console.error("Failed to import decryption key", e);
+        showError("Decryption key error: " + e.message);
+        return;
       }
     }
 

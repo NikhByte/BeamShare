@@ -46,4 +46,4 @@ jobs:
         with:
           name: playwright-test-results
           path: test-results/
-          retire-after: 7
+          retention-days: 7

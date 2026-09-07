@@ -4,7 +4,7 @@
   "description": "> **Unstoppable P2P file transfer that works even on restricted college Wi-Fi.**",
   "main": "index.js",
   "scripts": {
-    "test": "node --test internal/assets/web/*.test.js",
+    "test": "node --test \"internal/assets/web/*.test.js\"",
     "build:go": "go build -o bin/beam ./cmd/beam && go build -o bin/relay ./cmd/relay",
     "test:e2e": "playwright test",
     "test:e2e:chromium": "playwright test --project=chromium",
