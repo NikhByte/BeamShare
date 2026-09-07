@@ -451,6 +451,9 @@ func minifySDP(sdp string) string {
 				if hostCandidate != "" {
 					out = append(out, hostCandidate)
 				}
+				if anyHostCandidate != "" && anyHostCandidate != hostCandidate {
+					out = append(out, anyHostCandidate)
+				}
 				if srflxCandidate != "" {
 					out = append(out, srflxCandidate)
 				}

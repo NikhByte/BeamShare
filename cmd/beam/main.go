@@ -236,7 +236,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	}
 
 	// ── Network Probe ─────────────────────────────────────────────────────────
-	if relayURL == "" {
+	if relayURL == "none" || relayURL == "disabled" {
+		relayURL = ""
+	} else if relayURL == "" {
 		fmt.Printf("  %s\n", dimStr("Probing network environment..."))
 		stunServer := "stun.l.google.com:19302"
 		for _, srv := range iceServers {

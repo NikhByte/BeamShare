@@ -4,7 +4,12 @@
   "description": "> **Unstoppable P2P file transfer that works even on restricted college Wi-Fi.**",
   "main": "index.js",
   "scripts": {
-    "test": "node --test internal/assets/web/*.test.js"
+    "test": "node --test internal/assets/web/*.test.js",
+    "build:go": "go build -o bin/beam ./cmd/beam && go build -o bin/relay ./cmd/relay",
+    "test:e2e": "playwright test",
+    "test:e2e:chromium": "playwright test --project=chromium",
+    "test:e2e:firefox": "playwright test --project=firefox",
+    "test:e2e:webkit": "playwright test --project=webkit"
   },
   "repository": {
     "type": "git",
@@ -19,7 +24,10 @@
   },
   "homepage": "https://github.com/NikhByte/BeamShare#readme",
   "devDependencies": {
+    "@playwright/test": "^1.42.0",
+    "@types/node": "^20.11.0",
     "jsdom": "^30.0.1",
-    "pako": "^3.0.1"
+    "pako": "^3.0.1",
+    "typescript": "^5.3.3"
   }
 }
