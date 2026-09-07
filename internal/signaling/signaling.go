@@ -245,10 +245,68 @@ func CheckNATWithProber(stunURL string, localIP string, prober NATProber) bool {
 	return CheckNAT(stunURL, localIP)
 }
 
+// ParseICEURL validates and extracts the scheme, host, and port from an ICE server URL (STUN/TURN).
+func ParseICEURL(rawURL string) (scheme, hostPort string, err error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", "", fmt.Errorf("empty ICE URL")
+	}
+
+	parts := strings.SplitN(rawURL, ":", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("missing scheme in ICE URL: %s", rawURL)
+	}
+
+	scheme = strings.ToLower(parts[0])
+	switch scheme {
+	case "stun", "stuns", "turn", "turns":
+	default:
+		return "", "", fmt.Errorf("invalid ICE URL scheme %q, must be stun, stuns, turn, or turns", scheme)
+	}
+
+	rest := parts[1]
+	// Strip query parameters if present (e.g. ?transport=udp)
+	if qIdx := strings.Index(rest, "?"); qIdx != -1 {
+		rest = rest[:qIdx]
+	}
+
+	if rest == "" {
+		return "", "", fmt.Errorf("missing host in ICE URL: %s", rawURL)
+	}
+
+	defaultPort := "3478"
+	if scheme == "stuns" || scheme == "turns" {
+		defaultPort = "5349"
+	}
+
+	host, port, errSplit := net.SplitHostPort(rest)
+	if errSplit != nil {
+		host = rest
+		port = defaultPort
+	}
+
+	if host == "" {
+		return "", "", fmt.Errorf("invalid empty host in ICE URL: %s", rawURL)
+	}
+
+	return scheme, net.JoinHostPort(host, port), nil
+}
+
 // CheckNAT returns true if the host is behind a NAT, i.e., public IP != local IP.
 // It queries the provided STUN URL and times out after 500ms.
 func CheckNAT(stunURL string, localIP string) bool {
-	c, err := stun.Dial("udp", stunURL)
+	var targetAddr string
+	if _, hostPort, err := ParseICEURL(stunURL); err == nil {
+		targetAddr = hostPort
+	} else if strings.Contains(stunURL, ":") {
+		targetAddr = stunURL
+	} else if stunURL != "" {
+		targetAddr = net.JoinHostPort(stunURL, "3478")
+	} else {
+		return true // assume NAT on invalid/empty target
+	}
+
+	c, err := stun.Dial("udp", targetAddr)
 	if err != nil {
 		return true // assume NAT on error
 	}

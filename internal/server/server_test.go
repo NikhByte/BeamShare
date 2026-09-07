@@ -222,3 +222,14 @@ func TestLiveStream_ClientCleanupOnUpdateSharedFile(t *testing.T) {
 	srv.mu.Unlock()
 	assert.Equal(t, 0, clientsLen)
 }
+
+func TestNewRingBuffer_Clamping(t *testing.T) {
+	rbSmall := NewRingBuffer(10)
+	assert.Equal(t, MinRingBufferSize, len(rbSmall.buf))
+
+	rbLarge := NewRingBuffer(500 * 1024 * 1024)
+	assert.Equal(t, MaxRingBufferSize, len(rbLarge.buf))
+
+	rbNormal := NewRingBuffer(1024 * 1024)
+	assert.Equal(t, 1024*1024, len(rbNormal.buf))
+}

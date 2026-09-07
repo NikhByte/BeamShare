@@ -577,8 +577,19 @@ type RingBuffer struct {
 	isFull bool
 }
 
-// NewRingBuffer creates a RingBuffer of the specified size.
+const (
+	MinRingBufferSize = 64 * 1024         // 64 KB
+	MaxRingBufferSize = 100 * 1024 * 1024 // 100 MB
+)
+
+// NewRingBuffer creates a RingBuffer of the specified size, clamped within safe boundaries.
 func NewRingBuffer(size int) *RingBuffer {
+	if size < MinRingBufferSize {
+		size = MinRingBufferSize
+	}
+	if size > MaxRingBufferSize {
+		size = MaxRingBufferSize
+	}
 	return &RingBuffer{
 		buf: make([]byte, size),
 	}

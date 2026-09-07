@@ -284,3 +284,44 @@ func TestSignalingHandlers(t *testing.T) {
 		t.Fatalf("timed out waiting for answer channel to unblock")
 	}
 }
+
+func TestParseICEURL(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		expectScheme string
+		expectHost   string
+		expectErr    bool
+	}{
+		{"Valid STUN with port", "stun:stun.l.google.com:19302", "stun", "stun.l.google.com:19302", false},
+		{"Valid STUN default port", "stun:stun.example.com", "stun", "stun.example.com:3478", false},
+		{"Valid STUNS default port", "stuns:stun.example.com", "stuns", "stun.example.com:5349", false},
+		{"Valid TURN with query", "turn:turn.example.com:443?transport=tcp", "turn", "turn.example.com:443", false},
+		{"Valid TURNS default port", "turns:turn.example.com", "turns", "turn.example.com:5349", false},
+		{"Invalid scheme http", "http://example.com", "", "", true},
+		{"Empty string", "", "", "", true},
+		{"Missing scheme", "example.com:3478", "", "", true},
+		{"Empty host", "stun:", "", "", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme, hostPort, err := ParseICEURL(tc.input)
+			if tc.expectErr {
+				if err == nil {
+					t.Fatalf("expected error for input %q, got nil", tc.input)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error for input %q: %v", tc.input, err)
+				}
+				if scheme != tc.expectScheme {
+					t.Errorf("expected scheme %q, got %q", tc.expectScheme, scheme)
+				}
+				if hostPort != tc.expectHost {
+					t.Errorf("expected hostPort %q, got %q", tc.expectHost, hostPort)
+				}
+			}
+		})
+	}
+}

@@ -183,6 +183,13 @@ func parseFlags(args []string) ([]string, []webrtc.ICEServer, time.Duration) {
 		discoveryTimeout = 60 * time.Second
 	}
 
+	if liveBufferSize < 64*1024 {
+		liveBufferSize = 64 * 1024
+	}
+	if liveBufferSize > 100*1024*1024 {
+		liveBufferSize = 100 * 1024 * 1024
+	}
+
 	var iceServers []webrtc.ICEServer
 
 	if len(stunServers) > 0 {
@@ -235,8 +242,8 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		for _, srv := range iceServers {
 			if len(srv.URLs) > 0 {
 				for _, u := range srv.URLs {
-					if strings.HasPrefix(u, "stun:") {
-						stunServer = strings.TrimPrefix(u, "stun:")
+					if scheme, hostPort, err := signaling.ParseICEURL(u); err == nil && (scheme == "stun" || scheme == "stuns") {
+						stunServer = hostPort
 						break
 					}
 				}

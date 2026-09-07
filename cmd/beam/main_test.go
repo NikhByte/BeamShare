@@ -34,3 +34,19 @@ func TestParseFlags(t *testing.T) {
 		t.Fatalf("expected discovery timeout 15s, got %v", discoveryTimeout)
 	}
 }
+
+func TestBufferSizeClamping(t *testing.T) {
+	// Test excessively large buffer size gets clamped to 100MB
+	argsExcessive := []string{"--buffer-size=1000000000", "send", "file.txt"}
+	parseFlags(argsExcessive)
+	if liveBufferSize != 100*1024*1024 {
+		t.Fatalf("expected liveBufferSize clamped to 100MB, got %d", liveBufferSize)
+	}
+
+	// Test negative/sub-minimum buffer size gets clamped to 64KB
+	argsSubMin := []string{"--buffer-size=100", "send", "file.txt"}
+	parseFlags(argsSubMin)
+	if liveBufferSize != 64*1024 {
+		t.Fatalf("expected liveBufferSize clamped to 64KB, got %d", liveBufferSize)
+	}
+}
