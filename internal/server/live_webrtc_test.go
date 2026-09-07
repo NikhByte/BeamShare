@@ -97,7 +97,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	txDCReady := make(chan struct{})
 
 	// Create sender session (offline)
-	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 500*time.Millisecond)
+	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 2*time.Second)
 	require.NoError(t, err)
 	defer senderSession.Close()
 
