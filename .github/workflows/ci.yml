@@ -39,7 +39,11 @@ jobs:
 
       - name: Run Go Unit Tests
         run: |
-          go test -v ./... > test.log 2>&1 || (cat test.log | tail -n 150 && exit 1)
+          if ! go test -v ./... > test.log 2>&1; then
+            grep -E "^--- FAIL:|^FAIL" test.log | while read -r line; do echo "::error::$line"; done
+            cat test.log
+            exit 1
+          fi
 
       - name: Run JavaScript Web Receiver Tests
         run: npm test
