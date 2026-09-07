@@ -351,8 +351,12 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 						if cmd.Action == "answer" {
 							session.ProvideAnswer(cmd.Answer)
 						} else if cmd.Action == "download" {
-							fmt.Println("\n  [Relay] Bridge active! Streaming data via relay...")
-							err = relClient.UploadData(mainCtx, filePath)
+							if cmd.Offset > 0 {
+								fmt.Printf("\n  [Relay] Bridge active! Resuming transfer from offset %d...\n", cmd.Offset)
+							} else {
+								fmt.Println("\n  [Relay] Bridge active! Streaming data via relay...")
+							}
+							err = relClient.UploadDataAtOffset(mainCtx, filePath, cmd.Offset)
 							if err != nil {
 								if mainCtx.Err() == nil {
 									fmt.Printf("  Error uploading via relay: %v\n", err)
@@ -417,12 +421,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if uploadFile != nil {
 								uploadFile.Close()
 								elapsed := time.Since(uploadStat)
-								speed := float64(uploaded) / elapsed.Seconds()
-								fmt.Printf("\n  ✅ P2P Upload complete! Received %s and saved to %s in %.1fs (avg %s/s)\n",
+								fmt.Printf("\n  ✅ P2P Upload complete! Received %s and saved to %s in %.1fs (avg %s)\n",
 									ui.FormatBytes(uploaded),
 									uploadName,
 									elapsed.Seconds(),
-									ui.FormatBytes(int64(speed)),
+									ui.FormatSpeed(uploaded, elapsed),
 								)
 								srv.UpdateSharedFile(uploadName, filepath.Base(uploadName), uploaded)
 								uploadFile = nil
@@ -480,9 +483,8 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 											return
 										}
 										totalSent += int64(n)
-										pct := float64(totalSent) / float64(fileSize) * 100
-										fmt.Printf("\r  📤 Sending P2P: %.1f%% (%s/%s)",
-											pct,
+										fmt.Printf("\r  📤 Sending P2P: %s (%s/%s)",
+											ui.FormatPercentage(totalSent, fileSize),
 											ui.FormatBytes(totalSent),
 											ui.FormatBytes(fileSize),
 										)
@@ -500,14 +502,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 								elapsed := time.Since(start)
 								sentInSession := totalSent - offset
-								speed := float64(sentInSession) / elapsed.Seconds()
-								if elapsed.Seconds() == 0 {
-									speed = 0
-								}
-								fmt.Printf("\n  ✅ P2P Transfer Complete! Sent %s in %.1fs (avg %s/s)\n",
+								fmt.Printf("\n  ✅ P2P Transfer Complete! Sent %s in %.1fs (avg %s)\n",
 									ui.FormatBytes(sentInSession),
 									elapsed.Seconds(),
-									ui.FormatBytes(int64(speed)),
+									ui.FormatSpeed(sentInSession, elapsed),
 								)
 							}()
 						}
@@ -521,9 +519,8 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								return
 							}
 							uploaded += int64(n)
-							pct := float64(uploaded) / float64(uploadSize) * 100
-							fmt.Printf("\r  📥 Receiving P2P: %.1f%% (%s/%s)",
-								pct,
+							fmt.Printf("\r  📥 Receiving P2P: %s (%s/%s)",
+								ui.FormatPercentage(uploaded, uploadSize),
 								ui.FormatBytes(uploaded),
 								ui.FormatBytes(uploadSize),
 							)

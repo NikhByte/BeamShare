@@ -3,7 +3,9 @@
 package assets
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -22,6 +24,12 @@ var swJS string
 
 //go:embed web/pako.min.js
 var pakoJS string
+
+var (
+	styleETag = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(styleCSS)))
+	appETag   = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(appJS)))
+	pakoETag  = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(pakoJS)))
+)
 
 // IndexHTML returns the full content of the receiver web page.
 func IndexHTML() string {
@@ -52,19 +60,38 @@ func PakoJS() string {
 func StaticHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
+		var contentType string
+		var etag string
+		var content []byte
+
 		switch path {
 		case "style.css":
-			w.Header().Set("Content-Type", "text/css; charset=utf-8")
-			w.Write([]byte(styleCSS))
+			contentType = "text/css; charset=utf-8"
+			etag = styleETag
+			content = []byte(styleCSS)
 		case "app.js":
-			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-			w.Write([]byte(appJS))
+			contentType = "application/javascript; charset=utf-8"
+			etag = appETag
+			content = []byte(appJS)
 		case "pako.min.js":
-			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-			w.Write([]byte(pakoJS))
+			contentType = "application/javascript; charset=utf-8"
+			etag = pakoETag
+			content = []byte(pakoJS)
 		default:
 			http.NotFound(w, r)
+			return
 		}
+
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "public, max-age=86400, must-revalidate")
+		w.Header().Set("ETag", etag)
+
+		if match := r.Header.Get("If-None-Match"); match != "" && (match == etag || match == "*") {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+
+		w.Write(content)
 	})
 }
 

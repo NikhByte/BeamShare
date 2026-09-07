@@ -455,3 +455,84 @@ func TestSessionIDGenerationAndCollisionResolution(t *testing.T) {
 	// Ensure original session was NOT overwritten
 	assert.Equal(t, sess1, srv.GetSession(sess1.ID))
 }
+
+func TestRelay_RangeRequestAndOffsetHandling(t *testing.T) {
+	relayServer := NewServer()
+	ts := httptest.NewServer(relayServer)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	sessID, err := client.Register(context.Background())
+	require.NoError(t, err)
+
+	totalSize := int64(1000)
+	err = client.PushState(context.Background(), "dummy-offer", nil, map[string]interface{}{
+		"name": "large.dat",
+		"size": float64(totalSize),
+	})
+	require.NoError(t, err)
+
+	// 1. Partial Range Request (offset 250)
+	pollCh := make(chan *PollCommand, 1)
+	go func() {
+		cmd, errPoll := client.Poll(context.Background())
+		if errPoll == nil {
+			pollCh <- cmd
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
+	require.NoError(t, err)
+	req.Header.Set("Range", "bytes=250-")
+
+	downloadRespCh := make(chan *http.Response, 1)
+	go func() {
+		resp, _ := http.DefaultClient.Do(req)
+		downloadRespCh <- resp
+	}()
+
+	select {
+	case cmd := <-pollCh:
+		assert.Equal(t, "download", cmd.Action)
+		assert.Equal(t, int64(250), cmd.Offset)
+		assert.Equal(t, "bytes=250-", cmd.Range)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for poll command with offset")
+	}
+
+	// 2. Unsatisfiable Range
+	reqBad, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
+	require.NoError(t, err)
+	reqBad.Header.Set("Range", "bytes=5000-")
+	respBad, err := http.DefaultClient.Do(reqBad)
+	require.NoError(t, err)
+	defer respBad.Body.Close()
+	assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, respBad.StatusCode)
+	assert.Equal(t, fmt.Sprintf("bytes */%d", totalSize), respBad.Header.Get("Content-Range"))
+
+	// 3. Test UploadDataAtOffset
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "offset_test.txt")
+	testData := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
+	err = os.WriteFile(filePath, testData, 0644)
+	require.NoError(t, err)
+
+	// Upload starting at offset 10 ("abcdefghijklmnopqrstuvwxyz")
+	go func() {
+		_ = client.UploadDataAtOffset(context.Background(), filePath, 10)
+	}()
+
+	select {
+	case resp := <-downloadRespCh:
+		if resp != nil {
+			defer resp.Body.Close()
+			assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
+			body, _ := io.ReadAll(resp.Body)
+			assert.Equal(t, testData[10:], body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for download response")
+	}
+}

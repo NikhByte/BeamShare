@@ -107,7 +107,9 @@ func (c *Client) PushState(ctx context.Context, offer string, candidates []map[s
 
 type PollCommand struct {
 	Action string `json:"action"`
-	Answer string `json:"answer"`
+	Answer string `json:"answer,omitempty"`
+	Offset int64  `json:"offset,omitempty"`
+	Range  string `json:"range,omitempty"`
 }
 
 func (c *Client) Poll(ctx context.Context) (*PollCommand, error) {
@@ -137,7 +139,13 @@ func (c *Client) Poll(ctx context.Context) (*PollCommand, error) {
 	return &cmd, nil
 }
 
+// UploadData streams file data starting at the beginning of the file.
 func (c *Client) UploadData(ctx context.Context, filePath string) error {
+	return c.UploadDataAtOffset(ctx, filePath, 0)
+}
+
+// UploadDataAtOffset streams file data starting at a specified byte offset (for resumable transfers).
+func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset int64) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -147,6 +155,12 @@ func (c *Client) UploadData(ctx context.Context, filePath string) error {
 		return err
 	}
 	defer file.Close()
+
+	if offset > 0 {
+		if _, err := file.Seek(offset, io.SeekStart); err != nil {
+			return fmt.Errorf("seek file to offset %d: %w", offset, err)
+		}
+	}
 
 	var r io.Reader = file
 	if len(c.Key) == 32 {

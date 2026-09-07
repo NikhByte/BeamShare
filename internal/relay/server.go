@@ -7,12 +7,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/beamshare/beam/internal/assets"
 )
+
+type DownloadRequest struct {
+	Offset int64  `json:"offset,omitempty"`
+	Range  string `json:"range,omitempty"`
+}
 
 type Session struct {
 	ID         string
@@ -21,7 +27,7 @@ type Session struct {
 	Meta       map[string]interface{}
 
 	AnswerReady chan string
-	DownloadReq chan struct{}
+	DownloadReq chan DownloadRequest
 
 	DataPipeR *io.PipeReader
 	DataPipeW *io.PipeWriter
@@ -192,7 +198,7 @@ func (s *Server) createSession() *Session {
 	sess := &Session{
 		ID:          id,
 		AnswerReady: make(chan string, 1),
-		DownloadReq: make(chan struct{}, 1),
+		DownloadReq: make(chan DownloadRequest, 1),
 		expiresAt:   time.Now().Add(s.sessionTTL),
 	}
 	s.sessions[id] = sess
@@ -233,8 +239,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		return
+	}
 	sess := s.createSession()
-	json.NewEncoder(w).Encode(map[string]string{"session": sess.ID})
+	json.NewEncoder(w).Encode(map[string]string{
+		"session":    sess.ID,
+		"session_id": sess.ID,
+	})
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -266,6 +278,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		sess.Candidates = sanitizedCandidates
+	} else if sess.Candidates == nil {
+		sess.Candidates = []map[string]interface{}{}
 	}
 	if req.Meta != nil {
 		sanitizedMeta := make(map[string]interface{})
@@ -283,6 +297,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		sess.Meta = sanitizedMeta
+	} else if sess.Meta == nil {
+		sess.Meta = map[string]interface{}{}
 	}
 	sess.mu.Unlock()
 
@@ -302,10 +318,17 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			"action": "answer",
 			"answer": answer,
 		})
-	case <-sess.DownloadReq:
-		json.NewEncoder(w).Encode(map[string]interface{}{
+	case dlReq := <-sess.DownloadReq:
+		resp := map[string]interface{}{
 			"action": "download",
-		})
+		}
+		if dlReq.Offset > 0 {
+			resp["offset"] = dlReq.Offset
+		}
+		if dlReq.Range != "" {
+			resp["range"] = dlReq.Range
+		}
+		json.NewEncoder(w).Encode(resp)
 	case <-r.Context().Done():
 		return
 	}
@@ -356,12 +379,15 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 	// Serve assets
 	if r.URL.Path == "/" || r.URL.Path == "/index.html" {
-		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
 		w.Write([]byte(assets.IndexHTML()))
 		return
 	}
 	if r.URL.Path == "/sw.js" {
-		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Service-Worker-Allowed", "/")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.Write([]byte(assets.ServiceWorkerJS()))
 		return
 	}
@@ -461,6 +487,42 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rangeHdr := r.Header.Get("Range")
+	var offset int64
+	if rangeHdr != "" && strings.HasPrefix(rangeHdr, "bytes=") {
+		spec := strings.TrimPrefix(rangeHdr, "bytes=")
+		parts := strings.Split(spec, "-")
+		if len(parts) > 0 && parts[0] != "" {
+			if parsed, err := strconv.ParseInt(parts[0], 10, 64); err == nil && parsed >= 0 {
+				offset = parsed
+			}
+		}
+	}
+
+	sess.mu.Lock()
+	var totalSize int64
+	if sess.Meta != nil {
+		if sVal, ok := sess.Meta["size"].(int64); ok {
+			totalSize = sVal
+		} else if fVal, ok := sess.Meta["size"].(float64); ok {
+			totalSize = int64(fVal)
+		}
+	}
+	sess.mu.Unlock()
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges, Content-Disposition")
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	if offset > 0 && totalSize > 0 && offset < totalSize {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, totalSize-1, totalSize))
+		w.WriteHeader(http.StatusPartialContent)
+	} else if offset >= totalSize && totalSize > 0 {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", totalSize))
+		http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
 	pr, pw := io.Pipe()
 
 	sess.mu.Lock()
@@ -486,15 +548,14 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Notify sender
+	// Notify sender with offset/range
 	select {
-	case sess.DownloadReq <- struct{}{}:
+	case sess.DownloadReq <- DownloadRequest{Offset: offset, Range: rangeHdr}:
 	default:
 	}
 
 	// Stream data from sender to receiver
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}

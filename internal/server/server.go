@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -181,12 +182,14 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Write([]byte(assets.IndexHTML()))
 }
 
 func (s *Server) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.Header().Set("Service-Worker-Allowed", "/")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Write([]byte(assets.ServiceWorkerJS()))
 }
 
@@ -216,7 +219,8 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("\r  Receiver connected (download #%d)…\n", count)
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition, Accept-Ranges")
+	w.Header().Set("Accept-Ranges", "bytes")
 
 	if s.isLivePipe {
 		s.mu.Lock()
@@ -228,8 +232,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, s.fileName))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
-		w.Write(data)
+		http.ServeContent(w, r, s.fileName, time.Time{}, bytes.NewReader(data))
 		return
 	}
 
@@ -240,11 +243,16 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
+	stat, err := f.Stat()
+	var modTime time.Time
+	if err == nil {
+		modTime = stat.ModTime()
+	}
+
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, s.fileName))
 	w.Header().Set("Content-Type", guessMIME(s.fileName))
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", s.fileSize))
 
-	http.ServeContent(w, r, s.fileName, time.Now(), f)
+	http.ServeContent(w, r, s.fileName, modTime, f)
 }
 
 func (s *Server) handleLiveStream(w http.ResponseWriter, r *http.Request) {
@@ -500,7 +508,10 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			part.Close()
 
 			elapsed := time.Since(start)
-			speed := float64(totalReceived) / elapsed.Seconds()
+			speed := float64(0)
+			if elapsed.Seconds() > 0 {
+				speed = float64(totalReceived) / elapsed.Seconds()
+			}
 			fmt.Printf("\n  ✅ HTTP Upload complete! Received %s and saved to %s in %.1fs (avg %s/s)\n",
 				formatBytes(totalReceived),
 				outName,
