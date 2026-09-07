@@ -245,9 +245,12 @@ func TestEncryptedRelayDataStreaming(t *testing.T) {
 }
 
 func TestClient_RegistrationAndStateTimeout(t *testing.T) {
-	// Slow server that hangs forever
+	// Slow server that hangs until request context is cancelled
 	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(5 * time.Second)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
 	}))
 	defer slowServer.Close()
 
@@ -363,9 +366,7 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 		if sess == nil {
 			return false
 		}
-		sess.mu.Lock()
-		defer sess.mu.Unlock()
-		return sess.DataPipeW != nil && sess.DataPipeR != nil
+		return sess.IsPipeReady()
 	}, 3*time.Second, 10*time.Millisecond, "Download pipe not initialized in time")
 
 	// Sender starts uploading infinite data
