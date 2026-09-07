@@ -40,7 +40,7 @@ jobs:
       - name: Run Go Unit Tests
         run: |
           if ! go test -v ./... > test.log 2>&1; then
-            grep -E "^--- FAIL:|^FAIL" test.log | while read -r line; do echo "::error::$line"; done
+            head -n 100 test.log | while read -r line; do echo "::error::$line"; done
             cat test.log
             exit 1
           fi
