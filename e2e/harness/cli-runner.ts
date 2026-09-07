@@ -176,9 +176,12 @@ export function startBeamSender(options: {
     // Check if output contains URLs
     const directMatch = output.match(/http:\/\/(127\.0\.0\.1|localhost|192\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+):\d+/);
     const webrtcMatch = output.match(/http:\/\/[^\s]+[\?&]mode=webrtc[^\s]*/);
-    const relayMatch = output.match(/http:\/\/[^\s]+[\?&]s=\d+[^\s]*/);
+    const relayMatch = output.match(/http:\/\/[^\s]+[\?&]s=[^&\s#]+[^\s]*/);
 
-    const hasCompleteOutput = output.includes('Waiting for receiver') || output.includes('sdp=') || !!relayMatch;
+    const isRelayRequested = options.relayURL && options.relayURL !== 'none' && options.relayURL !== 'disabled';
+    const hasCompleteOutput = isRelayRequested
+      ? !!relayMatch
+      : (output.includes('Waiting for receiver') || output.includes('sdp='));
 
     if (directMatch && hasCompleteOutput) {
       isCheckingPort = true;
