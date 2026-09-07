@@ -77,6 +77,7 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 		info, err := os.Stat(outName)
 		require.NoError(t, err)
 		assert.Equal(t, int64(fileSize), info.Size())
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 
 		// Setup server state to point to our newly uploaded file for download test
 		srv.UpdateSharedFile(outName, "large_test.bin", int64(fileSize))
@@ -129,4 +130,58 @@ func TestWriteLive_Truncation(t *testing.T) {
 	
 	// Let's verify.
 	assert.Equal(t, part2, backlog)
+}
+
+func TestUploadPathTraversalAndPermissions(t *testing.T) {
+	srv, err := New("", 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	traversalFilenames := []struct {
+		inputFilename    string
+		expectedFilename string
+	}{
+		{"../../evil.sh", "received_evil.sh"},
+		{"..\\..\\evil_win.bat", "received_evil_win.bat"},
+		{"/absolute/path/test.txt", "received_test.txt"},
+		{"nested/dir/sub/data.dat", "received_data.dat"},
+		{"../../../etc/passwd", "received_passwd"},
+		{"....", "received_upload.bin"},
+		{"", "received_upload.bin"},
+	}
+
+	for _, tc := range traversalFilenames {
+		t.Run(tc.inputFilename, func(t *testing.T) {
+			bodyReader, bodyWriter := io.Pipe()
+			writer := multipart.NewWriter(bodyWriter)
+
+			go func() {
+				defer bodyWriter.Close()
+				defer writer.Close()
+
+				part, err := writer.CreateFormFile("file", tc.inputFilename)
+				require.NoError(t, err)
+				_, err = part.Write([]byte("test content"))
+				require.NoError(t, err)
+			}()
+
+			req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload", bodyReader)
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+			info, err := os.Stat(tc.expectedFilename)
+			require.NoError(t, err, "File should be created at sanitized path: %s", tc.expectedFilename)
+			defer os.Remove(tc.expectedFilename)
+
+			assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+		})
+	}
 }

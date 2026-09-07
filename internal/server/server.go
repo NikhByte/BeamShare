@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -443,8 +444,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if part.FormName() == "file" {
-			outName := "received_" + part.FileName()
-			outFile, err := os.Create(outName)
+			cleanBase := filepath.Base(filepath.Clean(part.FileName()))
+			cleanBase = strings.Trim(cleanBase, "\x00./\\")
+			if cleanBase == "" {
+				cleanBase = "upload.bin"
+			}
+			outName := "received_" + cleanBase
+			outFile, err := os.OpenFile(outName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 			if err != nil {
 				part.Close()
 				http.Error(w, "create file error: "+err.Error(), http.StatusInternalServerError)

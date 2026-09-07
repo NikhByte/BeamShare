@@ -387,13 +387,18 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								name := parts[1]
 								size, _ := strconv.ParseInt(parts[2], 10, 64)
 
-								uploadName = "received_" + filepath.Base(name)
+								cleanBase := filepath.Base(filepath.Clean(name))
+								cleanBase = strings.Trim(cleanBase, "\x00./\\")
+								if cleanBase == "" {
+									cleanBase = "upload.bin"
+								}
+								uploadName = "received_" + cleanBase
 								uploadSize = size
 								uploaded = 0
 								uploadStat = time.Now()
 
 								var errCreate error
-								uploadFile, errCreate = os.Create(uploadName)
+								uploadFile, errCreate = os.OpenFile(uploadName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 								if errCreate != nil {
 									fmt.Printf("\n  Error creating upload file: %v\n", errCreate)
 									uploadFile = nil
