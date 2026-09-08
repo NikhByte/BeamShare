@@ -642,6 +642,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges, Content-Disposition")
 	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Content-Type", "application/octet-stream")
 
 	if unsatisfiable {
 		if totalSize > 0 {
@@ -682,8 +683,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	sess.SenderOffsetReady = offsetReady
 	sess.mu.Unlock()
 
+	var downloadErr error
 	defer func() {
-		sess.ClosePipes(fmt.Errorf("download handler completed"))
+		sess.ClosePipes(downloadErr)
 	}()
 
 	done := make(chan struct{})
@@ -703,8 +705,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 
-	// Stream data from sender to receiver
-	w.Header().Set("Content-Type", "application/octet-stream")
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -724,12 +724,14 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 				f.Flush()
 			}
 			if errWrite != nil {
+				downloadErr = errWrite
 				sess.ClosePipes(errWrite)
 				break
 			}
 		}
 		if errRead != nil {
 			if errRead != io.EOF {
+				downloadErr = errRead
 				sess.ClosePipes(errRead)
 			}
 			break
@@ -746,6 +748,9 @@ type seekingReader struct {
 }
 
 func (sr *seekingReader) Read(p []byte) (int, error) {
+	if sr.ctx != nil && sr.ctx.Err() != nil {
+		return 0, sr.ctx.Err()
+	}
 	if !sr.skipped {
 		sr.skipped = true
 		if sr.offsetReady != nil {
@@ -754,6 +759,9 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 			case <-sr.ctx.Done():
 				return 0, sr.ctx.Err()
 			}
+		}
+		if sr.ctx != nil && sr.ctx.Err() != nil {
+			return 0, sr.ctx.Err()
 		}
 		sr.sess.mu.Lock()
 		reqOff := sr.sess.RequestedOffset
@@ -766,6 +774,9 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 				return 0, err
 			}
 		}
+	}
+	if sr.ctx != nil && sr.ctx.Err() != nil {
+		return 0, sr.ctx.Err()
 	}
 	return sr.pr.Read(p)
 }

@@ -543,21 +543,58 @@ func TestRelayServer_HTTPRangeHeaderParsingAnd206Responses(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL)
-	registerSession := func(t *testing.T) string {
+
+	fullData := bytes.Repeat([]byte("0123456789"), 100) // 1000 bytes
+	totalSize := int64(len(fullData))
+
+	registerAndStartUpload := func(t *testing.T) (string, <-chan error) {
 		sessID, err := client.Register(context.Background())
 		require.NoError(t, err)
 
-		totalSize := int64(1000)
 		err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{
 			"name": "sample.bin",
 			"size": float64(totalSize),
 		})
 		require.NoError(t, err)
-		return sessID
+
+		uploadErrCh := make(chan error, 1)
+		go func() {
+			cmd, errPoll := client.Poll(context.Background())
+			if errPoll != nil {
+				uploadErrCh <- errPoll
+				return
+			}
+			if cmd.Action != "download" {
+				uploadErrCh <- fmt.Errorf("expected download action, got %s", cmd.Action)
+				return
+			}
+
+			offset := cmd.Offset
+			uploadReq, errReq := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/relay/data?session=%s&offset=%d", ts.URL, sessID, offset), bytes.NewReader(fullData[offset:]))
+			if errReq != nil {
+				uploadErrCh <- errReq
+				return
+			}
+			uploadReq.Header.Set("Content-Type", "application/octet-stream")
+
+			resp, errDo := http.DefaultClient.Do(uploadReq)
+			if errDo != nil {
+				uploadErrCh <- errDo
+				return
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				uploadErrCh <- fmt.Errorf("upload status %d", resp.StatusCode)
+				return
+			}
+			uploadErrCh <- nil
+		}()
+
+		return sessID, uploadErrCh
 	}
 
 	t.Run("Range bytes=0- (start 0 open end)", func(t *testing.T) {
-		sessID := registerSession(t)
+		sessID, uploadErrCh := registerAndStartUpload(t)
 		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=0-")
@@ -568,10 +605,15 @@ func TestRelayServer_HTTPRangeHeaderParsingAnd206Responses(t *testing.T) {
 
 		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
 		assert.Equal(t, "bytes 0-999/1000", resp.Header.Get("Content-Range"))
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, fullData, body)
+
+		require.NoError(t, <-uploadErrCh)
 	})
 
 	t.Run("Range bytes=250-749 (bounded chunk)", func(t *testing.T) {
-		sessID := registerSession(t)
+		sessID, uploadErrCh := registerAndStartUpload(t)
 		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=250-749")
@@ -583,10 +625,15 @@ func TestRelayServer_HTTPRangeHeaderParsingAnd206Responses(t *testing.T) {
 		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
 		assert.Equal(t, "bytes 250-749/1000", resp.Header.Get("Content-Range"))
 		assert.Equal(t, "500", resp.Header.Get("Content-Length"))
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, fullData[250:750], body)
+
+		require.NoError(t, <-uploadErrCh)
 	})
 
 	t.Run("Range bytes=-100 (suffix range)", func(t *testing.T) {
-		sessID := registerSession(t)
+		sessID, uploadErrCh := registerAndStartUpload(t)
 		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=-100")
@@ -598,10 +645,24 @@ func TestRelayServer_HTTPRangeHeaderParsingAnd206Responses(t *testing.T) {
 		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
 		assert.Equal(t, "bytes 900-999/1000", resp.Header.Get("Content-Range"))
 		assert.Equal(t, "100", resp.Header.Get("Content-Length"))
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, fullData[900:], body)
+
+		require.NoError(t, <-uploadErrCh)
 	})
 
 	t.Run("Unsatisfiable Range bytes=1000-", func(t *testing.T) {
-		sessID := registerSession(t)
+		sessID, err := client.Register(context.Background())
+		require.NoError(t, err)
+
+		totalSize := int64(1000)
+		err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{
+			"name": "sample.bin",
+			"size": float64(totalSize),
+		})
+		require.NoError(t, err)
+
 		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=1000-")
@@ -615,7 +676,16 @@ func TestRelayServer_HTTPRangeHeaderParsingAnd206Responses(t *testing.T) {
 	})
 
 	t.Run("Invalid Range bytes=500-200", func(t *testing.T) {
-		sessID := registerSession(t)
+		sessID, err := client.Register(context.Background())
+		require.NoError(t, err)
+
+		totalSize := int64(1000)
+		err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{
+			"name": "sample.bin",
+			"size": float64(totalSize),
+		})
+		require.NoError(t, err)
+
 		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=500-200")
