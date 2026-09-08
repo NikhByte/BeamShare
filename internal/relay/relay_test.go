@@ -472,7 +472,7 @@ func TestRelay_RangeRequestAndOffsetHandling(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// 1. Partial Range Request (offset 250)
+	// 1. Partial Range Request (offset 10)
 	pollCh := make(chan *PollCommand, 1)
 	go func() {
 		cmd, errPoll := client.Poll(context.Background())
@@ -485,7 +485,7 @@ func TestRelay_RangeRequestAndOffsetHandling(t *testing.T) {
 
 	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
 	require.NoError(t, err)
-	req.Header.Set("Range", "bytes=250-")
+	req.Header.Set("Range", "bytes=10-")
 
 	downloadRespCh := make(chan *http.Response, 1)
 	go func() {
@@ -496,8 +496,8 @@ func TestRelay_RangeRequestAndOffsetHandling(t *testing.T) {
 	select {
 	case cmd := <-pollCh:
 		assert.Equal(t, "download", cmd.Action)
-		assert.Equal(t, int64(250), cmd.Offset)
-		assert.Equal(t, "bytes=250-", cmd.Range)
+		assert.Equal(t, int64(10), cmd.Offset)
+		assert.Equal(t, "bytes=10-", cmd.Range)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for poll command with offset")
 	}
@@ -536,3 +536,154 @@ func TestRelay_RangeRequestAndOffsetHandling(t *testing.T) {
 		t.Fatal("timed out waiting for download response")
 	}
 }
+
+func TestRelayServer_HTTPRangeHeaderParsingAnd206Responses(t *testing.T) {
+	srv := NewServer()
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	sessID, err := client.Register(context.Background())
+	require.NoError(t, err)
+
+	totalSize := int64(1000)
+	err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{
+		"name": "sample.bin",
+		"size": float64(totalSize),
+	})
+	require.NoError(t, err)
+
+	t.Run("Range bytes=0- (start 0 open end)", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
+		require.NoError(t, err)
+		req.Header.Set("Range", "bytes=0-")
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
+		assert.Equal(t, "bytes 0-999/1000", resp.Header.Get("Content-Range"))
+	})
+
+	t.Run("Range bytes=250-749 (bounded chunk)", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
+		require.NoError(t, err)
+		req.Header.Set("Range", "bytes=250-749")
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
+		assert.Equal(t, "bytes 250-749/1000", resp.Header.Get("Content-Range"))
+		assert.Equal(t, "500", resp.Header.Get("Content-Length"))
+	})
+
+	t.Run("Range bytes=-100 (suffix range)", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
+		require.NoError(t, err)
+		req.Header.Set("Range", "bytes=-100")
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
+		assert.Equal(t, "bytes 900-999/1000", resp.Header.Get("Content-Range"))
+		assert.Equal(t, "100", resp.Header.Get("Content-Length"))
+	})
+
+	t.Run("Unsatisfiable Range bytes=1000-", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
+		require.NoError(t, err)
+		req.Header.Set("Range", "bytes=1000-")
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, resp.StatusCode)
+		assert.Equal(t, "bytes */1000", resp.Header.Get("Content-Range"))
+	})
+
+	t.Run("Invalid Range bytes=500-200", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
+		require.NoError(t, err)
+		req.Header.Set("Range", "bytes=500-200")
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, resp.StatusCode)
+		assert.Equal(t, "bytes */1000", resp.Header.Get("Content-Range"))
+	})
+}
+
+func TestRelayServer_TransferStreamSeekingOnUnseekedUpload(t *testing.T) {
+	srv := NewServer()
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	sessID, err := client.Register(context.Background())
+	require.NoError(t, err)
+
+	fullData := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+	totalSize := int64(len(fullData))
+
+	err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{
+		"name": "stream_seek.txt",
+		"size": float64(totalSize),
+	})
+	require.NoError(t, err)
+
+	// Receiver requests range starting at offset 10 (bytes=10-)
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
+	require.NoError(t, err)
+	req.Header.Set("Range", "bytes=10-")
+
+	downloadRespCh := make(chan *http.Response, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		downloadRespCh <- resp
+	}()
+
+	// Poll download request
+	cmd, err := client.Poll(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "download", cmd.Action)
+	assert.Equal(t, int64(10), cmd.Offset)
+
+	// Sender uploads starting from byte 0 (unseeked upload, offset=0)
+	uploadReq, err := http.NewRequest(http.MethodPost, ts.URL+"/relay/data?session="+sessID+"&offset=0", bytes.NewReader(fullData))
+	require.NoError(t, err)
+	uploadReq.Header.Set("Content-Type", "application/octet-stream")
+
+	uploadResp, err := http.DefaultClient.Do(uploadReq)
+	require.NoError(t, err)
+	uploadResp.Body.Close()
+	assert.Equal(t, http.StatusOK, uploadResp.StatusCode)
+
+	select {
+	case resp := <-downloadRespCh:
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		// The server should have seeked/discarded first 10 bytes and returned fullData[10:]
+		assert.Equal(t, fullData[10:], body)
+	case err := <-errCh:
+		t.Fatalf("Download request failed: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timed out waiting for download response")
+	}
+}
+
