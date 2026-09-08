@@ -170,7 +170,7 @@ func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/relay/data?session=%s", c.BaseURL, c.SessionID), r)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/relay/data?session=%s&offset=%d", c.BaseURL, c.SessionID, offset), r)
 	if err != nil {
 		return err
 	}

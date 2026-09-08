@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -32,6 +33,11 @@ type Session struct {
 	DataPipeR *io.PipeReader
 	DataPipeW *io.PipeWriter
 
+	RequestedOffset int64
+	SenderOffset    int64
+
+	SenderOffsetReady chan struct{}
+
 	expiresAt time.Time
 	mu        sync.Mutex
 }
@@ -39,6 +45,14 @@ type Session struct {
 func (s *Session) ClosePipes(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.SenderOffsetReady != nil {
+		select {
+		case <-s.SenderOffsetReady:
+		default:
+			close(s.SenderOffsetReady)
+		}
+		s.SenderOffsetReady = nil
+	}
 	if s.DataPipeW != nil {
 		if err != nil {
 			s.DataPipeW.CloseWithError(err)
@@ -196,10 +210,11 @@ func (s *Server) createSession() *Session {
 	}
 
 	sess := &Session{
-		ID:          id,
-		AnswerReady: make(chan string, 1),
-		DownloadReq: make(chan DownloadRequest, 1),
-		expiresAt:   time.Now().Add(s.sessionTTL),
+		ID:                id,
+		AnswerReady:       make(chan string, 1),
+		DownloadReq:       make(chan DownloadRequest, 1),
+		SenderOffsetReady: make(chan struct{}),
+		expiresAt:         time.Now().Add(s.sessionTTL),
 	}
 	s.sessions[id] = sess
 
@@ -344,6 +359,15 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	sess.mu.Lock()
 	pw := sess.DataPipeW
 	pr := sess.DataPipeR
+	senderOffset := parseSenderOffset(r, 0)
+	sess.SenderOffset = senderOffset
+	if sess.SenderOffsetReady != nil {
+		select {
+		case <-sess.SenderOffsetReady:
+		default:
+			close(sess.SenderOffsetReady)
+		}
+	}
 	sess.mu.Unlock()
 
 	if pw == nil || pr == nil {
@@ -351,8 +375,11 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var copyErr error
 	defer func() {
-		sess.ClosePipes(fmt.Errorf("data handler completed"))
+		if copyErr != nil {
+			sess.ClosePipes(copyErr)
+		}
 	}()
 
 	done := make(chan struct{})
@@ -366,12 +393,122 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	_, err := io.Copy(pw, r.Body)
-	if err != nil {
-		sess.ClosePipes(err)
-	} else {
+	_, copyErr = io.Copy(pw, r.Body)
+	if copyErr == nil {
 		pw.Close()
 	}
+}
+
+type byteRange struct {
+	start int64
+	end   int64 // inclusive; -1 if open-ended or totalSize unknown
+}
+
+func parseRangeHeader(rangeHdr string, totalSize int64) (hasRange bool, r byteRange, unsatisfiable bool) {
+	if rangeHdr == "" || !strings.HasPrefix(rangeHdr, "bytes=") {
+		return false, byteRange{}, false
+	}
+
+	spec := strings.TrimPrefix(rangeHdr, "bytes=")
+	if idx := strings.Index(spec, ","); idx != -1 {
+		spec = spec[:idx]
+	}
+	spec = strings.TrimSpace(spec)
+
+	parts := strings.Split(spec, "-")
+	if len(parts) != 2 {
+		return true, byteRange{}, true
+	}
+
+	var start, end int64 = -1, -1
+
+	if parts[0] != "" {
+		parsedStart, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil || parsedStart < 0 {
+			return true, byteRange{}, true
+		}
+		start = parsedStart
+	}
+
+	if parts[1] != "" {
+		parsedEnd, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || parsedEnd < 0 {
+			return true, byteRange{}, true
+		}
+		end = parsedEnd
+	}
+
+	if start == -1 && end == -1 {
+		return true, byteRange{}, true
+	}
+
+	// Suffix range: bytes=-500
+	if start == -1 {
+		if totalSize <= 0 {
+			return true, byteRange{}, true
+		}
+		suffixLen := end
+		if suffixLen <= 0 {
+			return true, byteRange{}, true
+		}
+		start = totalSize - suffixLen
+		if start < 0 {
+			start = 0
+		}
+		end = totalSize - 1
+	} else if end == -1 {
+		// Open-ended range: bytes=500-
+		if totalSize > 0 {
+			end = totalSize - 1
+		}
+	}
+
+	if start > end && end != -1 {
+		return true, byteRange{}, true
+	}
+
+	if totalSize > 0 {
+		if start >= totalSize {
+			return true, byteRange{}, true
+		}
+		if end >= totalSize {
+			end = totalSize - 1
+		}
+	}
+
+	return true, byteRange{start: start, end: end}, false
+}
+
+func parseSenderOffset(r *http.Request, defaultOffset int64) int64 {
+	if offStr := r.URL.Query().Get("offset"); offStr != "" {
+		if val, err := strconv.ParseInt(offStr, 10, 64); err == nil && val >= 0 {
+			return val
+		}
+	}
+	if cr := r.Header.Get("Content-Range"); cr != "" && strings.HasPrefix(cr, "bytes ") {
+		spec := strings.TrimPrefix(cr, "bytes ")
+		parts := strings.Split(spec, "-")
+		if len(parts) > 0 {
+			if val, err := strconv.ParseInt(parts[0], 10, 64); err == nil && val >= 0 {
+				return val
+			}
+		}
+	}
+	if rng := r.Header.Get("Range"); rng != "" && strings.HasPrefix(rng, "bytes=") {
+		spec := strings.TrimPrefix(rng, "bytes=")
+		parts := strings.Split(spec, "-")
+		if len(parts) > 0 && parts[0] != "" {
+			if val, err := strconv.ParseInt(parts[0], 10, 64); err == nil && val >= 0 {
+				return val
+			}
+		}
+	}
+	if offHdr := r.Header.Get("X-Offset"); offHdr != "" {
+		if val, err := strconv.ParseInt(offHdr, 10, 64); err == nil && val >= 0 {
+			return val
+		}
+	}
+	return defaultOffset
 }
 
 // --- Receiver Handlers ---
@@ -488,16 +625,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rangeHdr := r.Header.Get("Range")
-	var offset int64
-	if rangeHdr != "" && strings.HasPrefix(rangeHdr, "bytes=") {
-		spec := strings.TrimPrefix(rangeHdr, "bytes=")
-		parts := strings.Split(spec, "-")
-		if len(parts) > 0 && parts[0] != "" {
-			if parsed, err := strconv.ParseInt(parts[0], 10, 64); err == nil && parsed >= 0 {
-				offset = parsed
-			}
-		}
-	}
 
 	sess.mu.Lock()
 	var totalSize int64
@@ -510,20 +637,40 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.mu.Unlock()
 
+	hasRange, rng, unsatisfiable := parseRangeHeader(rangeHdr, totalSize)
+
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges, Content-Disposition")
 	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Content-Type", "application/octet-stream")
 
-	if offset > 0 && totalSize > 0 && offset < totalSize {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, totalSize-1, totalSize))
-		w.WriteHeader(http.StatusPartialContent)
-	} else if offset >= totalSize && totalSize > 0 {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", totalSize))
+	if unsatisfiable {
+		if totalSize > 0 {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", totalSize))
+		}
 		http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
 
+	var offset int64
+	if hasRange {
+		offset = rng.start
+		if totalSize > 0 && rng.end >= rng.start {
+			contentLen := rng.end - rng.start + 1
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, totalSize))
+			if contentLen < totalSize {
+				w.Header().Set("Content-Length", strconv.FormatInt(contentLen, 10))
+			}
+		} else {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-/*", rng.start))
+		}
+		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+
 	pr, pw := io.Pipe()
+	offsetReady := make(chan struct{})
 
 	sess.mu.Lock()
 	if sess.DataPipeR != nil || sess.DataPipeW != nil {
@@ -531,10 +678,14 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.DataPipeR = pr
 	sess.DataPipeW = pw
+	sess.RequestedOffset = offset
+	sess.SenderOffset = 0
+	sess.SenderOffsetReady = offsetReady
 	sess.mu.Unlock()
 
+	var downloadErr error
 	defer func() {
-		sess.ClosePipes(fmt.Errorf("download handler completed"))
+		sess.ClosePipes(downloadErr)
 	}()
 
 	done := make(chan struct{})
@@ -554,30 +705,80 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 
-	// Stream data from sender to receiver
-	w.Header().Set("Content-Type", "application/octet-stream")
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
 
+	var streamReader io.Reader = &seekingReader{pr: pr, sess: sess, offsetReady: offsetReady, ctx: r.Context()}
+	if hasRange && rng.end >= rng.start {
+		limit := rng.end - rng.start + 1
+		streamReader = io.LimitReader(streamReader, limit)
+	}
+
 	buf := make([]byte, 32*1024)
 	for {
-		n, errRead := pr.Read(buf)
+		n, errRead := streamReader.Read(buf)
 		if n > 0 {
 			_, errWrite := w.Write(buf[:n])
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
 			if errWrite != nil {
+				downloadErr = errWrite
 				sess.ClosePipes(errWrite)
 				break
 			}
 		}
 		if errRead != nil {
-			sess.ClosePipes(errRead)
+			if errRead != io.EOF {
+				downloadErr = errRead
+				sess.ClosePipes(errRead)
+			}
 			break
 		}
 	}
+}
+
+type seekingReader struct {
+	pr          *io.PipeReader
+	sess        *Session
+	offsetReady chan struct{}
+	ctx         context.Context
+	skipped     bool
+}
+
+func (sr *seekingReader) Read(p []byte) (int, error) {
+	if sr.ctx != nil && sr.ctx.Err() != nil {
+		return 0, sr.ctx.Err()
+	}
+	if !sr.skipped {
+		sr.skipped = true
+		if sr.offsetReady != nil {
+			select {
+			case <-sr.offsetReady:
+			case <-sr.ctx.Done():
+				return 0, sr.ctx.Err()
+			}
+		}
+		if sr.ctx != nil && sr.ctx.Err() != nil {
+			return 0, sr.ctx.Err()
+		}
+		sr.sess.mu.Lock()
+		reqOff := sr.sess.RequestedOffset
+		sendOff := sr.sess.SenderOffset
+		sr.sess.mu.Unlock()
+
+		bytesToSkip := reqOff - sendOff
+		if bytesToSkip > 0 {
+			if _, err := io.CopyN(io.Discard, sr.pr, bytesToSkip); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if sr.ctx != nil && sr.ctx.Err() != nil {
+		return 0, sr.ctx.Err()
+	}
+	return sr.pr.Read(p)
 }
 
 func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
