@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -81,7 +82,9 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 		info, err := os.Stat(outName)
 		require.NoError(t, err)
 		assert.Equal(t, int64(fileSize), info.Size())
-		assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+		if runtime.GOOS != "windows" {
+			assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+		}
 
 		// Setup server state to point to our newly uploaded file for download test
 		srv.UpdateSharedFile(outName, "large_test.bin", int64(fileSize))
@@ -185,7 +188,9 @@ func TestUploadPathTraversalAndPermissions(t *testing.T) {
 			require.NoError(t, err, "File should be created at sanitized path: %s", tc.expectedFilename)
 			defer os.Remove(tc.expectedFilename)
 
-			assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+			if runtime.GOOS != "windows" {
+				assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+			}
 		})
 	}
 }

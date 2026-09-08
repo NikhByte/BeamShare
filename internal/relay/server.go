@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -50,6 +51,7 @@ func (s *Session) ClosePipes(err error) {
 		default:
 			close(s.SenderOffsetReady)
 		}
+		s.SenderOffsetReady = nil
 	}
 	if s.DataPipeW != nil {
 		if err != nil {
@@ -357,7 +359,7 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	sess.mu.Lock()
 	pw := sess.DataPipeW
 	pr := sess.DataPipeR
-	senderOffset := parseSenderOffset(r, sess.RequestedOffset)
+	senderOffset := parseSenderOffset(r, 0)
 	sess.SenderOffset = senderOffset
 	if sess.SenderOffsetReady != nil {
 		select {
@@ -667,6 +669,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pr, pw := io.Pipe()
+	offsetReady := make(chan struct{})
 
 	sess.mu.Lock()
 	if sess.DataPipeR != nil || sess.DataPipeW != nil {
@@ -675,8 +678,8 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	sess.DataPipeR = pr
 	sess.DataPipeW = pw
 	sess.RequestedOffset = offset
-	sess.SenderOffset = -1
-	sess.SenderOffsetReady = make(chan struct{})
+	sess.SenderOffset = 0
+	sess.SenderOffsetReady = offsetReady
 	sess.mu.Unlock()
 
 	defer func() {
@@ -706,7 +709,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		f.Flush()
 	}
 
-	var streamReader io.Reader = &seekingReader{pr: pr, sess: sess}
+	var streamReader io.Reader = &seekingReader{pr: pr, sess: sess, offsetReady: offsetReady, ctx: r.Context()}
 	if hasRange && rng.end >= rng.start {
 		limit := rng.end - rng.start + 1
 		streamReader = io.LimitReader(streamReader, limit)
@@ -735,25 +738,27 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 type seekingReader struct {
-	pr      *io.PipeReader
-	sess    *Session
-	skipped bool
+	pr          *io.PipeReader
+	sess        *Session
+	offsetReady chan struct{}
+	ctx         context.Context
+	skipped     bool
 }
 
 func (sr *seekingReader) Read(p []byte) (int, error) {
 	if !sr.skipped {
 		sr.skipped = true
-		if sr.sess.SenderOffsetReady != nil {
-			<-sr.sess.SenderOffsetReady
+		if sr.offsetReady != nil {
+			select {
+			case <-sr.offsetReady:
+			case <-sr.ctx.Done():
+				return 0, sr.ctx.Err()
+			}
 		}
 		sr.sess.mu.Lock()
 		reqOff := sr.sess.RequestedOffset
 		sendOff := sr.sess.SenderOffset
 		sr.sess.mu.Unlock()
-
-		if sendOff < 0 {
-			sendOff = reqOff
-		}
 
 		bytesToSkip := reqOff - sendOff
 		if bytesToSkip > 0 {
