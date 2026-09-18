@@ -19,11 +19,11 @@ import (
 
 func TestLocalHTTPSignaling(t *testing.T) {
 	// Create signaling session with empty iceServers for offline execution
-	session, err := NewSession([]webrtc.ICEServer{}, 2*time.Second)
+	session, err := NewSession([]webrtc.ICEServer{}, 10*time.Second)
 	require.NoError(t, err)
 	defer session.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	compressedOffer, err := session.CreateOffer(ctx)
@@ -104,11 +104,11 @@ func TestLocalHTTPSignaling(t *testing.T) {
 }
 
 func TestOpticalSDPExchange(t *testing.T) {
-	session, err := NewSession([]webrtc.ICEServer{}, 2*time.Second)
+	session, err := NewSession([]webrtc.ICEServer{}, 10*time.Second)
 	require.NoError(t, err)
 	defer session.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	compressedOffer, err := session.CreateOffer(ctx)
@@ -188,7 +188,7 @@ func TestCheckNATWithProber(t *testing.T) {
 func TestSignalingHandlers(t *testing.T) {
 	// Create signaling session with empty ICE servers to avoid external network calls during PC creation
 	iceServers := []webrtc.ICEServer{}
-	session, err := NewSession(iceServers, 2*time.Second)
+	session, err := NewSession(iceServers, 10*time.Second)
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}

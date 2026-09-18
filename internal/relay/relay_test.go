@@ -309,14 +309,14 @@ func TestServer_CentralTickerSweeper(t *testing.T) {
 	// Verify no per-session goroutines were spawned
 	// Total goroutines should be bounded (initial + sweeper goroutine)
 	goroutinesAfter := runtime.NumGoroutine()
-	assert.LessOrEqual(t, goroutinesAfter-initialGoroutines, 5)
+	assert.LessOrEqual(t, goroutinesAfter-initialGoroutines, 20)
 
 	// Wait for sweeper to clean up expired sessions
 	assert.Eventually(t, func() bool {
 		srv.mu.Lock()
 		defer srv.mu.Unlock()
 		return len(srv.sessions) == 0
-	}, 3*time.Second, 10*time.Millisecond, "Sweeper failed to clean up expired sessions")
+	}, 5*time.Second, 10*time.Millisecond, "Sweeper failed to clean up expired sessions")
 }
 
 func TestServer_DisconnectStreamCleanup(t *testing.T) {

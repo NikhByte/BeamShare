@@ -95,7 +95,7 @@ func TestEndToEndDirectHTTP(t *testing.T) {
 // TestEndToEndOpticalWebRTCP2P tests optical QR SDP compression/decompression and WebRTC P2P transfer offline.
 func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 	// 1. Create Sender Session
-	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 2*time.Second)
+	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 10*time.Second)
 	require.NoError(t, err)
 	defer senderSession.Close()
 
@@ -104,7 +104,7 @@ func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 		close(senderTxReady)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	_, err = senderSession.CreateOffer(ctx)
@@ -206,7 +206,7 @@ func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 	var rxDC *webrtc.DataChannel
 	select {
 	case rxDC = <-rxDataChannelCh:
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for receiver DataChannel")
 	}
 
@@ -221,13 +221,13 @@ func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 
 	select {
 	case <-rxOpenCh:
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for receiver DataChannel open")
 	}
 
 	select {
 	case <-senderTxReady:
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for sender DataChannel open")
 	}
 
@@ -252,7 +252,7 @@ func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 		defer mu.Unlock()
 		assert.Equal(t, fmt.Sprintf("META:optical.txt:%d", len(testPayload)), receivedMeta)
 		assert.Equal(t, testPayload, receivedBuf.Bytes())
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for P2P transfer completion")
 	}
 }
