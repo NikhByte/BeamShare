@@ -25,14 +25,6 @@ func TestRelayServerAndClient(t *testing.T) {
 	ts := httptest.NewServer(relaySrv)
 	defer ts.Close()
 
-	client := NewClient(ts.URL)
-
-	// 1. Session registration
-	sessionID, err := client.Register(context.Background())
-	require.NoError(t, err)
-	assert.NotEmpty(t, sessionID)
-
-	// 2. State pushing
 	offerSDP := "v=0\r\no=- 1000 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
 	candidates := []map[string]interface{}{
 		{"candidate": "candidate:1 1 UDP 2013266431 127.0.0.1 50000 typ host"},
@@ -42,12 +34,23 @@ func TestRelayServerAndClient(t *testing.T) {
 		"size": float64(1024),
 	}
 
-	err = client.PushState(context.Background(), offerSDP, candidates, meta)
-	require.NoError(t, err)
+	createIsolatedSession := func(t *testing.T) (*Client, string) {
+		client := NewClient(ts.URL)
+		sessID, err := client.Register(context.Background())
+		require.NoError(t, err)
+		err = client.PushState(context.Background(), offerSDP, candidates, meta)
+		require.NoError(t, err)
+		return client, sessID
+	}
+
+	// 1. Session registration
+	_, sessionID := createIsolatedSession(t)
+	assert.NotEmpty(t, sessionID)
 
 	// Query receiver endpoints
 	t.Run("Receiver GET /api/meta", func(t *testing.T) {
-		resp, err := http.Get(ts.URL + "/api/meta?s=" + sessionID)
+		_, subSessID := createIsolatedSession(t)
+		resp, err := http.Get(ts.URL + "/api/meta?s=" + subSessID)
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
@@ -59,7 +62,8 @@ func TestRelayServerAndClient(t *testing.T) {
 	})
 
 	t.Run("Receiver GET /api/signal/offer", func(t *testing.T) {
-		resp, err := http.Get(ts.URL + "/api/signal/offer?s=" + sessionID)
+		_, subSessID := createIsolatedSession(t)
+		resp, err := http.Get(ts.URL + "/api/signal/offer?s=" + subSessID)
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
@@ -71,7 +75,8 @@ func TestRelayServerAndClient(t *testing.T) {
 	})
 
 	t.Run("Receiver GET /api/signal/candidates", func(t *testing.T) {
-		resp, err := http.Get(ts.URL + "/api/signal/candidates?s=" + sessionID)
+		_, subSessID := createIsolatedSession(t)
+		resp, err := http.Get(ts.URL + "/api/signal/candidates?s=" + subSessID)
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
@@ -84,11 +89,12 @@ func TestRelayServerAndClient(t *testing.T) {
 
 	// 3. Long-polling Mechanics
 	t.Run("Poll Answer Action", func(t *testing.T) {
+		subClient, subSessID := createIsolatedSession(t)
 		pollCh := make(chan *PollCommand, 1)
 		errCh := make(chan error, 1)
 
 		go func() {
-			cmd, err := client.Poll(context.Background())
+			cmd, err := subClient.Poll(context.Background())
 			if err != nil {
 				errCh <- err
 			} else {
@@ -100,7 +106,7 @@ func TestRelayServerAndClient(t *testing.T) {
 
 		// Receiver posts answer
 		answerSDP := "{\"type\":\"answer\",\"sdp\":\"v=0\\r\\n\"}"
-		resp, err := http.Post(ts.URL+"/api/signal/answer?s="+sessionID, "application/json", bytes.NewReader([]byte(answerSDP)))
+		resp, err := http.Post(ts.URL+"/api/signal/answer?s="+subSessID, "application/json", bytes.NewReader([]byte(answerSDP)))
 		require.NoError(t, err)
 		resp.Body.Close()
 
@@ -116,10 +122,11 @@ func TestRelayServerAndClient(t *testing.T) {
 	})
 
 	t.Run("Poll Context Cancellation", func(t *testing.T) {
+		_, subSessID := createIsolatedSession(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/relay/poll?session="+sessionID, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/relay/poll?session="+subSessID, nil)
 		require.NoError(t, err)
 
 		resp, err := http.DefaultClient.Do(req)
@@ -130,11 +137,12 @@ func TestRelayServerAndClient(t *testing.T) {
 	})
 
 	t.Run("Poll Download Action", func(t *testing.T) {
+		subClient, subSessID := createIsolatedSession(t)
 		pollCh := make(chan *PollCommand, 1)
 		errCh := make(chan error, 1)
 
 		go func() {
-			cmd, err := client.Poll(context.Background())
+			cmd, err := subClient.Poll(context.Background())
 			if err != nil {
 				errCh <- err
 			} else {
@@ -146,7 +154,7 @@ func TestRelayServerAndClient(t *testing.T) {
 
 		// Receiver requests download with a context that cancels after getting the response header
 		ctx, cancel := context.WithCancel(context.Background())
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/download?s="+sessionID, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/download?s="+subSessID, nil)
 		require.NoError(t, err)
 
 		go func() {
@@ -472,7 +480,7 @@ func TestRelay_RangeRequestAndOffsetHandling(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// 1. Partial Range Request (offset 250)
+	// 1. Partial Range Request (offset 10)
 	pollCh := make(chan *PollCommand, 1)
 	go func() {
 		cmd, errPoll := client.Poll(context.Background())
@@ -485,7 +493,7 @@ func TestRelay_RangeRequestAndOffsetHandling(t *testing.T) {
 
 	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
 	require.NoError(t, err)
-	req.Header.Set("Range", "bytes=250-")
+	req.Header.Set("Range", "bytes=10-")
 
 	downloadRespCh := make(chan *http.Response, 1)
 	go func() {
@@ -496,8 +504,8 @@ func TestRelay_RangeRequestAndOffsetHandling(t *testing.T) {
 	select {
 	case cmd := <-pollCh:
 		assert.Equal(t, "download", cmd.Action)
-		assert.Equal(t, int64(250), cmd.Offset)
-		assert.Equal(t, "bytes=250-", cmd.Range)
+		assert.Equal(t, int64(10), cmd.Offset)
+		assert.Equal(t, "bytes=10-", cmd.Range)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for poll command with offset")
 	}
