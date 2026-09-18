@@ -36,8 +36,6 @@ type Session struct {
 	RequestedOffset int64
 	SenderOffset    int64
 
-	SenderOffsetReady chan struct{}
-
 	expiresAt time.Time
 	mu        sync.Mutex
 }
@@ -45,14 +43,6 @@ type Session struct {
 func (s *Session) ClosePipes(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.SenderOffsetReady != nil {
-		select {
-		case <-s.SenderOffsetReady:
-		default:
-			close(s.SenderOffsetReady)
-		}
-		s.SenderOffsetReady = nil
-	}
 	if s.DataPipeW != nil {
 		if err != nil {
 			s.DataPipeW.CloseWithError(err)
@@ -69,6 +59,13 @@ func (s *Session) ClosePipes(err error) {
 		}
 		s.DataPipeR = nil
 	}
+}
+
+func (s *Session) SetPipes(pr *io.PipeReader, pw *io.PipeWriter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.DataPipeR = pr
+	s.DataPipeW = pw
 }
 
 func (s *Session) IsPipeReady() bool {
@@ -210,11 +207,10 @@ func (s *Server) createSession() *Session {
 	}
 
 	sess := &Session{
-		ID:                id,
-		AnswerReady:       make(chan string, 1),
-		DownloadReq:       make(chan DownloadRequest, 1),
-		SenderOffsetReady: make(chan struct{}),
-		expiresAt:         time.Now().Add(s.sessionTTL),
+		ID:          id,
+		AnswerReady: make(chan string, 1),
+		DownloadReq: make(chan DownloadRequest, 1),
+		expiresAt:   time.Now().Add(s.sessionTTL),
 	}
 	s.sessions[id] = sess
 
@@ -361,13 +357,6 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	pr := sess.DataPipeR
 	senderOffset := parseSenderOffset(r, 0)
 	sess.SenderOffset = senderOffset
-	if sess.SenderOffsetReady != nil {
-		select {
-		case <-sess.SenderOffsetReady:
-		default:
-			close(sess.SenderOffsetReady)
-		}
-	}
 	sess.mu.Unlock()
 
 	if pw == nil || pr == nil {
@@ -670,7 +659,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pr, pw := io.Pipe()
-	offsetReady := make(chan struct{})
 
 	sess.mu.Lock()
 	if sess.DataPipeR != nil || sess.DataPipeW != nil {
@@ -680,7 +668,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	sess.DataPipeW = pw
 	sess.RequestedOffset = offset
 	sess.SenderOffset = 0
-	sess.SenderOffsetReady = offsetReady
 	sess.mu.Unlock()
 
 	var downloadErr error
@@ -709,7 +696,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		f.Flush()
 	}
 
-	var streamReader io.Reader = &seekingReader{pr: pr, sess: sess, offsetReady: offsetReady, ctx: r.Context()}
+	var streamReader io.Reader = &seekingReader{pr: pr, sess: sess, ctx: r.Context()}
 	if hasRange && rng.end >= rng.start {
 		limit := rng.end - rng.start + 1
 		streamReader = io.LimitReader(streamReader, limit)
@@ -742,43 +729,63 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 type seekingReader struct {
 	pr          *io.PipeReader
 	sess        *Session
-	offsetReady chan struct{}
 	ctx         context.Context
-	skipped     bool
+	bytesToSkip int64
+	initDone    bool
 }
 
 func (sr *seekingReader) Read(p []byte) (int, error) {
 	if sr.ctx != nil && sr.ctx.Err() != nil {
 		return 0, sr.ctx.Err()
 	}
-	if !sr.skipped {
-		sr.skipped = true
-		if sr.offsetReady != nil {
-			select {
-			case <-sr.offsetReady:
-			case <-sr.ctx.Done():
-				return 0, sr.ctx.Err()
-			}
-		}
-		if sr.ctx != nil && sr.ctx.Err() != nil {
-			return 0, sr.ctx.Err()
-		}
-		sr.sess.mu.Lock()
-		reqOff := sr.sess.RequestedOffset
-		sendOff := sr.sess.SenderOffset
-		sr.sess.mu.Unlock()
 
-		bytesToSkip := reqOff - sendOff
-		if bytesToSkip > 0 {
-			if _, err := io.CopyN(io.Discard, sr.pr, bytesToSkip); err != nil {
-				return 0, err
+	for {
+		if !sr.initDone {
+			n, err := sr.pr.Read(p)
+			sr.sess.mu.Lock()
+			reqOff := sr.sess.RequestedOffset
+			sendOff := sr.sess.SenderOffset
+			sr.sess.mu.Unlock()
+
+			sr.bytesToSkip = reqOff - sendOff
+			sr.initDone = true
+
+			if sr.bytesToSkip <= 0 {
+				sr.bytesToSkip = 0
+				return n, err
 			}
+
+			if int64(n) <= sr.bytesToSkip {
+				sr.bytesToSkip -= int64(n)
+				if err != nil {
+					return 0, err
+				}
+				continue
+			}
+
+			discard := sr.bytesToSkip
+			sr.bytesToSkip = 0
+			copied := copy(p, p[discard:n])
+			return copied, err
 		}
+
+		if sr.bytesToSkip > 0 {
+			n, err := sr.pr.Read(p)
+			if int64(n) <= sr.bytesToSkip {
+				sr.bytesToSkip -= int64(n)
+				if err != nil {
+					return 0, err
+				}
+				continue
+			}
+			discard := sr.bytesToSkip
+			sr.bytesToSkip = 0
+			copied := copy(p, p[discard:n])
+			return copied, err
+		}
+
+		return sr.pr.Read(p)
 	}
-	if sr.ctx != nil && sr.ctx.Err() != nil {
-		return 0, sr.ctx.Err()
-	}
-	return sr.pr.Read(p)
 }
 
 func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {

@@ -61,8 +61,7 @@ func TestRelayClient(t *testing.T) {
 	// Setup Pipe on relay session so handleData receives stream
 	sess := relayServer.getSession(sessID)
 	pr, pw := io.Pipe()
-	sess.DataPipeR = pr
-	sess.DataPipeW = pw
+	sess.SetPipes(pr, pw)
 
 	uploadDone := make(chan []byte, 1)
 	go func() {
@@ -85,8 +84,7 @@ func TestRelayClient(t *testing.T) {
 	rand.Read(client.Key)
 
 	pr2, pw2 := io.Pipe()
-	sess.DataPipeR = pr2
-	sess.DataPipeW = pw2
+	sess.SetPipes(pr2, pw2)
 
 	encryptedDone := make(chan []byte, 1)
 	go func() {
