@@ -735,11 +735,18 @@ type seekingReader struct {
 }
 
 func (sr *seekingReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if sr.ctx != nil && sr.ctx.Err() != nil {
 		return 0, sr.ctx.Err()
 	}
 
 	for {
+		if sr.ctx != nil && sr.ctx.Err() != nil {
+			return 0, sr.ctx.Err()
+		}
+
 		if !sr.initDone {
 			n, err := sr.pr.Read(p)
 			sr.sess.mu.Lock()

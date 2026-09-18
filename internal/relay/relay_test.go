@@ -544,3 +544,49 @@ func TestRelay_RangeRequestAndOffsetHandling(t *testing.T) {
 		t.Fatal("timed out waiting for download response")
 	}
 }
+
+func TestSeekingReader_ZeroLengthBufferAndContext(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	sess := &Session{
+		RequestedOffset: 10,
+		SenderOffset:    0,
+	}
+
+	sr := &seekingReader{
+		pr:   pr,
+		sess: sess,
+		ctx:  context.Background(),
+	}
+
+	// 1. Zero-length buffer should return instantly with 0, nil
+	doneCh := make(chan struct{})
+	go func() {
+		n, err := sr.Read([]byte{})
+		assert.Equal(t, 0, n)
+		assert.NoError(t, err)
+		close(doneCh)
+	}()
+
+	select {
+	case <-doneCh:
+		// Success
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Read([]byte{}) hung in infinite loop")
+	}
+
+	// 2. Cancelled context should return context error instantly
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	srCtx := &seekingReader{
+		pr:   pr,
+		sess: sess,
+		ctx:  ctx,
+	}
+	n, err := srCtx.Read(make([]byte, 100))
+	assert.Equal(t, 0, n)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
