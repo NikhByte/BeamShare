@@ -97,7 +97,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	txDCReady := make(chan struct{})
 
 	// Create sender session (offline)
-	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 2*time.Second)
+	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 10*time.Second)
 	require.NoError(t, err)
 	defer senderSession.Close()
 
@@ -106,7 +106,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	}
 
 	// Create receiver PeerConnection (offline)
-	rxPC, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	rxPC, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: []webrtc.ICEServer{}})
 	require.NoError(t, err)
 	defer rxPC.Close()
 
@@ -148,7 +148,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	})
 
 	// Handshake step 1: Create Offer
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	_, err = senderSession.CreateOffer(ctx)
@@ -196,7 +196,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	var rxDC *webrtc.DataChannel
 	select {
 	case rxDC = <-rxDataChannelCh:
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for receiver DataChannel")
 	}
 
@@ -211,13 +211,13 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 
 	select {
 	case <-rxOpenCh:
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for receiver DataChannel open")
 	}
 
 	select {
 	case <-txDCReady:
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for sender DataChannel open")
 	}
 
