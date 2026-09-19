@@ -376,9 +376,15 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		select {
-		case <-r.Context().Done():
-			sess.ClosePipes(fmt.Errorf("sender context cancelled: %w", r.Context().Err()))
 		case <-done:
+			return
+		case <-r.Context().Done():
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipes(fmt.Errorf("sender context cancelled: %w", r.Context().Err()))
+			}
 		}
 	}()
 
@@ -680,9 +686,15 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		select {
-		case <-r.Context().Done():
-			sess.ClosePipes(fmt.Errorf("receiver context cancelled: %w", r.Context().Err()))
 		case <-done:
+			return
+		case <-r.Context().Done():
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipes(fmt.Errorf("receiver context cancelled: %w", r.Context().Err()))
+			}
 		}
 	}()
 
@@ -723,6 +735,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			}
 			break
 		}
+	}
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
 	}
 }
 

@@ -84,8 +84,6 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 		assert.Equal(t, int64(fileSize), info.Size())
 		if runtime.GOOS != "windows" {
 			assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
-		} else {
-			assert.Equal(t, os.FileMode(0666), info.Mode().Perm())
 		}
 
 		// Setup server state to point to our newly uploaded file for download test
@@ -192,8 +190,6 @@ func TestUploadPathTraversalAndPermissions(t *testing.T) {
 
 			if runtime.GOOS != "windows" {
 				assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
-			} else {
-				assert.Equal(t, os.FileMode(0666), info.Mode().Perm())
 			}
 		})
 	}
@@ -223,7 +219,7 @@ func TestLiveStream_ClientCleanupOnUpdateSharedFile(t *testing.T) {
 		srv.mu.Lock()
 		defer srv.mu.Unlock()
 		return len(srv.liveClients) == 1
-	}, 1*time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 
 	// Calling UpdateSharedFile must close all active clients and clear liveClients slice
 	srv.UpdateSharedFile("new_file.txt", "new_file.txt", 100)

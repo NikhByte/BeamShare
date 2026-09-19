@@ -66,7 +66,7 @@ func TestLocalHTTPSignaling(t *testing.T) {
 
 	t.Run("POST /api/signal/answer", func(t *testing.T) {
 		// Create a receiver peer connection to generate a valid SDP answer
-		rxPC, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: []webrtc.ICEServer{}})
+		rxPC, err := NewWebRTCAPI().NewPeerConnection(webrtc.Configuration{})
 		require.NoError(t, err)
 		defer rxPC.Close()
 
@@ -243,7 +243,7 @@ func TestSignalingHandlers(t *testing.T) {
 		t.Fatalf("failed to decode candidates: %v", err)
 	}
 
-	pcReceiver, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: []webrtc.ICEServer{}})
+	pcReceiver, err := NewWebRTCAPI().NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatalf("failed to create receiver peer connection: %v", err)
 	}
@@ -398,4 +398,61 @@ func TestConcurrentCandidatesPolling(t *testing.T) {
 	wg.Wait()
 	assert.Equal(t, int32(0), atomic.LoadInt32(&decodeErrors))
 	assert.NotEmpty(t, session.GetCandidates())
+}
+
+func TestMinifySDPRelayCandidate(t *testing.T) {
+	// Mock outbound IP finder to ensure deterministic IP selection across platforms
+	oldFinder := outboundIPFinder
+	outboundIPFinder = func() net.IP {
+		return net.ParseIP("192.168.1.100")
+	}
+	defer func() { outboundIPFinder = oldFinder }()
+
+	rawSDP := "v=0\r\n" +
+		"o=- 123456 2 IN IP4 127.0.0.1\r\n" +
+		"s=-\r\n" +
+		"t=0 0\r\n" +
+		"a=group:BUNDLE 0\r\n" +
+		"a=candidate:1 1 UDP 2122260223 192.168.1.100 50000 typ host\r\n" +
+		"a=candidate:2 1 UDP 1694498815 203.0.113.1 50001 typ srflx raddr 192.168.1.100 rport 50000\r\n" +
+		"a=candidate:3 1 UDP 16777215 198.51.100.1 54321 typ relay raddr 192.168.1.100 rport 50000 generation 0\r\n"
+
+	minified := minifySDP(rawSDP)
+
+	// Verify relay candidate is present
+	assert.Contains(t, minified, "typ relay")
+	assert.Contains(t, minified, "198.51.100.1")
+
+	// Verify host and srflx candidates are present
+	assert.Contains(t, minified, "typ host")
+	assert.Contains(t, minified, "typ srflx")
+
+	// Verify raddr/rport truncation for relay candidate
+	assert.NotContains(t, minified, "raddr")
+	assert.NotContains(t, minified, "rport")
+
+	// Verify roundtrip compression/decompression
+	compressed, err := CompressSDP(rawSDP)
+	require.NoError(t, err)
+	assert.NotEmpty(t, compressed)
+
+	decompressed, err := DecompressSDP(compressed)
+	require.NoError(t, err)
+	assert.Contains(t, decompressed, "typ relay")
+	assert.Contains(t, decompressed, "198.51.100.1")
+
+	// Compare compressed size with vs without relay candidate to ensure overhead is small (<80 bytes increase)
+	rawSDPNoRelay := "v=0\r\n" +
+		"o=- 123456 2 IN IP4 127.0.0.1\r\n" +
+		"s=-\r\n" +
+		"t=0 0\r\n" +
+		"a=group:BUNDLE 0\r\n" +
+		"a=candidate:1 1 UDP 2122260223 192.168.1.100 50000 typ host\r\n" +
+		"a=candidate:2 1 UDP 1694498815 203.0.113.1 50001 typ srflx raddr 192.168.1.100 rport 50000\r\n"
+
+	compressedNoRelay, err := CompressSDP(rawSDPNoRelay)
+	require.NoError(t, err)
+
+	sizeDiff := len(compressed) - len(compressedNoRelay)
+	assert.LessOrEqual(t, sizeDiff, 80, "Compressed SDP length increase with TURN candidate should be <= 80 bytes")
 }

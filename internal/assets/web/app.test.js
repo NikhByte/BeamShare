@@ -190,4 +190,129 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     await ssePromise;
   });
+
+  test('SequentialChunkQueue — Sequential Order and Watermark Backpressure Flow Control', async () => {
+    const sentMessages = [];
+    const mockDataChannel = {
+      readyState: 'open',
+      send: (msg) => sentMessages.push(msg)
+    };
+
+    const writtenChunks = [];
+    let concurrentWrites = 0;
+    let maxConcurrentWrites = 0;
+
+    const queue = new app.SequentialChunkQueue({
+      highWatermark: 100, // 100 bytes HWM
+      lowWatermark: 30,   // 30 bytes LWM
+      dataChannel: mockDataChannel,
+      writeHandler: async (chunk) => {
+        concurrentWrites++;
+        if (concurrentWrites > maxConcurrentWrites) {
+          maxConcurrentWrites = concurrentWrites;
+        }
+        // Simulate async write delay
+        await new Promise(r => setTimeout(r, 10));
+        writtenChunks.push(chunk[0]); // record chunk byte identifier
+        concurrentWrites--;
+      }
+    });
+
+    // Enqueue 4 chunks of 40 bytes each while writeHandler is pending on chunk 1
+    const c1 = new Uint8Array(40).fill(1);
+    const c2 = new Uint8Array(40).fill(2);
+    const c3 = new Uint8Array(40).fill(3);
+    const c4 = new Uint8Array(40).fill(4);
+
+    queue.enqueue(c1); // Dequeued immediately for writing (queue totalBytes = 0)
+    assert.equal(queue.isPaused, false);
+
+    queue.enqueue(c2); // Queue totalBytes = 40
+    assert.equal(queue.isPaused, false);
+
+    queue.enqueue(c3); // Queue totalBytes = 80
+    assert.equal(queue.isPaused, false);
+
+    queue.enqueue(c4); // Queue totalBytes = 120 -> exceeds HWM (100)!
+    assert.equal(queue.isPaused, true);
+    assert.deepEqual(sentMessages, ['PAUSE']);
+
+    queue.enqueueEOF();
+
+    await queue.drain();
+
+    assert.equal(maxConcurrentWrites, 1, 'Writes must be processed sequentially one at a time');
+    assert.deepEqual(writtenChunks, [1, 2, 3, 4], 'Chunks must be written in exact FIFO order');
+    assert.deepEqual(sentMessages, ['PAUSE', 'RESUME'], 'RESUME signal must be sent when queue drops below LWM');
+  });
+
+  test('SequentialChunkQueue — Error Propagation in Write Handler', async () => {
+    let capturedError = null;
+    const queue = new app.SequentialChunkQueue({
+      writeHandler: async () => {
+        throw new Error('Disk write failed');
+      },
+      onError: (err) => {
+        capturedError = err;
+      }
+    });
+
+    queue.enqueue(new Uint8Array([1, 2, 3]));
+    queue.enqueueEOF();
+
+    await assert.rejects(
+      async () => await queue.drain(),
+      { message: 'Disk write failed' }
+    );
+    assert.equal(capturedError.message, 'Disk write failed');
+
+    // Subsequent drain() call on already errored queue should reject without unhandled rejections
+    await assert.rejects(
+      async () => await queue.drain(),
+      { message: 'Disk write failed' }
+    );
+  });
+
+  test('WebRTC Receiver DataChannel Chunk Queueing', async () => {
+    const receivedData = [];
+    const mockDC = {
+      readyState: 'open',
+      send: () => {},
+      close: () => {}
+    };
+
+    const queue = new app.SequentialChunkQueue({
+      highWatermark: 1024,
+      lowWatermark: 256,
+      dataChannel: mockDC,
+      writeHandler: async (chunk) => {
+        await new Promise(r => setTimeout(r, 2));
+        receivedData.push(...chunk);
+      }
+    });
+
+    // Simulate dc.onmessage handler logic
+    const onmessage = (e) => {
+      if (typeof e.data === 'string') {
+        if (e.data === 'EOF') {
+          queue.enqueueEOF();
+        }
+        return;
+      }
+      queue.enqueue(new Uint8Array(e.data));
+    };
+
+    // Synchronously fire 5 binary messages
+    for (let i = 1; i <= 5; i++) {
+      onmessage({ data: new Uint8Array([i]).buffer });
+    }
+
+    // Fire EOF message
+    onmessage({ data: 'EOF' });
+
+    // Await drain
+    await queue.drain();
+
+    assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
+  });
 });
