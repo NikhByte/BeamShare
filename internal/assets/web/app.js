@@ -268,6 +268,118 @@ let currentShareURL    = "";
 let useIndexedDB       = false;
 let useOPFS            = false;
 
+// ── Sequential Chunk Queue & Flow Control ─────────────────────────────────────
+class SequentialChunkQueue {
+  constructor({
+    highWatermark = 16 * 1024 * 1024, // 16 MB
+    lowWatermark = 4 * 1024 * 1024,   // 4 MB
+    writeHandler,
+    dataChannel = null,
+    onError = null,
+  } = {}) {
+    this.queue = [];
+    this.totalBytes = 0;
+    this.highWatermark = highWatermark;
+    this.lowWatermark = lowWatermark;
+    this.writeHandler = writeHandler;
+    this.dataChannel = dataChannel;
+    this.onError = onError;
+
+    this.isProcessing = false;
+    this.isPaused = false;
+    this.isEOF = false;
+    this.isDrained = false;
+    this.error = null;
+
+    this.drainPromise = new Promise((resolve, reject) => {
+      this._resolveDrain = resolve;
+      this._rejectDrain = reject;
+    });
+    this.drainPromise.catch(() => {});
+  }
+
+  enqueue(chunk) {
+    if (this.error || this.isEOF) return;
+
+    const len = chunk.byteLength || chunk.length || 0;
+    this.queue.push(chunk);
+    this.totalBytes += len;
+
+    if (this.totalBytes >= this.highWatermark && !this.isPaused) {
+      this.isPaused = true;
+      if (this.dataChannel && this.dataChannel.readyState === 'open') {
+        try {
+          this.dataChannel.send('PAUSE');
+        } catch (e) {
+          console.warn('Failed to send PAUSE signal:', e);
+        }
+      }
+    }
+
+    this._startProcessing();
+  }
+
+  enqueueEOF() {
+    if (this.error) return;
+    this.isEOF = true;
+    this._startProcessing();
+  }
+
+  drain() {
+    if (this.queue.length === 0 && this.isEOF && !this.isProcessing && !this.isDrained && !this.error) {
+      this.isDrained = true;
+      this._resolveDrain();
+    }
+    return this.drainPromise;
+  }
+
+  _startProcessing() {
+    if (this.isProcessing) return;
+    this.isProcessing = true;
+    this._processLoop();
+  }
+
+  async _processLoop() {
+    while (this.queue.length > 0) {
+      if (this.error) break;
+
+      const chunk = this.queue.shift();
+      const len = chunk.byteLength || chunk.length || 0;
+      this.totalBytes -= len;
+
+      if (this.isPaused && this.totalBytes <= this.lowWatermark) {
+        this.isPaused = false;
+        if (this.dataChannel && this.dataChannel.readyState === 'open') {
+          try {
+            this.dataChannel.send('RESUME');
+          } catch (e) {
+            console.warn('Failed to send RESUME signal:', e);
+          }
+        }
+      }
+
+      try {
+        await this.writeHandler(chunk);
+      } catch (err) {
+        this.error = err;
+        this._rejectDrain(err);
+        if (this.onError) this.onError(err);
+        this.isProcessing = false;
+        return;
+      }
+    }
+
+    this.isProcessing = false;
+
+    if (this.queue.length > 0 && !this.error) {
+      this._startProcessing();
+    } else if (this.queue.length === 0 && this.isEOF && !this.isDrained && !this.error) {
+      this.isDrained = true;
+      this._resolveDrain();
+    }
+  }
+}
+
 // ── IndexedDB Buffering ────────────────────────────────────────────────────────
 const IDB_NAME = 'GazeTransferDB';
 const IDB_STORE = 'chunks';
@@ -1154,42 +1266,27 @@ async function startWebRTC() {
         dc.onopen = () => dc.send(`OFFSET:${initialOffset}`);
       }
 
-      dc.onmessage = async (e) => {
-        try {
-          if (typeof e.data === 'string') {
-            if (e.data === "EOF") {
-              if (diskWritableStream) {
-                await diskWritableStream.close();
-                if (useOPFS) {
-                  const file = await diskFileHandle.getFile();
-                  triggerSave(file, currentFile.name);
-                }
-              } else if (swPipePort) {
-                swPipePort.postMessage("EOF");
-              } else {
-                let finalChunks = receivedChunks;
-                if (useIndexedDB) {
-                  finalChunks = await getAllChunksIDB();
-                  await clearIDB();
-                }
-                triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
-              }
-              resolve();
-            }
-            return;
+      const chunkQueue = new SequentialChunkQueue({
+        highWatermark: 16 * 1024 * 1024,
+        lowWatermark: 4 * 1024 * 1024,
+        dataChannel: dc,
+        onError: (err) => {
+          if (err.name === 'QuotaExceededError' || (err.message && (err.message.includes('Quota') || err.message.includes('disk is full')))) {
+            showError("Transfer failed: Device disk is full.");
+          } else {
+            showError(`Transfer failed: ${err.message}`);
           }
-
-          const chunk = new Uint8Array(e.data);
+          dc.close();
+          reject(err);
+        },
+        writeHandler: async (chunk) => {
           if (diskWritableStream) {
-            // Direct disk write
             await diskWritableStream.write(chunk);
           } else if (swPipePort) {
             swPipePort.postMessage(chunk);
           } else if (useIndexedDB) {
-            // IndexedDB buffer
             await storeChunkIDB(chunk);
           } else {
-            // RAM buffer
             receivedChunks.push(chunk);
           }
 
@@ -1200,12 +1297,43 @@ async function startWebRTC() {
             updateDLStats(receivedBytes, totalBytes);
             updateSpeed(receivedBytes);
           }
-        } catch (err) {
-          if (err.name === 'QuotaExceededError' || err.message.includes('Quota') || (err.message && err.message.includes('disk is full'))) {
-             showError("Transfer failed: Device disk is full.");
-          } else {
-             showError(`Transfer failed: ${err.message}`);
+        }
+      });
+
+      dc.onmessage = (e) => {
+        try {
+          if (typeof e.data === 'string') {
+            if (e.data === "EOF") {
+              chunkQueue.enqueueEOF();
+              chunkQueue.drain().then(async () => {
+                if (diskWritableStream) {
+                  await diskWritableStream.close();
+                  if (useOPFS) {
+                    const file = await diskFileHandle.getFile();
+                    triggerSave(file, currentFile.name);
+                  }
+                } else if (swPipePort) {
+                  swPipePort.postMessage("EOF");
+                } else {
+                  let finalChunks = receivedChunks;
+                  if (useIndexedDB) {
+                    finalChunks = await getAllChunksIDB();
+                    await clearIDB();
+                  }
+                  triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
+                }
+                resolve();
+              }).catch((err) => {
+                // Handled in chunkQueue onError callback
+              });
+            }
+            return;
           }
+
+          const chunk = new Uint8Array(e.data);
+          chunkQueue.enqueue(chunk);
+        } catch (err) {
+          showError(`Transfer failed: ${err.message}`);
           dc.close();
           reject(err);
         }
@@ -1518,6 +1646,8 @@ async function startSenderSharing() {
   }
 }
 
+let senderPaused = false;
+
 function setupSenderDataChannel() {
   senderDataChannel.onopen = () => {
     console.log("WebRTC data channel is open!");
@@ -1527,13 +1657,19 @@ function setupSenderDataChannel() {
   };
 
   senderDataChannel.onmessage = async (e) => {
-    if (typeof e.data === 'string' && e.data.startsWith('OFFSET:')) {
-      const offset = parseInt(e.data.split(':')[1], 10);
-      document.getElementById('send-status-label').textContent = "Uploading file…";
-      try {
-        await streamFileToDataChannel(offset);
-      } catch (err) {
-        console.error("WebRTC streaming failed:", err);
+    if (typeof e.data === 'string') {
+      if (e.data.startsWith('OFFSET:')) {
+        const offset = parseInt(e.data.split(':')[1], 10);
+        document.getElementById('send-status-label').textContent = "Uploading file…";
+        try {
+          await streamFileToDataChannel(offset);
+        } catch (err) {
+          console.error("WebRTC streaming failed:", err);
+        }
+      } else if (e.data === 'PAUSE') {
+        senderPaused = true;
+      } else if (e.data === 'RESUME') {
+        senderPaused = false;
       }
     }
   };
@@ -1544,6 +1680,7 @@ function setupSenderDataChannel() {
 }
 
 async function streamFileToDataChannel(initialOffset) {
+  senderPaused = false;
   const chunkSize = 65536;
   let offset = initialOffset;
   const total = senderFile.size;
@@ -1565,7 +1702,7 @@ async function streamFileToDataChannel(initialOffset) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024) {
+    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
       if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
       await new Promise(resolve => setTimeout(resolve, 10));
     }
@@ -1730,6 +1867,7 @@ if (typeof window !== 'undefined') {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    SequentialChunkQueue,
     decompressOffer,
     setState,
     renderFileCard,
