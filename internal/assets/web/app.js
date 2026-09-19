@@ -299,6 +299,7 @@ class SequentialChunkQueue {
       this._resolveDrain = resolve;
       this._rejectDrain = reject;
     });
+    this.drainPromise.catch(() => {});
   }
 
   enqueue(chunk) {
