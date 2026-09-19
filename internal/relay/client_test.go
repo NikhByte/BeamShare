@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"io"
@@ -113,5 +114,98 @@ func TestRelayClient_HTTPError(t *testing.T) {
 	_, err := client.Register(context.Background())
 	if err == nil {
 		t.Fatalf("expected error when server responds with 500")
+	}
+}
+
+func TestUploadReaderAtOffset(t *testing.T) {
+	relayServer := NewServer()
+	ts := httptest.NewServer(relayServer)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	sessID, err := client.Register(context.Background())
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	sess := relayServer.getSession(sessID)
+
+	// 1. Unencrypted UploadReaderAtOffset
+	pr1, pw1 := io.Pipe()
+	sess.SetPipes(pr1, pw1)
+
+	testData := []byte("Stream reader in-memory backlog test data!")
+	uploadDone := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(pr1)
+		uploadDone <- data
+	}()
+
+	err = client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+	if err != nil {
+		t.Fatalf("UploadReaderAtOffset unencrypted failed: %v", err)
+	}
+
+	received := <-uploadDone
+	if string(received) != string(testData) {
+		t.Fatalf("expected uploaded data '%s', got '%s'", string(testData), string(received))
+	}
+
+	// 2. Encrypted UploadReaderAtOffset
+	client.Key = make([]byte, 32)
+	rand.Read(client.Key)
+
+	pr2, pw2 := io.Pipe()
+	sess.SetPipes(pr2, pw2)
+
+	encryptedDone := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(pr2)
+		encryptedDone <- data
+	}()
+
+	err = client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+	if err != nil {
+		t.Fatalf("UploadReaderAtOffset encrypted failed: %v", err)
+	}
+
+	encryptedReceived := <-encryptedDone
+	if len(encryptedReceived) <= len(testData) {
+		t.Fatalf("expected encrypted data payload to be larger than plaintext")
+	}
+
+	// Verify decrypting the encrypted stream
+	decReader, err := NewDecryptingReader(bytes.NewReader(encryptedReceived), client.Key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+	decryptedData, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("Decrypting stream failed: %v", err)
+	}
+	if string(decryptedData) != string(testData) {
+		t.Fatalf("expected decrypted data '%s', got '%s'", string(testData), string(decryptedData))
+	}
+
+	// 3. UploadReaderAtOffset with Offset
+	pr3, pw3 := io.Pipe()
+	sess.SetPipes(pr3, pw3)
+
+	client.Key = nil // reset key for offset check
+	offsetData := testData[10:]
+	uploadDoneOffset := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(pr3)
+		uploadDoneOffset <- data
+	}()
+
+	err = client.UploadReaderAtOffset(context.Background(), bytes.NewReader(offsetData), 10)
+	if err != nil {
+		t.Fatalf("UploadReaderAtOffset with offset failed: %v", err)
+	}
+
+	receivedOffset := <-uploadDoneOffset
+	if string(receivedOffset) != string(offsetData) {
+		t.Fatalf("expected offset uploaded data '%s', got '%s'", string(offsetData), string(receivedOffset))
 	}
 }
