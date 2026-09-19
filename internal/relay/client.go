@@ -146,10 +146,6 @@ func (c *Client) UploadData(ctx context.Context, filePath string) error {
 
 // UploadDataAtOffset streams file data starting at a specified byte offset (for resumable transfers).
 func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset int64) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -162,9 +158,19 @@ func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset
 		}
 	}
 
-	var r io.Reader = file
+	return c.UploadReaderAtOffset(ctx, file, offset)
+}
+
+// UploadReaderAtOffset streams data from an io.Reader starting at a specified byte offset.
+func (c *Client) UploadReaderAtOffset(ctx context.Context, reader io.Reader, offset int64) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var r io.Reader = reader
+	var err error
 	if len(c.Key) == 32 {
-		r, err = NewEncryptingReader(file, c.Key)
+		r, err = NewEncryptingReader(reader, c.Key)
 		if err != nil {
 			return err
 		}

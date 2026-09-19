@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -358,7 +359,15 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							} else {
 								fmt.Println("\n  [Relay] Bridge active! Streaming data via relay...")
 							}
-							err = relClient.UploadDataAtOffset(mainCtx, filePath, cmd.Offset)
+							if isLive {
+								r := bytes.NewReader(srv.GetLiveBacklog())
+								if cmd.Offset > 0 {
+									_, _ = r.Seek(cmd.Offset, io.SeekStart)
+								}
+								err = relClient.UploadReaderAtOffset(mainCtx, r, cmd.Offset)
+							} else {
+								err = relClient.UploadDataAtOffset(mainCtx, filePath, cmd.Offset)
+							}
 							if err != nil {
 								if mainCtx.Err() == nil {
 									fmt.Printf("  Error uploading via relay: %v\n", err)
