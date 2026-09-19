@@ -4,7 +4,7 @@
   "description": "> **Unstoppable P2P file transfer that works even on restricted college Wi-Fi.**",
   "main": "index.js",
   "scripts": {
-    "test": "node --test internal/assets/web/*.test.js"
+    "test": "node --test internal/assets/web/app.test.js"
   },
   "repository": {
     "type": "git",

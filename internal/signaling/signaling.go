@@ -26,9 +26,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pion/ice/v2"
 	"github.com/pion/stun"
 	"github.com/pion/webrtc/v3"
 )
+
+// NewWebRTCAPI creates a WebRTC API with mDNS candidate masking disabled
+// and loopback candidates enabled for reliable direct P2P connections.
+func NewWebRTCAPI() *webrtc.API {
+	settingEngine := webrtc.SettingEngine{}
+	settingEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	settingEngine.SetIncludeLoopbackCandidate(true)
+	return webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
+}
 
 // ICEServers are the default ICE servers used for NAT traversal.
 // TURN servers and credentials should be explicitly supplied via configuration
@@ -70,7 +80,8 @@ func NewSession(iceServers []webrtc.ICEServer, discoveryTimeout time.Duration) (
 		iceServers = ICEServers
 	}
 	config := webrtc.Configuration{ICEServers: iceServers}
-	pc, err := webrtc.NewPeerConnection(config)
+	api := NewWebRTCAPI()
+	pc, err := api.NewPeerConnection(config)
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)
 	}
@@ -429,12 +440,18 @@ func minifySDP(sdp string) string {
 		}
 	}
 
-	hostCandidate := preferredHostCandidate
-	if hostCandidate == "" {
-		hostCandidate = fallbackHostCandidate
+	var outCandidates []string
+	if preferredHostCandidate != "" {
+		outCandidates = append(outCandidates, preferredHostCandidate)
 	}
-	if hostCandidate == "" {
-		hostCandidate = anyHostCandidate
+	if fallbackHostCandidate != "" && fallbackHostCandidate != preferredHostCandidate {
+		outCandidates = append(outCandidates, fallbackHostCandidate)
+	}
+	if len(outCandidates) == 0 && anyHostCandidate != "" {
+		outCandidates = append(outCandidates, anyHostCandidate)
+	}
+	if srflxCandidate != "" {
+		outCandidates = append(outCandidates, srflxCandidate)
 	}
 
 	var out []string
@@ -448,12 +465,7 @@ func minifySDP(sdp string) string {
 
 		if strings.HasPrefix(line, "a=candidate") {
 			if !candidatesInserted {
-				if hostCandidate != "" {
-					out = append(out, hostCandidate)
-				}
-				if srflxCandidate != "" {
-					out = append(out, srflxCandidate)
-				}
+				out = append(out, outCandidates...)
 				candidatesInserted = true
 			}
 			continue
