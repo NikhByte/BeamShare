@@ -406,6 +406,7 @@ func minifySDP(sdp string) string {
 	var fallbackHostCandidate string
 	var anyHostCandidate string
 	var srflxCandidate string
+	var relayCandidate string
 
 	for _, line := range lines {
 		if strings.HasPrefix(line, "a=candidate") {
@@ -436,6 +437,10 @@ func minifySDP(sdp string) string {
 				if srflxCandidate == "" {
 					srflxCandidate = minLine
 				}
+			} else if strings.Contains(line, "typ relay") {
+				if relayCandidate == "" {
+					relayCandidate = minLine
+				}
 			}
 		}
 	}
@@ -452,6 +457,9 @@ func minifySDP(sdp string) string {
 	}
 	if srflxCandidate != "" {
 		outCandidates = append(outCandidates, srflxCandidate)
+	}
+	if relayCandidate != "" {
+		outCandidates = append(outCandidates, relayCandidate)
 	}
 
 	var out []string
