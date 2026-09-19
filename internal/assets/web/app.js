@@ -305,8 +305,9 @@ class SequentialChunkQueue {
   enqueue(chunk) {
     if (this.error || this.isEOF) return;
 
+    const len = chunk.byteLength || chunk.length || 0;
     this.queue.push(chunk);
-    this.totalBytes += chunk.byteLength;
+    this.totalBytes += len;
 
     if (this.totalBytes >= this.highWatermark && !this.isPaused) {
       this.isPaused = true;
@@ -323,15 +324,13 @@ class SequentialChunkQueue {
   }
 
   enqueueEOF() {
+    if (this.error) return;
     this.isEOF = true;
     this._startProcessing();
   }
 
   drain() {
-    if (this.error) {
-      return Promise.reject(this.error);
-    }
-    if (this.queue.length === 0 && this.isEOF && !this.isProcessing && !this.isDrained) {
+    if (this.queue.length === 0 && this.isEOF && !this.isProcessing && !this.isDrained && !this.error) {
       this.isDrained = true;
       this._resolveDrain();
     }
@@ -349,7 +348,8 @@ class SequentialChunkQueue {
       if (this.error) break;
 
       const chunk = this.queue.shift();
-      this.totalBytes -= chunk.byteLength;
+      const len = chunk.byteLength || chunk.length || 0;
+      this.totalBytes -= len;
 
       if (this.isPaused && this.totalBytes <= this.lowWatermark) {
         this.isPaused = false;
@@ -377,7 +377,7 @@ class SequentialChunkQueue {
 
     if (this.queue.length > 0 && !this.error) {
       this._startProcessing();
-    } else if (this.queue.length === 0 && this.isEOF && !this.isDrained) {
+    } else if (this.queue.length === 0 && this.isEOF && !this.isDrained && !this.error) {
       this.isDrained = true;
       this._resolveDrain();
     }

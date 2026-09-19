@@ -265,6 +265,12 @@ describe('Gaze Web Receiver Test Suite', () => {
       { message: 'Disk write failed' }
     );
     assert.equal(capturedError.message, 'Disk write failed');
+
+    // Subsequent drain() call on already errored queue should reject without unhandled rejections
+    await assert.rejects(
+      async () => await queue.drain(),
+      { message: 'Disk write failed' }
+    );
   });
 
   test('WebRTC Receiver DataChannel Chunk Queueing', async () => {
