@@ -202,6 +202,9 @@ func TestUploadReaderAtOffset(t *testing.T) {
 
 	t.Run("WithOffset", func(t *testing.T) {
 		client, sess := createIsolatedSession(t)
+		sess.mu.Lock()
+		sess.RequestedOffset = 10
+		sess.mu.Unlock()
 		pr3, pw3 := io.Pipe()
 		sess.SetPipes(pr3, pw3)
 
