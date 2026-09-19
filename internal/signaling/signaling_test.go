@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -324,4 +326,69 @@ func TestParseICEURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConcurrentCandidatesPolling(t *testing.T) {
+	session, err := NewSession([]webrtc.ICEServer{}, 10*time.Second)
+	require.NoError(t, err)
+	defer session.Close()
+
+	mux := http.NewServeMux()
+	session.RegisterHandlers(mux)
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Spawn writer goroutines simulating OnICECandidate callbacks appending candidates
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			candIdx := 0
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					session.mu.Lock()
+					session.candidates = append(session.candidates, webrtc.ICECandidateInit{
+						Candidate: fmt.Sprintf("candidate:%d-%d 1 UDP 2122260223 127.0.0.1 50000 typ host", id, candIdx),
+					})
+					session.mu.Unlock()
+					candIdx++
+					time.Sleep(1 * time.Millisecond)
+				}
+			}
+		}(i)
+	}
+
+	// Spawn reader goroutines polling /api/signal/candidates
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					resp, err := http.Get(ts.URL + "/api/signal/candidates")
+					if err == nil {
+						var cands []webrtc.ICECandidateInit
+						decodeErr := json.NewDecoder(resp.Body).Decode(&cands)
+						resp.Body.Close()
+						assert.NoError(t, decodeErr)
+					}
+					time.Sleep(1 * time.Millisecond)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	assert.NotEmpty(t, session.GetCandidates())
 }

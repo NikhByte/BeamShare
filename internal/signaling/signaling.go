@@ -203,9 +203,7 @@ func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/signal/candidates", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		s.mu.Lock()
-		cands := s.candidates
-		s.mu.Unlock()
+		cands := s.GetCandidates()
 		json.NewEncoder(w).Encode(cands)
 	})
 }
