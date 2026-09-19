@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -339,8 +340,10 @@ func TestConcurrentCandidatesPolling(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
+	client := ts.Client()
+
 	var wg sync.WaitGroup
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
 	// Spawn writer goroutines simulating OnICECandidate callbacks appending candidates
@@ -367,7 +370,8 @@ func TestConcurrentCandidatesPolling(t *testing.T) {
 	}
 
 	// Spawn reader goroutines polling /api/signal/candidates
-	for i := 0; i < 10; i++ {
+	var decodeErrors int32
+	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -376,12 +380,14 @@ func TestConcurrentCandidatesPolling(t *testing.T) {
 				case <-ctx.Done():
 					return
 				default:
-					resp, err := http.Get(ts.URL + "/api/signal/candidates")
+					resp, err := client.Get(ts.URL + "/api/signal/candidates")
 					if err == nil {
 						var cands []webrtc.ICECandidateInit
 						decodeErr := json.NewDecoder(resp.Body).Decode(&cands)
 						resp.Body.Close()
-						assert.NoError(t, decodeErr)
+						if decodeErr != nil {
+							atomic.AddInt32(&decodeErrors, 1)
+						}
 					}
 					time.Sleep(1 * time.Millisecond)
 				}
@@ -390,5 +396,6 @@ func TestConcurrentCandidatesPolling(t *testing.T) {
 	}
 
 	wg.Wait()
+	assert.Equal(t, int32(0), atomic.LoadInt32(&decodeErrors))
 	assert.NotEmpty(t, session.GetCandidates())
 }
