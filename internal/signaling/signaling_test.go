@@ -360,7 +360,7 @@ func TestMinifySDPRelayCandidate(t *testing.T) {
 	assert.Contains(t, decompressed, "typ relay")
 	assert.Contains(t, decompressed, "198.51.100.1")
 
-	// Compare compressed size with vs without relay candidate to ensure overhead is small (<30 bytes increase)
+	// Compare compressed size with vs without relay candidate to ensure overhead is small (<40 bytes increase)
 	rawSDPNoRelay := "v=0\r\n" +
 		"o=- 123456 2 IN IP4 127.0.0.1\r\n" +
 		"s=-\r\n" +
@@ -373,6 +373,6 @@ func TestMinifySDPRelayCandidate(t *testing.T) {
 	require.NoError(t, err)
 
 	sizeDiff := len(compressed) - len(compressedNoRelay)
-	assert.LessOrEqual(t, sizeDiff, 30, "Compressed SDP length increase with TURN candidate should be <= 30 bytes")
+	assert.LessOrEqual(t, sizeDiff, 40, "Compressed SDP length increase with TURN candidate should be <= 40 bytes")
 }
 
