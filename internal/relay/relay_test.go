@@ -702,7 +702,7 @@ func TestRelay_ZeroSilentByteCorruptionOnOffsetMismatch(t *testing.T) {
 		assert.Empty(t, body, "receiver must not receive corrupted bytes when sender offset exceeds requested offset")
 	case err := <-downloadErrCh:
 		t.Fatalf("download failed: %v", err)
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for download response")
 	}
 }

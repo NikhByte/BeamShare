@@ -83,8 +83,14 @@ func TestRelayClient(t *testing.T) {
 	client.Key = make([]byte, 32)
 	rand.Read(client.Key)
 
+	sessID2, err := client.Register(context.Background())
+	if err != nil {
+		t.Fatalf("Register 2 failed: %v", err)
+	}
+	sess2 := relayServer.getSession(sessID2)
+
 	pr2, pw2 := io.Pipe()
-	sess.SetPipes(pr2, pw2)
+	sess2.SetPipes(pr2, pw2)
 
 	encryptedDone := make(chan []byte, 1)
 	go func() {
