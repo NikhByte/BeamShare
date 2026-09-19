@@ -357,10 +357,21 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	pr := sess.DataPipeR
 	senderOffset := parseSenderOffset(r, 0)
 	sess.SenderOffset = senderOffset
+	reqOffset := sess.RequestedOffset
 	sess.mu.Unlock()
 
 	if pw == nil || pr == nil {
 		http.Error(w, "not found or pipe not ready", 404)
+		return
+	}
+
+	if senderOffset > reqOffset {
+		if r.Body != nil {
+			r.Body.Close()
+		}
+		err := fmt.Errorf("relay stream offset mismatch: sender offset %d exceeds requested offset %d", senderOffset, reqOffset)
+		sess.ClosePipes(err)
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 
@@ -757,8 +768,11 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 			sr.bytesToSkip = reqOff - sendOff
 			sr.initDone = true
 
-			if sr.bytesToSkip <= 0 {
-				sr.bytesToSkip = 0
+			if sr.bytesToSkip < 0 {
+				return 0, fmt.Errorf("relay stream offset mismatch: sender offset %d exceeds requested offset %d", sendOff, reqOff)
+			}
+
+			if sr.bytesToSkip == 0 {
 				return n, err
 			}
 
