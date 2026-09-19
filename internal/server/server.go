@@ -355,7 +355,7 @@ func findFreePort() (int, error) {
 }
 
 func GetLocalIP() string {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
+	conn, err := net.DialTimeout("udp", "8.8.8.8:80", 200*time.Millisecond)
 	if err == nil {
 		defer conn.Close()
 		return conn.LocalAddr().(*net.UDPAddr).IP.String()
