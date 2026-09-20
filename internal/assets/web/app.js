@@ -1654,6 +1654,7 @@ let senderDataChannel = null;
 let senderSessionID = null;
 let isSenderPolling = false;
 let senderAborted = false;
+let senderEncryptionKey = null;
 
 function handleSenderFileSelect(file) {
   if (!file) return;
@@ -1715,6 +1716,19 @@ async function startSenderSharing() {
     shareURL.searchParams.set('s', senderSessionID);
     shareURL.searchParams.set('backend', backend);
     shareURL.searchParams.set('mode', 'webrtc');
+
+    // Generate AES-GCM Key
+    senderEncryptionKey = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    const rawKey = await crypto.subtle.exportKey("raw", senderEncryptionKey);
+    const keyB64 = btoa(String.fromCharCode.apply(null, new Uint8Array(rawKey)))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+/g, '');
+    shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
     document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
@@ -1855,7 +1869,25 @@ async function streamFileToDataChannel(initialOffset) {
       await new Promise(resolve => setTimeout(resolve, 10));
     }
 
-    senderDataChannel.send(chunkBuffer);
+    let payload;
+    if (senderEncryptionKey) {
+      const nonce = crypto.getRandomValues(new Uint8Array(12));
+      const ciphertext = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: nonce },
+        senderEncryptionKey,
+        chunkBuffer
+      );
+      const frameLen = 12 + ciphertext.byteLength;
+      payload = new Uint8Array(4 + frameLen);
+      const dv = new DataView(payload.buffer);
+      dv.setUint32(0, frameLen, false); // Big endian
+      payload.set(nonce, 4);
+      payload.set(new Uint8Array(ciphertext), 4 + 12);
+    } else {
+      payload = chunkBuffer;
+    }
+
+    senderDataChannel.send(payload);
     offset += chunkBuffer.byteLength;
 
     const progress = offset / total;
@@ -2097,6 +2129,9 @@ if (typeof module !== 'undefined' && module.exports) {
     apiPath,
     formatBytes,
     mimeLabel,
-    resetState
+    resetState,
+    handleSenderFileSelect,
+    startSenderSharing,
+    get_senderEncryptionKey: () => senderEncryptionKey
   };
 }
