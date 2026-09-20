@@ -52,5 +52,11 @@ export default defineConfig({
         ...devices['Desktop Safari'],
       },
     },
+    {
+      name: 'mobile-safari',
+      use: {
+        ...devices['iPhone 14'],
+      },
+    },
   ],
 });
