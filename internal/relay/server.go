@@ -646,6 +646,18 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(assets.IndexHTML()))
 		return
 	}
+	if r.URL.Path == "/docs" || r.URL.Path == "/docs.html" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Write([]byte(assets.DocsHTML()))
+		return
+	}
+	if r.URL.Path == "/cli" || r.URL.Path == "/cli.html" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Write([]byte(assets.CliHTML()))
+		return
+	}
 	if r.URL.Path == "/sw.js" {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		w.Header().Set("Service-Worker-Allowed", "/")

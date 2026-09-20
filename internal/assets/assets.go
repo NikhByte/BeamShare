@@ -13,6 +13,12 @@ import (
 //go:embed web/index.html
 var indexHTML string
 
+//go:embed web/docs.html
+var docsHTML string
+
+//go:embed web/cli.html
+var cliHTML string
+
 //go:embed web/404.html
 var notFoundHTML string
 
@@ -37,6 +43,16 @@ var (
 // IndexHTML returns the full content of the receiver web page.
 func IndexHTML() string {
 	return indexHTML
+}
+
+// DocsHTML returns the documentation page content.
+func DocsHTML() string {
+	return docsHTML
+}
+
+// CliHTML returns the CLI guide page content.
+func CliHTML() string {
+	return cliHTML
 }
 
 // NotFoundHTML returns the 404 page content.
@@ -145,6 +161,16 @@ func SitemapXMLHandler(w http.ResponseWriter, r *http.Request) {
     <loc>` + scheme + `://` + host + `/</loc>
     <changefreq>daily</changefreq>
     <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>` + scheme + `://` + host + `/docs</loc>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>` + scheme + `://` + host + `/cli</loc>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
   </url>
 </urlset>`
 
