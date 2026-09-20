@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -417,4 +418,58 @@ func TestServer_CacheControlHeaders(t *testing.T) {
 	assert.Equal(t, http.StatusOK, respSW.StatusCode)
 	assert.Equal(t, "no-cache, no-store, must-revalidate", respSW.Header.Get("Cache-Control"))
 	assert.Equal(t, "/", respSW.Header.Get("Service-Worker-Allowed"))
+}
+
+func TestPNAHeaders(t *testing.T) {
+	srv, err := New("", 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	endpoints := []struct {
+		path   string
+		method string // for the standard request
+	}{
+		{"/api/meta", http.MethodGet},
+		{"/api/download", http.MethodGet},
+		{"/api/upload", http.MethodPost},
+		{"/api/live/stream", http.MethodGet},
+		{"/api/qr?url=test", http.MethodGet},
+	}
+
+	for _, ep := range endpoints {
+		t.Run(fmt.Sprintf("OPTIONS %s", ep.path), func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodOptions, ts.URL+ep.path, nil)
+			require.NoError(t, err)
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, "true", resp.Header.Get("Access-Control-Allow-Private-Network"))
+		})
+
+		t.Run(fmt.Sprintf("%s %s", ep.method, ep.path), func(t *testing.T) {
+			var req *http.Request
+			if ep.method == http.MethodPost {
+				// Upload requires multipart form data, so we'll construct a basic one just to get headers back
+				var b bytes.Buffer
+				writer := multipart.NewWriter(&b)
+				writer.Close() // empty form
+				req, err = http.NewRequest(http.MethodPost, ts.URL+ep.path, &b)
+				require.NoError(t, err)
+				req.Header.Set("Content-Type", writer.FormDataContentType())
+			} else {
+				req, err = http.NewRequest(ep.method, ts.URL+ep.path, nil)
+				require.NoError(t, err)
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, "true", resp.Header.Get("Access-Control-Allow-Private-Network"))
+		})
+	}
 }
