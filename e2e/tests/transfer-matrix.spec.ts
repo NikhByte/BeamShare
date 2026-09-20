@@ -35,7 +35,19 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
     cleanupTempDir();
   });
 
-  test.afterEach(async () => {
+  test.afterEach(async ({ page, context }) => {
+    try {
+      await page.unrouteAll({ behavior: 'ignoreErrors' });
+      await context.clearCookies();
+      await page.evaluate(async () => {
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          for (const reg of regs) {
+            await reg.unregister();
+          }
+        }
+      }).catch(() => {});
+    } catch (e) {}
     stopAllProcesses();
   });
 
