@@ -84,15 +84,36 @@ func TestStaticHandler_PathTraversalAndInvalidPaths(t *testing.T) {
 
 func TestRobotsTxtAndSitemapHandlers(t *testing.T) {
 	reqRobots := httptest.NewRequest(http.MethodGet, "/robots.txt", nil)
+	reqRobots.Host = "example.com"
 	rrRobots := httptest.NewRecorder()
 	RobotsTxtHandler(rrRobots, reqRobots)
 	assert.Equal(t, http.StatusOK, rrRobots.Code)
 	assert.Contains(t, rrRobots.Body.String(), "User-agent: *")
-	assert.Contains(t, rrRobots.Body.String(), "Sitemap:")
+	assert.Contains(t, rrRobots.Body.String(), "Sitemap: http://example.com/sitemap.xml")
 
 	reqSitemap := httptest.NewRequest(http.MethodGet, "/sitemap.xml", nil)
+	reqSitemap.Host = "example.com"
 	rrSitemap := httptest.NewRecorder()
 	SitemapXMLHandler(rrSitemap, reqSitemap)
 	assert.Equal(t, http.StatusOK, rrSitemap.Code)
 	assert.Contains(t, rrSitemap.Body.String(), "<urlset")
+	assert.Contains(t, rrSitemap.Body.String(), "http://example.com/")
+}
+
+func TestRobotsTxtAndSitemapHandlers_XForwardedHost(t *testing.T) {
+	reqRobots := httptest.NewRequest(http.MethodGet, "/robots.txt", nil)
+	reqRobots.Header.Set("X-Forwarded-Host", "forwarded.example.com")
+	reqRobots.Host = "internal.local"
+	rrRobots := httptest.NewRecorder()
+	RobotsTxtHandler(rrRobots, reqRobots)
+	assert.Equal(t, http.StatusOK, rrRobots.Code)
+	assert.Contains(t, rrRobots.Body.String(), "Sitemap: http://forwarded.example.com/sitemap.xml")
+
+	reqSitemap := httptest.NewRequest(http.MethodGet, "/sitemap.xml", nil)
+	reqSitemap.Header.Set("X-Forwarded-Host", "forwarded.example.com")
+	reqSitemap.Host = "internal.local"
+	rrSitemap := httptest.NewRecorder()
+	SitemapXMLHandler(rrSitemap, reqSitemap)
+	assert.Equal(t, http.StatusOK, rrSitemap.Code)
+	assert.Contains(t, rrSitemap.Body.String(), "<loc>http://forwarded.example.com/</loc>")
 }
