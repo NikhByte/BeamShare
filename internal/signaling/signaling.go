@@ -404,12 +404,16 @@ func minifySDP(sdp string) string {
 	var fallbackHostCandidate string
 	var anyHostCandidate string
 	var srflxCandidate string
-	var relayCandidate string
+	var relayCandidates []string
+	seenRelayTransports := make(map[string]bool)
 
 	for _, line := range lines {
 		if strings.HasPrefix(line, "a=candidate") {
 			minLine := line
 			if idx := strings.Index(minLine, " raddr"); idx > 0 {
+				minLine = minLine[:idx]
+			}
+			if idx := strings.Index(minLine, " rport"); idx > 0 {
 				minLine = minLine[:idx]
 			}
 			if strings.Contains(line, "typ host") {
@@ -436,8 +440,19 @@ func minifySDP(sdp string) string {
 					srflxCandidate = minLine
 				}
 			} else if strings.Contains(line, "typ relay") {
-				if relayCandidate == "" {
-					relayCandidate = minLine
+				candBody := strings.TrimPrefix(line, "a=candidate:")
+				candParts := strings.Fields(candBody)
+				var transport string
+				if len(candParts) > 2 {
+					transport = strings.ToLower(candParts[2])
+				}
+				if transport != "" {
+					if !seenRelayTransports[transport] {
+						seenRelayTransports[transport] = true
+						relayCandidates = append(relayCandidates, minLine)
+					}
+				} else if len(relayCandidates) == 0 {
+					relayCandidates = append(relayCandidates, minLine)
 				}
 			}
 		}
@@ -456,8 +471,8 @@ func minifySDP(sdp string) string {
 	if srflxCandidate != "" {
 		outCandidates = append(outCandidates, srflxCandidate)
 	}
-	if relayCandidate != "" {
-		outCandidates = append(outCandidates, relayCandidate)
+	if len(relayCandidates) > 0 {
+		outCandidates = append(outCandidates, relayCandidates...)
 	}
 
 	var out []string
