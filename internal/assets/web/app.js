@@ -826,12 +826,16 @@ async function startHTTPDownload() {
       diskWritableStream = await diskFileHandle.createWritable();
       useIndexedDB = false;
     } catch (pickerErr) {
-      console.warn("Direct-to-disk picker cancelled/failed, falling back to OPFS, SW, or IndexedDB:", pickerErr);
+      console.warn("Direct-to-disk picker cancelled/failed, falling back to SW, OPFS, or IndexedDB:", pickerErr);
       diskWritableStream = null;
     }
   }
 
-  if (!diskWritableStream && opfsSupported) {
+  if (!diskWritableStream && swSupported) {
+    swPipePort = await getSWPipe(currentFile);
+  }
+
+  if (!diskWritableStream && !swPipePort && opfsSupported) {
     try {
       const root = await navigator.storage.getDirectory();
       try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
@@ -857,9 +861,7 @@ async function startHTTPDownload() {
     }
   }
 
-  if (!diskWritableStream && swSupported && !useOPFS) {
-    swPipePort = await getSWPipe(currentFile);
-  } else if (!diskWritableStream && (useIndexedDB || !swSupported)) {
+  if (!diskWritableStream && !swPipePort && !useOPFS) {
     useIndexedDB = true;
     if (initialOffset === 0) {
       await clearIDB();
@@ -1229,12 +1231,16 @@ async function startWebRTC() {
         }
         useIndexedDB = false;
       } catch (pickerErr) {
-        console.warn("WebRTC Direct-to-disk picker cancelled, falling back to OPFS, SW, or IndexedDB:", pickerErr);
+        console.warn("WebRTC Direct-to-disk picker cancelled, falling back to SW, OPFS, or IndexedDB:", pickerErr);
         diskWritableStream = null;
       }
     }
 
-    if (!diskWritableStream && opfsSupported) {
+    if (!diskWritableStream && swSupported) {
+      swPipePort = await getSWPipe(currentFile);
+    }
+
+    if (!diskWritableStream && !swPipePort && opfsSupported) {
       try {
         const root = await navigator.storage.getDirectory();
         try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
@@ -1260,9 +1266,7 @@ async function startWebRTC() {
       }
     }
 
-    if (!diskWritableStream && swSupported && !useOPFS) {
-      swPipePort = await getSWPipe(currentFile);
-    } else if (!diskWritableStream && (useIndexedDB || !swSupported)) {
+    if (!diskWritableStream && !swPipePort && !useOPFS) {
       useIndexedDB = true;
       if (initialOffset === 0) {
         await clearIDB();
