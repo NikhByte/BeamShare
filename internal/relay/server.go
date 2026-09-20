@@ -453,10 +453,21 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	pr := sess.DataPipeR
 	senderOffset := parseSenderOffset(r, 0)
 	sess.SenderOffset = senderOffset
+	reqOffset := sess.RequestedOffset
 	sess.mu.Unlock()
 
 	if pw == nil || pr == nil {
 		http.Error(w, "not found or pipe not ready", 404)
+		return
+	}
+
+	if senderOffset > reqOffset {
+		if r.Body != nil {
+			r.Body.Close()
+		}
+		err := fmt.Errorf("relay stream offset mismatch: sender offset %d exceeds requested offset %d", senderOffset, reqOffset)
+		sess.ClosePipes(err)
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 
@@ -472,9 +483,15 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		select {
-		case <-r.Context().Done():
-			sess.ClosePipes(fmt.Errorf("sender context cancelled: %w", r.Context().Err()))
 		case <-done:
+			return
+		case <-r.Context().Done():
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipes(fmt.Errorf("sender context cancelled: %w", r.Context().Err()))
+			}
 		}
 	}()
 
@@ -776,9 +793,15 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		select {
-		case <-r.Context().Done():
-			sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("receiver context cancelled: %w", r.Context().Err()))
 		case <-done:
+			return
+		case <-r.Context().Done():
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("receiver context cancelled: %w", r.Context().Err()))
+			}
 		}
 	}()
 
@@ -817,6 +840,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 type seekingReader struct {
@@ -850,8 +876,11 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 			sr.bytesToSkip = reqOff - sendOff
 			sr.initDone = true
 
-			if sr.bytesToSkip <= 0 {
-				sr.bytesToSkip = 0
+			if sr.bytesToSkip < 0 {
+				return 0, fmt.Errorf("relay stream offset mismatch: sender offset %d exceeds requested offset %d", sendOff, reqOff)
+			}
+
+			if sr.bytesToSkip == 0 {
 				return n, err
 			}
 

@@ -257,7 +257,7 @@ func TestClient_RegistrationAndStateTimeout(t *testing.T) {
 	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
-		case <-time.After(5 * time.Second):
+		case <-time.After(1 * time.Second):
 		}
 	}))
 	defer slowServer.Close()
@@ -588,5 +588,122 @@ func TestSeekingReader_ZeroLengthBufferAndContext(t *testing.T) {
 	n, err := srCtx.Read(make([]byte, 100))
 	assert.Equal(t, 0, n)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestSeekingReader_SenderOffsetExceedsRequestedOffset(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	sess := &Session{
+		RequestedOffset: 1000,
+		SenderOffset:    2000,
+	}
+
+	sr := &seekingReader{
+		pr:   pr,
+		sess: sess,
+		ctx:  context.Background(),
+	}
+
+	go func() {
+		_, _ = pw.Write([]byte("some data starting at 2000"))
+	}()
+
+	buf := make([]byte, 100)
+	n, err := sr.Read(buf)
+	assert.Equal(t, 0, n)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "relay stream offset mismatch: sender offset 2000 exceeds requested offset 1000")
+}
+
+func TestHandleData_SenderOffsetExceedsRequestedOffset(t *testing.T) {
+	srv := NewServer()
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	sessID, err := client.Register(context.Background())
+	require.NoError(t, err)
+
+	sess := srv.GetSession(sessID)
+	require.NotNil(t, sess)
+
+	// Set up session as if receiver requested offset 1000
+	pr, pw := io.Pipe()
+	sess.SetPipes(pr, pw)
+	sess.RequestedOffset = 1000
+
+	// Sender posts data starting at offset 2000
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/relay/data?session="+sessID+"&offset=2000", bytes.NewReader([]byte("data at 2000")))
+	require.NoError(t, err)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusConflict, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "relay stream offset mismatch: sender offset 2000 exceeds requested offset 1000")
+}
+
+func TestRelay_ZeroSilentByteCorruptionOnOffsetMismatch(t *testing.T) {
+	srv := NewServer()
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	sessID, err := client.Register(context.Background())
+	require.NoError(t, err)
+
+	err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{"name": "file.bin", "size": float64(5000)})
+	require.NoError(t, err)
+
+	// Receiver requests bytes starting at offset 1000
+	downloadRespCh := make(chan *http.Response, 1)
+	downloadErrCh := make(chan error, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
+		if err != nil {
+			downloadErrCh <- err
+			return
+		}
+		req.Header.Set("Range", "bytes=1000-")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			downloadErrCh <- err
+			return
+		}
+		downloadRespCh <- resp
+	}()
+
+	// Wait for download request to be registered on poll
+	cmd, err := client.Poll(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "download", cmd.Action)
+	assert.Equal(t, int64(1000), cmd.Offset)
+
+	// Sender uploads starting at misaligned offset 2000
+	reqUpload, err := http.NewRequest(http.MethodPost, ts.URL+"/relay/data?session="+sessID+"&offset=2000", bytes.NewReader([]byte("corrupted byte data")))
+	require.NoError(t, err)
+
+	respUpload, err := http.DefaultClient.Do(reqUpload)
+	require.NoError(t, err)
+	defer respUpload.Body.Close()
+
+	assert.Equal(t, http.StatusConflict, respUpload.StatusCode)
+
+	// Confirm receiver got 0 corrupted payload bytes
+	select {
+	case respDl := <-downloadRespCh:
+		defer respDl.Body.Close()
+		body, _ := io.ReadAll(respDl.Body)
+		assert.Empty(t, body, "receiver must not receive corrupted bytes when sender offset exceeds requested offset")
+	case err := <-downloadErrCh:
+		t.Fatalf("download failed: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for download response")
+	}
 }
 

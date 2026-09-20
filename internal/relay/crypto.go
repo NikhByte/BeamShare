@@ -32,6 +32,9 @@ func NewEncryptingReader(r io.Reader, key []byte) (*EncryptingReader, error) {
 }
 
 func (er *EncryptingReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if len(er.buf) > 0 {
 		n := copy(p, er.buf)
 		er.buf = er.buf[n:]
