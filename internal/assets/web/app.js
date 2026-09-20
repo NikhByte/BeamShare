@@ -100,12 +100,64 @@ let receivedChunks   = [];
 let isLivePipeMode   = false;
 
 
+
+// ── ANSI Escape Handling ───────────────────────────────────────────────────────
+function stripAnsi(str) {
+  // Pattern to match ANSI escape codes
+  return str.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+function parseAnsiToHtml(str) {
+  let html = '';
+  let openSpans = 0;
+
+  // Matches ANSI escape codes and captures the code inside [ and m
+  const parts = str.split(/(\x1b\[[0-9;]*m)/g);
+
+  for (const part of parts) {
+    if (part.startsWith('\x1b[')) {
+      const codeStr = part.substring(2, part.length - 1);
+      if (codeStr === '0' || codeStr === '') {
+        while (openSpans > 0) {
+          html += '</span>';
+          openSpans--;
+        }
+      } else {
+        const codes = codeStr.split(';');
+        for (const code of codes) {
+          if (code === '32') {
+            html += '<span style="color: #a7f3d0;">';
+            openSpans++;
+          } else if (code === '90') {
+            html += '<span style="color: var(--zinc-600);">';
+            openSpans++;
+          } else if (code === '31') {
+             html += '<span style="color: #ef4444;">';
+             openSpans++;
+          }
+        }
+      }
+    } else if (part.length > 0) {
+      // Escape HTML
+      const escaped = part.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      html += escaped;
+    }
+  }
+  while (openSpans > 0) {
+    html += '</span>';
+    openSpans--;
+  }
+  return html;
+}
+
 class VirtualLogViewer {
   constructor(containerQuery, maxLines = 100000) {
     this.container = document.querySelector(containerQuery);
     if (!this.container) return;
     this.maxLines = maxLines;
     this.lines = [];
+    this.filteredIndices = [];
+    this.filterQuery = "";
     this.buffer = "";
     
     this.spacer = document.createElement('div');
@@ -137,7 +189,12 @@ class VirtualLogViewer {
     
     this.onScroll = () => {
       const maxScroll = this.container.scrollHeight - this.container.clientHeight;
-      this.isAutoScroll = maxScroll - this.container.scrollTop < 10;
+      if (maxScroll - this.container.scrollTop < 10) {
+         this.isAutoScroll = true;
+      } else {
+         this.isAutoScroll = false;
+      }
+      this.updatePauseButton();
       this.render();
     };
     
@@ -149,13 +206,65 @@ class VirtualLogViewer {
     }
   }
 
+  updatePauseButton() {
+    const btn = document.getElementById('btn-terminal-autoscroll');
+    if (btn) {
+      if (this.isAutoScroll) {
+        btn.textContent = "Pause";
+      } else {
+        btn.textContent = "Resume";
+      }
+    }
+  }
+
+  toggleAutoScroll() {
+    this.isAutoScroll = !this.isAutoScroll;
+    if (this.isAutoScroll) {
+      this.container.scrollTop = this.container.scrollHeight;
+    }
+    this.updatePauseButton();
+  }
+
+  setFilter(query) {
+    this.filterQuery = query.toLowerCase();
+    this.filteredIndices = [];
+    if (this.filterQuery) {
+      for (let i = 0; i < this.lines.length; i++) {
+        if (stripAnsi(this.lines[i]).toLowerCase().includes(this.filterQuery)) {
+          this.filteredIndices.push(i);
+        }
+      }
+    }
+
+    for (const [index, node] of this.visibleNodes.entries()) {
+      node.remove();
+    }
+    this.visibleNodes.clear();
+
+    const displayedCount = this.filterQuery ? this.filteredIndices.length : this.lines.length;
+    this.spacer.style.height = `${(displayedCount * this.lineHeight) + 40}px`;
+
+    if (this.isAutoScroll) {
+      this.container.scrollTop = this.container.scrollHeight;
+    }
+    this.render();
+  }
+
   append(text) {
     this.buffer += text;
     let newlineIdx;
     let added = false;
     
     while ((newlineIdx = this.buffer.indexOf('\n')) !== -1) {
-      this.lines.push(this.buffer.substring(0, newlineIdx));
+      const line = this.buffer.substring(0, newlineIdx);
+      this.lines.push(line);
+
+      if (this.filterQuery) {
+         if (stripAnsi(line).toLowerCase().includes(this.filterQuery)) {
+           this.filteredIndices.push(this.lines.length - 1);
+         }
+      }
+
       this.buffer = this.buffer.substring(newlineIdx + 1);
       added = true;
     }
@@ -163,9 +272,22 @@ class VirtualLogViewer {
     if (this.lines.length > this.maxLines) {
       const overflow = this.lines.length - this.maxLines;
       this.lines.splice(0, overflow);
+
+      let filteredOverflow = 0;
+      if (this.filterQuery) {
+        this.filteredIndices = this.filteredIndices
+          .map(i => {
+              const newI = i - overflow;
+              if (newI < 0) filteredOverflow++;
+              return newI;
+          })
+          .filter(i => i >= 0);
+      }
+
+      const shiftAmount = this.filterQuery ? filteredOverflow : overflow;
       const newVisibleNodes = new Map();
       for (const [key, node] of this.visibleNodes.entries()) {
-        const newKey = key - overflow;
+        const newKey = key - shiftAmount;
         if (newKey >= 0) {
           node.style.top = `${newKey * this.lineHeight}px`;
           newVisibleNodes.set(newKey, node);
@@ -177,7 +299,8 @@ class VirtualLogViewer {
     }
     
     if (added) {
-      this.spacer.style.height = `${(this.lines.length * this.lineHeight) + 40}px`;
+      const displayedCount = this.filterQuery ? this.filteredIndices.length : this.lines.length;
+      this.spacer.style.height = `${(displayedCount * this.lineHeight) + 40}px`;
       if (this.isAutoScroll) {
         this.container.scrollTop = this.container.scrollHeight;
       }
@@ -189,8 +312,10 @@ class VirtualLogViewer {
     const scrollTop = this.container.scrollTop;
     const viewportHeight = this.container.clientHeight || 320;
     
+    const displayedCount = this.filterQuery ? this.filteredIndices.length : this.lines.length;
+
     const startIndex = Math.max(0, Math.floor(scrollTop / this.lineHeight) - 5);
-    const endIndex = Math.min(this.lines.length - 1, startIndex + Math.ceil(viewportHeight / this.lineHeight) + 10);
+    const endIndex = Math.min(displayedCount - 1, startIndex + Math.ceil(viewportHeight / this.lineHeight) + 10);
     
     const sel = window.getSelection();
     const hasSelection = sel && sel.rangeCount > 0 && !sel.isCollapsed;
@@ -216,10 +341,15 @@ class VirtualLogViewer {
     neededIndices.sort((a, b) => a - b);
     
     for (const i of neededIndices) {
+      if (i < 0 || i >= displayedCount) continue;
+
       let node = this.visibleNodes.get(i);
       if (!node) {
+        const lineIndex = this.filterQuery ? this.filteredIndices[i] : i;
+        const rawLine = this.lines[lineIndex] === '' ? ' ' : this.lines[lineIndex];
+
         node = document.createElement('div');
-        node.textContent = this.lines[i] === '' ? ' ' : this.lines[i];
+        node.innerHTML = parseAnsiToHtml(rawLine);
         node.className = 'log-line';
         node.style.fontFamily = "'Geist Mono', monospace";
         node.style.fontSize = "0.8125rem";
@@ -249,6 +379,7 @@ class VirtualLogViewer {
 
   clear() {
     this.lines = [];
+    this.filteredIndices = [];
     this.buffer = "";
     this.spacer.style.height = '40px';
     this.content.innerHTML = '';
@@ -256,7 +387,7 @@ class VirtualLogViewer {
   }
 
   getText() {
-    return this.lines.join('\n') + (this.buffer ? '\n' + this.buffer : '');
+    return stripAnsi(this.lines.join('\n') + (this.buffer ? '\n' + this.buffer : ''));
   }
 }
 
@@ -654,7 +785,6 @@ function init() {
     }
   });
 
-  // Live pipe control listeners
   document.getElementById('btn-terminal-copy')?.addEventListener('click', () => {
     if (virtualViewer) {
       navigator.clipboard.writeText(virtualViewer.getText());
@@ -662,6 +792,18 @@ function init() {
       const old = btn.textContent;
       btn.textContent = "Copied!";
       setTimeout(() => btn.textContent = old, 1500);
+    }
+  });
+
+  document.getElementById('terminal-search')?.addEventListener('input', (e) => {
+    if (virtualViewer) {
+      virtualViewer.setFilter(e.target.value);
+    }
+  });
+
+  document.getElementById('btn-terminal-autoscroll')?.addEventListener('click', () => {
+    if (virtualViewer) {
+      virtualViewer.toggleAutoScroll();
     }
   });
 
@@ -751,12 +893,7 @@ function resetState() {
   }
   if (virtualViewer) {
     virtualViewer.clear();
-    virtualViewer.append("// Waiting for stream input...\n");
-    const node = virtualViewer.visibleNodes.get(0);
-    if (node) {
-      node.className = "log-line term-dim";
-      node.style.color = "var(--zinc-600)";
-    }
+    virtualViewer.append("\x1b[90m// Waiting for stream input...\x1b[0m\n");
   }
 }
 
@@ -2113,6 +2250,8 @@ if (typeof module !== 'undefined' && module.exports) {
     apiPath,
     formatBytes,
     mimeLabel,
-    resetState
+    resetState,
+    stripAnsi,
+    parseAnsiToHtml
   };
 }
