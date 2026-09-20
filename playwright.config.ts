@@ -40,6 +40,8 @@ export default defineConfig({
           firefoxUserPrefs: {
             'media.navigator.permission.disabled': true,
             'media.navigator.streams.fake': true,
+            'media.peerconnection.ice.loopback': true,
+            'media.peerconnection.ice.link_local': true,
           },
         },
       },
