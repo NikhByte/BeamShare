@@ -417,4 +417,71 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
   });
+
+  test('createOPFSWriter uses createWritable when available', async () => {
+    let written = [];
+    const mockFileHandle = {
+      createWritable: async () => ({
+        write: async (c) => written.push(c),
+        close: async () => {}
+      })
+    };
+
+    const writer = await app.createOPFSWriter(mockFileHandle, 0);
+    await writer.write(new Uint8Array([10, 20]));
+    assert.equal(written.length, 1);
+    assert.equal(written[0][0], 10);
+  });
+
+  test('createOPFSWriter falls back to OPFSStreamWriter when createWritable is missing', async () => {
+    let messagesSent = [];
+    let terminated = false;
+
+    class MockWorker {
+      constructor(url) {
+        this.url = url;
+      }
+      addEventListener(type, listener) {
+        if (type === 'message') {
+          this.listener = listener;
+        }
+      }
+      removeEventListener() {}
+      postMessage(msg) {
+        messagesSent.push(msg);
+        if (msg.type === 'INIT') {
+          setTimeout(() => this.listener({ data: { type: 'INIT_OK' } }), 0);
+        } else if (msg.type === 'WRITE') {
+          setTimeout(() => this.listener({ data: { type: 'WRITE_OK', written: msg.chunk ? msg.chunk.byteLength : 0 } }), 0);
+        } else if (msg.type === 'CLOSE') {
+          setTimeout(() => this.listener({ data: { type: 'CLOSE_OK' } }), 0);
+        }
+      }
+      terminate() {
+        terminated = true;
+      }
+    }
+
+    global.Worker = MockWorker;
+    window.Worker = MockWorker;
+
+    const mockFileHandleWithoutWritable = {}; // no createWritable method (simulates Safari / Firefox)
+
+    const writer = await app.createOPFSWriter(mockFileHandleWithoutWritable, 0);
+    assert.equal(writer instanceof app.OPFSStreamWriter, true);
+
+    await writer.write(new Uint8Array([100, 200]));
+    await writer.close();
+
+    assert.equal(messagesSent.length, 3);
+    assert.equal(messagesSent[0].type, 'INIT');
+    assert.equal(messagesSent[1].type, 'WRITE');
+    assert.equal(messagesSent[2].type, 'CLOSE');
+    assert.equal(terminated, true);
+  });
+
+  test('checkRamWarning resolves true when streaming support or size is within limits', async () => {
+    const resultSmall = await app.checkRamWarning(100 * 1024 * 1024); // 100 MB
+    assert.equal(resultSmall, true);
+  });
 });

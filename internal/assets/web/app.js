@@ -437,6 +437,151 @@ let currentShareURL    = "";
 let useIndexedDB       = false;
 let useOPFS            = false;
 
+// ── OPFS Stream Writer (Safari / Firefox Fallback) ───────────────────────────
+class OPFSStreamWriter {
+  constructor(fileHandle, initialOffset = 0) {
+    this.fileHandle = fileHandle;
+    this.initialOffset = initialOffset;
+    this.worker = null;
+    this.offset = initialOffset;
+  }
+
+  async init() {
+    if (typeof Worker === 'function') {
+      const workerCode = `
+        let fileHandle = null;
+        let accessHandle = null;
+
+        self.onmessage = async (e) => {
+          const { type, chunk, initialOffset, handle, offset: msgOffset } = e.data;
+          try {
+            if (type === 'INIT') {
+              fileHandle = handle;
+              if (fileHandle && typeof fileHandle.createSyncAccessHandle === 'function') {
+                accessHandle = await fileHandle.createSyncAccessHandle();
+              } else {
+                const root = await navigator.storage.getDirectory();
+                const fh = await root.getFileHandle('beam_temp', { create: true });
+                accessHandle = await fh.createSyncAccessHandle();
+              }
+              if (initialOffset === 0 && accessHandle && typeof accessHandle.truncate === 'function') {
+                accessHandle.truncate(0);
+              }
+              self.postMessage({ type: 'INIT_OK' });
+            } else if (type === 'WRITE') {
+              if (!accessHandle) throw new Error("SyncAccessHandle not initialized");
+              const view = new Uint8Array(chunk);
+              let written = 0;
+              if (typeof accessHandle.write === 'function') {
+                written = accessHandle.write(view, { at: msgOffset });
+              }
+              self.postMessage({ type: 'WRITE_OK', written });
+            } else if (type === 'CLOSE') {
+              if (accessHandle) {
+                if (typeof accessHandle.flush === 'function') accessHandle.flush();
+                if (typeof accessHandle.close === 'function') accessHandle.close();
+                accessHandle = null;
+              }
+              self.postMessage({ type: 'CLOSE_OK' });
+            }
+          } catch (err) {
+            self.postMessage({ type: 'ERROR', error: err.message || String(err) });
+          }
+        };
+      `;
+      const blob = new Blob([workerCode], { type: 'application/javascript' });
+      const url = URL.createObjectURL(blob);
+      this.worker = new Worker(url);
+      URL.revokeObjectURL(url);
+
+      return new Promise((resolve, reject) => {
+        const handleMsg = (e) => {
+          if (e.data && e.data.type === 'INIT_OK') {
+            this.worker.removeEventListener('message', handleMsg);
+            resolve();
+          } else if (e.data && e.data.type === 'ERROR') {
+            this.worker.removeEventListener('message', handleMsg);
+            this.worker.terminate();
+            this.worker = null;
+            reject(new Error(e.data.error));
+          }
+        };
+        this.worker.addEventListener('message', handleMsg);
+        try {
+          this.worker.postMessage({ type: 'INIT', initialOffset: this.initialOffset, handle: this.fileHandle });
+        } catch (_) {
+          this.worker.postMessage({ type: 'INIT', initialOffset: this.initialOffset });
+        }
+      });
+    } else {
+      throw new Error("Web Worker API not available for OPFS SyncAccessHandle");
+    }
+  }
+
+  async write(chunk) {
+    if (!this.worker) throw new Error("OPFSStreamWriter not initialized");
+    const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    const currOffset = this.offset;
+    this.offset += bytes.byteLength;
+
+    return new Promise((resolve, reject) => {
+      const handleMsg = (e) => {
+        if (e.data && e.data.type === 'WRITE_OK') {
+          this.worker.removeEventListener('message', handleMsg);
+          resolve();
+        } else if (e.data && e.data.type === 'ERROR') {
+          this.worker.removeEventListener('message', handleMsg);
+          reject(new Error(e.data.error));
+        }
+      };
+      this.worker.addEventListener('message', handleMsg);
+      try {
+        this.worker.postMessage({ type: 'WRITE', chunk: buffer, offset: currOffset }, [buffer]);
+      } catch (_) {
+        this.worker.postMessage({ type: 'WRITE', chunk: buffer, offset: currOffset });
+      }
+    });
+  }
+
+  async close() {
+    if (!this.worker) return;
+    return new Promise((resolve) => {
+      const handleMsg = () => {
+        if (this.worker) {
+          this.worker.removeEventListener('message', handleMsg);
+          this.worker.terminate();
+          this.worker = null;
+        }
+        resolve();
+      };
+      this.worker.addEventListener('message', handleMsg);
+      this.worker.postMessage({ type: 'CLOSE' });
+    });
+  }
+}
+
+async function createOPFSWriter(fileHandle, initialOffset = 0) {
+  if (fileHandle && typeof fileHandle.createWritable === 'function') {
+    try {
+      const writable = await fileHandle.createWritable({ keepExistingData: initialOffset > 0 });
+      if (initialOffset > 0 && typeof writable.seek === 'function') {
+        await writable.seek(initialOffset);
+      } else if (initialOffset === 0 && typeof writable.truncate === 'function') {
+        await writable.truncate(0);
+      }
+      return writable;
+    } catch (e) {
+      console.warn("createWritable failed on OPFS handle, trying worker fallback:", e);
+    }
+  }
+
+  // Fallback: OPFSStreamWriter using Web Worker + createSyncAccessHandle
+  const opfsWriter = new OPFSStreamWriter(fileHandle, initialOffset);
+  await opfsWriter.init();
+  return opfsWriter;
+}
+
 // ── Sequential Chunk Queue & Flow Control ─────────────────────────────────────
 class SequentialChunkQueue {
   constructor({
@@ -1122,8 +1267,7 @@ async function startHTTPDownload() {
       }
       
       diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
-      diskWritableStream = await diskFileHandle.createWritable();
-      await diskWritableStream.truncate(0);
+      diskWritableStream = await createOPFSWriter(diskFileHandle, initialOffset);
       useOPFS = true;
       useIndexedDB = false;
     } catch (err) {
@@ -1529,7 +1673,7 @@ async function startWebRTC() {
         }
         
         diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
-        diskWritableStream = await diskFileHandle.createWritable();
+        diskWritableStream = await createOPFSWriter(diskFileHandle, initialOffset);
         useOPFS = true;
         useIndexedDB = false;
       } catch (err) {
@@ -2371,6 +2515,9 @@ if (typeof module !== 'undefined' && module.exports) {
     parseAnsiToHtml,
     handleSenderFileSelect,
     startSenderSharing,
-    get_senderEncryptionKey: () => senderEncryptionKey
+    get_senderEncryptionKey: () => senderEncryptionKey,
+    OPFSStreamWriter,
+    createOPFSWriter,
+    checkRamWarning
   };
 }
