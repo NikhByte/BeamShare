@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -473,3 +475,84 @@ func TestPNAHeaders(t *testing.T) {
 		})
 	}
 }
+
+func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
+	srv, err := New("", 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	const numSubscribers = 30
+	const numMessages = 20
+
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	receivedCounts := make([]int64, numSubscribers)
+
+	// Launch concurrent SSE subscribers
+	for i := 0; i < numSubscribers; i++ {
+		wg.Add(1)
+		go func(subIdx int) {
+			defer wg.Done()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/live/stream", nil)
+			if err != nil {
+				return
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+
+			buf := make([]byte, 1024)
+			for {
+				n, err := resp.Body.Read(buf)
+				if n > 0 {
+					atomic.AddInt64(&receivedCounts[subIdx], int64(n))
+				}
+				if err != nil {
+					return
+				}
+			}
+		}(i)
+	}
+
+	// Wait for all subscribers to connect
+	require.Eventually(t, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return len(srv.liveClients) == numSubscribers
+	}, 5*time.Second, 20*time.Millisecond)
+
+	// Concurrently write stream chunks
+	for m := 0; m < numMessages; m++ {
+		msg := fmt.Sprintf("event-message-%04d\n", m)
+		srv.WriteLive([]byte(msg))
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Verify all subscribers received data
+	require.Eventually(t, func() bool {
+		for i := 0; i < numSubscribers; i++ {
+			if atomic.LoadInt64(&receivedCounts[i]) == 0 {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Second, 20*time.Millisecond)
+
+	// Cancel context to close subscriber connections
+	cancel()
+	wg.Wait()
+
+	// Verify client cleanup
+	require.Eventually(t, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return len(srv.liveClients) == 0
+	}, 5*time.Second, 20*time.Millisecond)
+}
+
