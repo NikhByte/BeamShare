@@ -516,4 +516,25 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.notEqual(key, null);
     assert.equal(key.algorithm.name, 'AES-GCM');
   });
+
+  test('parseSessionInput handles full URLs, relative paths, and raw session IDs/passphrases', () => {
+    const origin = (typeof window !== 'undefined' && window.location && window.location.origin) 
+      ? window.location.origin 
+      : 'https://beamshare.app';
+
+    // Full URL
+    assert.equal(app.parseSessionInput('https://beamshare.app/?s=abc12345'), 'https://beamshare.app/?s=abc12345');
+    // Relative query
+    assert.equal(app.parseSessionInput('/?s=xyz789'), `${origin}/?s=xyz789`);
+    assert.equal(app.parseSessionInput('?s=xyz789'), `${origin}/?s=xyz789`);
+    // Raw session code or passphrase
+    assert.equal(app.parseSessionInput('0123456789abcdef0123456789abcdef'), `${origin}/?s=0123456789abcdef0123456789abcdef`);
+    assert.equal(app.parseSessionInput('my-secret-passphrase'), `${origin}/?s=my-secret-passphrase`);
+    // Whitespace trimming
+    assert.equal(app.parseSessionInput('  test-code  '), `${origin}/?s=test-code`);
+    // Empty inputs
+    assert.equal(app.parseSessionInput(''), null);
+    assert.equal(app.parseSessionInput('   '), null);
+    assert.equal(app.parseSessionInput(null), null);
+  });
 });

@@ -978,6 +978,44 @@ async function scanQRCode() {
   qrScanFrame = requestAnimationFrame(scanQRCode);
 }
 
+function parseSessionInput(input) {
+  if (!input) return null;
+  input = input.trim();
+  if (!input) return null;
+
+  if (input.startsWith('http://') || input.startsWith('https://')) {
+    try {
+      return new URL(input).href;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  const baseOrigin = (typeof window !== 'undefined' && window.location && window.location.origin) 
+    ? window.location.origin 
+    : 'https://beamshare.app';
+
+  if (input.startsWith('/') || input.startsWith('?') || input.startsWith('#')) {
+    return baseOrigin + (input.startsWith('/') ? input : '/' + input);
+  }
+
+  const url = new URL(baseOrigin);
+  url.searchParams.set('s', input);
+  return url.href;
+}
+
+function handleJoinSession(e) {
+  if (e && e.preventDefault) e.preventDefault();
+  const inputEl = document.getElementById('input-session-code');
+  if (!inputEl) return;
+  const targetUrl = parseSessionInput(inputEl.value);
+  if (targetUrl) {
+    window.location.href = targetUrl;
+  } else {
+    showError("Please enter a valid session ID, transfer link, or passphrase.");
+  }
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 function init() {
   if ('serviceWorker' in navigator) {
@@ -1004,6 +1042,7 @@ function init() {
 
   document.getElementById('btn-scan-qr')?.addEventListener('click', startQRScanner);
   document.getElementById('btn-qr-cancel')?.addEventListener('click', stopQRScanner);
+  document.getElementById('form-join-session')?.addEventListener('submit', handleJoinSession);
 
   document.getElementById('btn-copy-share-url')?.addEventListener('click', () => {
     if (currentShareURL) {
@@ -2551,6 +2590,7 @@ if (typeof module !== 'undefined' && module.exports) {
     createOPFSWriter,
     checkRamWarning,
     extractKeyFragment,
-    parseDecryptionKeyFromHash
+    parseDecryptionKeyFromHash,
+    parseSessionInput
   };
 }
