@@ -342,3 +342,79 @@ describe('Gaze Web Receiver Test Suite', () => {
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
   });
 });
+
+describe('Gaze Web Sender Test Suite', () => {
+  let dom;
+  let window;
+  let document;
+  let app;
+
+  beforeEach(() => {
+    dom = new JSDOM(htmlContent, {
+      url: 'http://localhost:8080/'
+    });
+
+    window = dom.window;
+    document = window.document;
+
+    // Node's WebCrypto
+    const { webcrypto } = require('node:crypto');
+    window.crypto = webcrypto;
+
+    global.window = window;
+    global.document = document;
+    global.crypto = window.crypto;
+    global.navigator = window.navigator;
+    global.location = window.location;
+    global.URLSearchParams = window.URLSearchParams;
+    global.TextDecoder = require('util').TextDecoder;
+    global.atob = (str) => Buffer.from(str, 'base64').toString('binary');
+    global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
+    window.atob = global.atob;
+    window.btoa = global.btoa;
+    global.fetch = async (url) => {
+      if (url.includes('/poll')) {
+          return { ok: false, status: 404 };
+      }
+      return {
+        ok: true,
+        json: async () => ({ session: 'mock-session-123' })
+      };
+    };
+    window.fetch = global.fetch;
+
+    class RTCPeerConnection {
+      constructor() {}
+      createDataChannel() { return { onopen: () => {}, onmessage: () => {}, onclose: () => {} }; }
+      async createOffer() { return { sdp: 'v=0...' }; }
+      async setLocalDescription(d) { this.localDescription = { sdp: 'v=0...' }; }
+    }
+    window.RTCPeerConnection = RTCPeerConnection;
+    global.RTCPeerConnection = RTCPeerConnection;
+    window.__BEAM_TEST_ENV__ = true;
+
+    delete require.cache[require.resolve('./app.js')];
+    app = require('./app.js');
+
+    // Set mock file
+    app.handleSenderFileSelect({ name: 'test.txt', size: 1024, type: 'text/plain' });
+
+  });
+
+  test('startSenderSharing generates AES-GCM key and appends #k fragment', async () => {
+    await app.startSenderSharing();
+
+    const urlInput = document.getElementById('send-url-input');
+    const hash = new URL(urlInput.value || "http://localhost/").hash;
+
+    assert.equal(hash.startsWith('#k='), true);
+
+    // Verify the fragment is valid base64url and resolves to 32 bytes (256-bit)
+    const b64 = hash.substring(3).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = Buffer.from(b64, 'base64');
+    assert.equal(raw.length, 32);
+
+    // Ensure global encryption key was created
+    assert.notEqual(app.get_senderEncryptionKey(), null);
+  });
+});
