@@ -105,6 +105,43 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 	})
 }
 
+func TestUploadInterruptedFile(t *testing.T) {
+	srv, err := New("", 10*1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	bodyReader, bodyWriter := io.Pipe()
+	writer := multipart.NewWriter(bodyWriter)
+
+	go func() {
+		part, err := writer.CreateFormFile("file", "interrupted_test.bin")
+		if err != nil {
+			bodyWriter.CloseWithError(err)
+			return
+		}
+		// Write partial data then abort with an error
+		_, _ = part.Write([]byte("some initial chunk"))
+		_ = bodyWriter.CloseWithError(fmt.Errorf("connection reset by peer"))
+	}()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload", bodyReader)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		assert.NotEqual(t, http.StatusOK, resp.StatusCode)
+	}
+
+	// Verify that partial file was cleaned up and does not exist on disk
+	outName := "received_interrupted_test.bin"
+	_, statErr := os.Stat(outName)
+	assert.True(t, os.IsNotExist(statErr), "partial file should be removed upon interrupted upload")
+}
+
 func TestWriteLive_Truncation(t *testing.T) {
 	srv, err := New("", 1024*1024)
 	require.NoError(t, err)
