@@ -654,7 +654,9 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 		http.StripPrefix("/static/", assets.StaticHandler()).ServeHTTP(w, r)
 		return
 	}
-	http.NotFound(w, r)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+	w.Write([]byte(assets.NotFoundHTML()))
 }
 
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {

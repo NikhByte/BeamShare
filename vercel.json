@@ -8,8 +8,7 @@
     { "source": "/static/pako.min.js", "destination": "/pako.min.js" },
     { "source": "/sw.js", "destination": "/sw.js" },
     { "source": "/robots.txt", "destination": "/robots.txt" },
-    { "source": "/sitemap.xml", "destination": "/sitemap.xml" },
-    { "source": "/(.*)", "destination": "/index.html" }
+    { "source": "/sitemap.xml", "destination": "/sitemap.xml" }
   ],
   "headers": [
     {
