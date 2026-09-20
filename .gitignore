@@ -27,3 +27,4 @@ node_modules/
 /tmp-test-data
 received_*
 .DS_Store
+.jules/

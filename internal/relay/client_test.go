@@ -39,7 +39,7 @@ func TestRelayClient(t *testing.T) {
 	go func() {
 		sess := relayServer.getSession(sessID)
 		if sess != nil {
-			sess.DownloadReq <- DownloadRequest{}
+			sess.EnqueueDownload(DownloadRequest{})
 		}
 	}()
 

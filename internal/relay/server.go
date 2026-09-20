@@ -16,6 +16,8 @@ import (
 	"github.com/beamshare/beam/internal/assets"
 )
 
+const maxDownloadQueueSize = 100
+
 type DownloadRequest struct {
 	Offset int64  `json:"offset,omitempty"`
 	Range  string `json:"range,omitempty"`
@@ -28,7 +30,6 @@ type Session struct {
 	Meta       map[string]interface{}
 
 	AnswerReady chan string
-	DownloadReq chan DownloadRequest
 
 	DataPipeR *io.PipeReader
 	DataPipeW *io.PipeWriter
@@ -38,26 +39,101 @@ type Session struct {
 
 	expiresAt time.Time
 	mu        sync.Mutex
+
+	downloadQueue  []DownloadRequest
+	downloadNotify chan struct{}
+}
+
+func (s *Session) EnqueueDownload(req DownloadRequest) bool {
+	s.mu.Lock()
+	if len(s.downloadQueue) >= maxDownloadQueueSize {
+		s.mu.Unlock()
+		return false
+	}
+	s.downloadQueue = append(s.downloadQueue, req)
+	s.mu.Unlock()
+
+	select {
+	case s.downloadNotify <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+func (s *Session) DequeueDownload() (DownloadRequest, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.downloadQueue) == 0 {
+		return DownloadRequest{}, false
+	}
+	req := s.downloadQueue[0]
+	s.downloadQueue = s.downloadQueue[1:]
+	return req, true
+}
+
+func (s *Session) ClearDownloadQueue() {
+	s.mu.Lock()
+	s.downloadQueue = nil
+	s.mu.Unlock()
+
+	for {
+		select {
+		case <-s.downloadNotify:
+		default:
+			return
+		}
+	}
+}
+
+func (s *Session) DownloadQueueLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.downloadQueue)
 }
 
 func (s *Session) ClosePipes(err error) {
+	s.ClosePipesIfMatch(nil, nil, err)
+}
+
+func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.DataPipeW != nil {
-		if err != nil {
-			s.DataPipeW.CloseWithError(err)
-		} else {
-			s.DataPipeW.Close()
+	s.closePipesIfMatchLocked(pr, pw, err)
+}
+
+func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
+	if pr == nil || s.DataPipeR == pr {
+		if s.DataPipeW != nil {
+			if err != nil {
+				s.DataPipeW.CloseWithError(err)
+			} else {
+				s.DataPipeW.Close()
+			}
+			s.DataPipeW = nil
 		}
-		s.DataPipeW = nil
-	}
-	if s.DataPipeR != nil {
-		if err != nil {
-			s.DataPipeR.CloseWithError(err)
-		} else {
-			s.DataPipeR.Close()
+		if s.DataPipeR != nil {
+			if err != nil {
+				s.DataPipeR.CloseWithError(err)
+			} else {
+				s.DataPipeR.Close()
+			}
+			s.DataPipeR = nil
 		}
-		s.DataPipeR = nil
+	} else {
+		if pw != nil {
+			if err != nil {
+				pw.CloseWithError(err)
+			} else {
+				pw.Close()
+			}
+		}
+		if pr != nil {
+			if err != nil {
+				pr.CloseWithError(err)
+			} else {
+				pr.Close()
+			}
+		}
 	}
 }
 
@@ -158,6 +234,7 @@ func (s *Server) SweepExpiredSessions() {
 
 	for _, sess := range expired {
 		sess.ClosePipes(fmt.Errorf("session expired"))
+		sess.ClearDownloadQueue()
 	}
 }
 
@@ -207,10 +284,10 @@ func (s *Server) createSession() *Session {
 	}
 
 	sess := &Session{
-		ID:          id,
-		AnswerReady: make(chan string, 1),
-		DownloadReq: make(chan DownloadRequest, 1),
-		expiresAt:   time.Now().Add(s.sessionTTL),
+		ID:             id,
+		AnswerReady:    make(chan string, 1),
+		downloadNotify: make(chan struct{}, maxDownloadQueueSize),
+		expiresAt:      time.Now().Add(s.sessionTTL),
 	}
 	s.sessions[id] = sess
 
@@ -316,6 +393,19 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+func respondWithDownload(w http.ResponseWriter, dlReq DownloadRequest) {
+	resp := map[string]interface{}{
+		"action": "download",
+	}
+	if dlReq.Offset > 0 {
+		resp["offset"] = dlReq.Offset
+	}
+	if dlReq.Range != "" {
+		resp["range"] = dlReq.Range
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
 func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	sess := s.getSession(r.URL.Query().Get("session"))
 	if sess == nil {
@@ -323,25 +413,31 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	select {
-	case answer := <-sess.AnswerReady:
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"action": "answer",
-			"answer": answer,
-		})
-	case dlReq := <-sess.DownloadReq:
-		resp := map[string]interface{}{
-			"action": "download",
+	if dlReq, ok := sess.DequeueDownload(); ok {
+		select {
+		case <-sess.downloadNotify:
+		default:
 		}
-		if dlReq.Offset > 0 {
-			resp["offset"] = dlReq.Offset
-		}
-		if dlReq.Range != "" {
-			resp["range"] = dlReq.Range
-		}
-		json.NewEncoder(w).Encode(resp)
-	case <-r.Context().Done():
+		respondWithDownload(w, dlReq)
 		return
+	}
+
+	for {
+		select {
+		case answer := <-sess.AnswerReady:
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"action": "answer",
+				"answer": answer,
+			})
+			return
+		case <-sess.downloadNotify:
+			if dlReq, ok := sess.DequeueDownload(); ok {
+				respondWithDownload(w, dlReq)
+				return
+			}
+		case <-r.Context().Done():
+			return
+		}
 	}
 }
 
@@ -378,7 +474,7 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	var copyErr error
 	defer func() {
 		if copyErr != nil {
-			sess.ClosePipes(copyErr)
+			sess.ClosePipesIfMatch(pr, pw, copyErr)
 		}
 	}()
 
@@ -679,7 +775,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	sess.mu.Lock()
 	if sess.DataPipeR != nil || sess.DataPipeW != nil {
-		sess.ClosePipes(fmt.Errorf("replaced by new download request"))
+		sess.closePipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new download request"))
 	}
 	sess.DataPipeR = pr
 	sess.DataPipeW = pw
@@ -689,7 +785,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	var downloadErr error
 	defer func() {
-		sess.ClosePipes(downloadErr)
+		sess.ClosePipesIfMatch(pr, pw, downloadErr)
 	}()
 
 	done := make(chan struct{})
@@ -704,16 +800,13 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			case <-done:
 				return
 			default:
-				sess.ClosePipes(fmt.Errorf("receiver context cancelled: %w", r.Context().Err()))
+				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("receiver context cancelled: %w", r.Context().Err()))
 			}
 		}
 	}()
 
 	// Notify sender with offset/range
-	select {
-	case sess.DownloadReq <- DownloadRequest{Offset: offset, Range: rangeHdr}:
-	default:
-	}
+	sess.EnqueueDownload(DownloadRequest{Offset: offset, Range: rangeHdr})
 
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
@@ -735,14 +828,14 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			}
 			if errWrite != nil {
 				downloadErr = errWrite
-				sess.ClosePipes(errWrite)
+				sess.ClosePipesIfMatch(pr, pw, errWrite)
 				break
 			}
 		}
 		if errRead != nil {
 			if errRead != io.EOF {
 				downloadErr = errRead
-				sess.ClosePipes(errRead)
+				sess.ClosePipesIfMatch(pr, pw, errRead)
 			}
 			break
 		}
