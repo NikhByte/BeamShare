@@ -73,7 +73,7 @@ func (c *Client) Register(ctx context.Context) (string, error) {
 	return c.SessionID, nil
 }
 
-func (c *Client) PushState(ctx context.Context, offer string, candidates []map[string]interface{}, meta map[string]interface{}) error {
+func (c *Client) PushState(ctx context.Context, offer string, candidates []map[string]interface{}, meta map[string]interface{}, iceServers []map[string]interface{}) error {
 	reqCtx, cancel := ensureTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -81,6 +81,7 @@ func (c *Client) PushState(ctx context.Context, offer string, candidates []map[s
 		"offer":      offer,
 		"candidates": candidates,
 		"meta":       meta,
+		"iceServers": iceServers,
 	}
 	b, err := json.Marshal(body)
 	if err != nil {

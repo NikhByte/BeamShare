@@ -30,7 +30,7 @@ func TestRelayClient(t *testing.T) {
 	}
 
 	// 2. Test PushState
-	err = client.PushState(context.Background(), "offer-sdp-test", []map[string]interface{}{{"candidate": "cand1"}}, map[string]interface{}{"name": "test.txt", "size": 100})
+	err = client.PushState(context.Background(), "offer-sdp-test", []map[string]interface{}{{"candidate": "cand1"}}, map[string]interface{}{"name": "test.txt", "size": 100}, nil)
 	if err != nil {
 		t.Fatalf("PushState failed: %v", err)
 	}

@@ -41,7 +41,7 @@ func TestServer_RapidSuccessiveDownloadRequestsQueued(t *testing.T) {
 	err = client.PushState(testCtx, "sdp-offer", nil, map[string]interface{}{
 		"name": "testfile.bin",
 		"size": float64(10000),
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	ranges := []string{
@@ -111,7 +111,7 @@ func TestServer_ConcurrentDownloadRequestsThreadSafety(t *testing.T) {
 	err = client.PushState(testCtx, "sdp-offer", nil, map[string]interface{}{
 		"name": "concurrent.bin",
 		"size": float64(100000),
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	numGoroutines := 20

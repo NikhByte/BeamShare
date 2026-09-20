@@ -48,13 +48,46 @@ function apiPath(path) {
 // ── Constants ─────────────────────────────────────────────────────────────────
 const STUN_SERVERS    = [
   { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  {
-    urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443'],
-    username: 'openrelayproject',
-    credential: 'openrelayproject'
-  }
+  { urls: 'stun:stun1.l.google.com:19302' }
 ];
+
+function getIceServers(offer) {
+  const params = new URLSearchParams(window.location.search);
+  const servers = [];
+
+  if (params.get('turn_server') || params.get('stun_server') || params.get('ice_servers')) {
+    if (params.get('ice_servers')) {
+      try {
+        const parsedIceServers = JSON.parse(params.get('ice_servers'));
+        if (Array.isArray(parsedIceServers)) {
+           return parsedIceServers;
+        }
+      } catch (e) {
+        console.warn("Failed to parse ice_servers query param", e);
+      }
+    }
+    if (params.get('turn_server')) {
+      const turnServers = params.get('turn_server').split(',');
+      const username = params.get('turn_username');
+      const credential = params.get('turn_credential');
+      servers.push({
+        urls: turnServers,
+        username: username || '',
+        credential: credential || ''
+      });
+    }
+    if (params.get('stun_server')) {
+      const stunServers = params.get('stun_server').split(',');
+      servers.push({ urls: stunServers });
+    }
+    if (servers.length > 0) {
+      return servers;
+    }
+  }
+
+  return offer && offer.iceServers ? offer.iceServers : STUN_SERVERS;
+}
+
 const CIRCUMFERENCE   = 2 * Math.PI * 42; // SVG progress ring
 
 // ── State ──────────────────────────────────────────────────────────────────────
@@ -1119,7 +1152,7 @@ async function startWebRTC() {
   markStep('step-offer');
 
   // 2. Create peer connection and set remote description.
-  const iceServers = params.get('no_stun') ? [] : (offer.iceServers || STUN_SERVERS);
+  const iceServers = params.get('no_stun') ? [] : getIceServers(offer);
   const pc = new RTCPeerConnection({ iceServers });
 
   // Also fetch file meta in parallel.
@@ -1645,7 +1678,7 @@ async function startSenderSharing() {
     senderSessionID = regData.session;
 
     setLoadingSub('Creating WebRTC peer connection…');
-    senderPeerConnection = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+    senderPeerConnection = new RTCPeerConnection({ iceServers: getIceServers({}) });
     
     const localCandidates = [];
     senderPeerConnection.onicecandidate = (e) => {

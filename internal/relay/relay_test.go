@@ -38,7 +38,7 @@ func TestRelayServerAndClient(t *testing.T) {
 		client := NewClient(ts.URL)
 		sessID, err := client.Register(context.Background())
 		require.NoError(t, err)
-		err = client.PushState(context.Background(), offerSDP, candidates, meta)
+		err = client.PushState(context.Background(), offerSDP, candidates, meta, nil)
 		require.NoError(t, err)
 		return client, sessID
 	}
@@ -203,7 +203,7 @@ func TestEncryptedRelayDataStreaming(t *testing.T) {
 	sessionID, err := client.Register(context.Background())
 	require.NoError(t, err)
 
-	err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{"name": "stream_test.dat", "size": float64(payloadSize)})
+	err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{"name": "stream_test.dat", "size": float64(payloadSize)}, nil)
 	require.NoError(t, err)
 
 	// Channel for downloaded bytes
@@ -281,7 +281,7 @@ func TestClient_RegistrationAndStateTimeout(t *testing.T) {
 		defer cancel()
 
 		start := time.Now()
-		err := client.PushState(ctx, "offer", nil, nil)
+		err := client.PushState(ctx, "offer", nil, nil, nil)
 		elapsed := time.Since(start)
 
 		require.Error(t, err)
@@ -333,7 +333,7 @@ func TestServer_DisconnectStreamCleanup(t *testing.T) {
 	sessID, err := client.Register(ctx)
 	require.NoError(t, err)
 
-	err = client.PushState(ctx, "offer-sdp", nil, map[string]interface{}{"size": 1024 * 1024 * 100})
+	err = client.PushState(ctx, "offer-sdp", nil, map[string]interface{}{"size": 1024 * 1024 * 100}, nil)
 	require.NoError(t, err)
 
 	// Receiver starts downloading
@@ -477,7 +477,7 @@ func TestRelay_RangeRequestAndOffsetHandling(t *testing.T) {
 	err = client.PushState(context.Background(), "dummy-offer", nil, map[string]interface{}{
 		"name": "large.dat",
 		"size": float64(totalSize),
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// 1. Partial Range Request (offset 10)
@@ -657,7 +657,7 @@ func TestRelay_ZeroSilentByteCorruptionOnOffsetMismatch(t *testing.T) {
 	sessID, err := client.Register(context.Background())
 	require.NoError(t, err)
 
-	err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{"name": "file.bin", "size": float64(5000)})
+	err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{"name": "file.bin", "size": float64(5000)}, nil)
 	require.NoError(t, err)
 
 	// Receiver requests bytes starting at offset 1000
@@ -724,7 +724,7 @@ func TestRelayServer_HTTPRangeHeaderParsingAnd206Responses(t *testing.T) {
 		err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{
 			"name": "sample.bin",
 			"size": float64(totalSize),
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		uploadErrCh := make(chan error, 1)
@@ -830,7 +830,7 @@ func TestRelayServer_HTTPRangeHeaderParsingAnd206Responses(t *testing.T) {
 		err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{
 			"name": "sample.bin",
 			"size": float64(totalSize),
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
@@ -853,7 +853,7 @@ func TestRelayServer_HTTPRangeHeaderParsingAnd206Responses(t *testing.T) {
 		err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{
 			"name": "sample.bin",
 			"size": float64(totalSize),
-		})
+		}, nil)
 		require.NoError(t, err)
 
 		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+sessID, nil)
@@ -884,7 +884,7 @@ func TestRelayServer_TransferStreamSeekingOnUnseekedUpload(t *testing.T) {
 	err = client.PushState(context.Background(), "offer", nil, map[string]interface{}{
 		"name": "stream_seek.txt",
 		"size": float64(totalSize),
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Receiver requests range starting at offset 10 (bytes=10-)
