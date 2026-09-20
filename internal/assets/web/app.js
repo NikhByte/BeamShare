@@ -490,29 +490,36 @@ function setMode(mode, label) {
 // ── Service Worker Pipe ───────────────────────────────────────────────────────
 async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator)) return null;
-  
-  let reg = await navigator.serviceWorker.ready;
-  let sw = reg.active || navigator.serviceWorker.controller;
-  if (!sw) return null;
 
-  const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
-  const channel = new MessageChannel();
-  const port = channel.port1;
-  
-  sw.postMessage({
-    type: 'INIT_PORT',
-    url: swUrl,
-    filename: fileMeta.name,
-    size: fileMeta.size,
-    mime: fileMeta.mime
-  }, [channel.port2]);
+  try {
+    const swReady = navigator.serviceWorker.ready;
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
+    const reg = await Promise.race([swReady, timeout]);
+    let sw = reg && (reg.active || navigator.serviceWorker.controller);
+    if (!sw) return null;
 
-  const iframe = document.createElement('iframe');
-  iframe.hidden = true;
-  iframe.src = swUrl;
-  document.body.appendChild(iframe);
-  
-  return port;
+    const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
+    const channel = new MessageChannel();
+    const port = channel.port1;
+
+    sw.postMessage({
+      type: 'INIT_PORT',
+      url: swUrl,
+      filename: fileMeta.name,
+      size: fileMeta.size,
+      mime: fileMeta.mime
+    }, [channel.port2]);
+
+    const iframe = document.createElement('iframe');
+    iframe.hidden = true;
+    iframe.src = swUrl;
+    document.body.appendChild(iframe);
+
+    return port;
+  } catch (err) {
+    console.warn("Failed to get SW pipe, falling back to storage/RAM:", err);
+    return null;
+  }
 }
 
 const RAM_WARNING_THRESHOLD = 500 * 1024 * 1024; // 500 MB
@@ -959,8 +966,8 @@ async function startHTTPDownload() {
       if (done) break;
     }
 
-    if (totalBytes > 0 && receivedBytes < totalBytes) {
-      throw new Error(`Connection closed prematurely. Received ${formatBytes(receivedBytes)} of ${formatBytes(totalBytes)}.`);
+    if (totalBytes > 0 && received < totalBytes) {
+      throw new Error(`Connection closed prematurely. Received ${formatBytes(received)} of ${formatBytes(totalBytes)}.`);
     }
 
     if (diskWritableStream) {
