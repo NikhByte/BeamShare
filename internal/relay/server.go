@@ -26,6 +26,7 @@ type DownloadRequest struct {
 type Session struct {
 	ID         string
 	Offer      string
+	IceServers []map[string]interface{}
 	Candidates []map[string]interface{}
 	Meta       map[string]interface{}
 
@@ -352,6 +353,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Offer      string                   `json:"offer"`
+		IceServers []map[string]interface{} `json:"iceServers"`
 		Candidates []map[string]interface{} `json:"candidates"`
 		Meta       map[string]interface{}   `json:"meta"`
 	}
@@ -363,6 +365,15 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	sess.mu.Lock()
 	if req.Offer != "" {
 		sess.Offer = req.Offer
+	}
+	if req.IceServers != nil {
+		sanitizedIceServers := make([]map[string]interface{}, 0, len(req.IceServers))
+		for _, s := range req.IceServers {
+			if s != nil {
+				sanitizedIceServers = append(sanitizedIceServers, s)
+			}
+		}
+		sess.IceServers = sanitizedIceServers
 	}
 	if req.Candidates != nil {
 		sanitizedCandidates := make([]map[string]interface{}, 0, len(req.Candidates))
@@ -688,9 +699,10 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(map[string]string{
-		"sdp":  sess.Offer,
-		"type": "offer",
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"sdp":        sess.Offer,
+		"type":       "offer",
+		"iceServers": sess.IceServers,
 	})
 }
 

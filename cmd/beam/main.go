@@ -333,12 +333,21 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 						"sdpMLineIndex": c.SDPMLineIndex,
 					})
 				}
+				var mIceServers []map[string]interface{}
+				for _, srv := range iceServers {
+					mIceServers = append(mIceServers, map[string]interface{}{
+						"urls":       srv.URLs,
+						"username":   srv.Username,
+						"credential": srv.Credential,
+					})
+				}
+
 				pushCtx, pushCancel := context.WithTimeout(mainCtx, 10*time.Second)
 				errPush := relClient.PushState(pushCtx, session.RawOffer(), mCands, map[string]interface{}{
 					"name": fileName,
 					"size": fileSize,
 					"mime": "application/octet-stream",
-				})
+				}, mIceServers)
 				pushCancel()
 				if errPush != nil {
 					fmt.Fprintf(os.Stderr, "  warn: Relay PushState failed (%v)\n", errPush)

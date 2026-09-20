@@ -281,7 +281,7 @@ func TestEndToEndRelayLongPollingAndEncryptedStream(t *testing.T) {
 	candidates := []map[string]interface{}{{"candidate": "cand-1"}}
 	meta := map[string]interface{}{"fileName": "test.txt", "fileSize": 100}
 
-	err = relayClient.PushState(context.Background(), "sample-offer-sdp", candidates, meta)
+	err = relayClient.PushState(context.Background(), "sample-offer-sdp", candidates, meta, nil)
 	require.NoError(t, err)
 
 	// Verify relay session state stored in server
