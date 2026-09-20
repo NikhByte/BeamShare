@@ -106,10 +106,11 @@ func (c *Client) PushState(ctx context.Context, offer string, candidates []map[s
 }
 
 type PollCommand struct {
-	Action string `json:"action"`
-	Answer string `json:"answer,omitempty"`
-	Offset int64  `json:"offset,omitempty"`
-	Range  string `json:"range,omitempty"`
+	Action   string `json:"action"`
+	Answer   string `json:"answer,omitempty"`
+	Offset   int64  `json:"offset,omitempty"`
+	Range    string `json:"range,omitempty"`
+	Filename string `json:"filename,omitempty"`
 }
 
 func (c *Client) Poll(ctx context.Context) (*PollCommand, error) {
@@ -192,4 +193,19 @@ func (c *Client) UploadReaderAtOffset(ctx context.Context, reader io.Reader, off
 		return fmt.Errorf("relay upload failed with status: %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func (c *Client) DownloadData() (io.ReadCloser, error) {
+	resp, err := c.HTTP.Get(fmt.Sprintf("%s/relay/pull?session=%s", c.BaseURL, c.SessionID))
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for non-200 status code
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("HTTP error: %d", resp.StatusCode)
+	}
+
+	return resp.Body, nil
 }
