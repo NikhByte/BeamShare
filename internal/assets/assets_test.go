@@ -117,3 +117,11 @@ func TestRobotsTxtAndSitemapHandlers_XForwardedHost(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rrSitemap.Code)
 	assert.Contains(t, rrSitemap.Body.String(), "<loc>http://forwarded.example.com/</loc>")
 }
+
+func TestNotFoundHTML(t *testing.T) {
+	html := NotFoundHTML()
+	assert.NotEmpty(t, html)
+	assert.Contains(t, html, "404")
+	assert.Contains(t, html, "Page Not Found")
+}
+

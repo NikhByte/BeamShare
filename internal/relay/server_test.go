@@ -210,3 +210,18 @@ func TestServer_DownloadQueueCleanupOnSessionExpiration(t *testing.T) {
 
 	assert.Equal(t, 0, sess.DownloadQueueLen())
 }
+
+func TestServer_NotFoundHandler(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	req := httptest.NewRequest(http.MethodGet, "/unknown-page", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+	assert.Equal(t, "text/html; charset=utf-8", rr.Header().Get("Content-Type"))
+	assert.Contains(t, rr.Body.String(), "404")
+	assert.Contains(t, rr.Body.String(), "Page Not Found")
+}
+
