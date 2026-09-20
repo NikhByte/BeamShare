@@ -13,6 +13,9 @@ import (
 //go:embed web/index.html
 var indexHTML string
 
+//go:embed web/404.html
+var notFoundHTML string
+
 //go:embed web/style.css
 var styleCSS string
 
@@ -34,6 +37,11 @@ var (
 // IndexHTML returns the full content of the receiver web page.
 func IndexHTML() string {
 	return indexHTML
+}
+
+// NotFoundHTML returns the 404 page content.
+func NotFoundHTML() string {
+	return notFoundHTML
 }
 
 // ServiceWorkerJS returns the content of the service worker file.
