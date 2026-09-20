@@ -5,10 +5,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"fmt"
 	"encoding/json"
-	"net/http"
+	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -517,15 +517,23 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									return
 								}
 
+								bufferedAmountLowChan := make(chan struct{}, 1)
+								dc.SetBufferedAmountLowThreshold(512 * 1024)
+								dc.OnBufferedAmountLow(func() {
+									select {
+									case bufferedAmountLowChan <- struct{}{}:
+									default:
+									}
+								})
+
 								buffer := make([]byte, 64*1024) // 64KB chunk size
 								totalSent := offset
 								start := time.Now()
 
 								for {
-									// Backpressure check: if buffered amount > 1MB, wait
+									// Backpressure check: wait if buffered amount > 1MB
 									if dc.BufferedAmount() > 1024*1024 {
-										time.Sleep(10 * time.Millisecond)
-										continue
+										<-bufferedAmountLowChan
 									}
 
 									n, err := file.Read(buffer)
@@ -548,8 +556,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								}
 
 								// Wait for buffer to clear before sending EOF
-								for dc.BufferedAmount() > 0 {
-									time.Sleep(10 * time.Millisecond)
+								dc.SetBufferedAmountLowThreshold(0)
+								if dc.BufferedAmount() > 0 {
+									<-bufferedAmountLowChan
 								}
 								dc.SendText("EOF")
 
