@@ -29,7 +29,7 @@ func TestParseFlags(t *testing.T) {
 	if iceServers[1].Username != "user" || iceServers[1].Credential != "pass" {
 		t.Fatalf("expected turn auth, got user=%v pass=%v", iceServers[1].Username, iceServers[1].Credential)
 	}
-	
+
 	if discoveryTimeout != 15*1000*1000*1000 { // 15 seconds
 		t.Fatalf("expected discovery timeout 15s, got %v", discoveryTimeout)
 	}

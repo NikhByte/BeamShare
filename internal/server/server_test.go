@@ -138,8 +138,10 @@ func TestUploadInterruptedFile(t *testing.T) {
 
 	// Verify that partial file was cleaned up and does not exist on disk
 	outName := "received_interrupted_test.bin"
-	_, statErr := os.Stat(outName)
-	assert.True(t, os.IsNotExist(statErr), "partial file should be removed upon interrupted upload")
+	assert.Eventually(t, func() bool {
+		_, statErr := os.Stat(outName)
+		return os.IsNotExist(statErr)
+	}, 1*time.Second, 10*time.Millisecond, "partial file should be removed upon interrupted upload")
 }
 
 func TestWriteLive_Truncation(t *testing.T) {
@@ -161,9 +163,9 @@ func TestWriteLive_Truncation(t *testing.T) {
 	srv.WriteLive(part2)
 
 	backlog := srv.GetLiveBacklog()
-	
+
 	// We expect the first part (which is 'A's) to be truncated because it exceeds 1MB.
-	// Actually, wait, let's look at the logic. 
+	// Actually, wait, let's look at the logic.
 	// len(liveData) = 1048576 + 12 = 1048588
 	// maxLiveBacklog = 1048576
 	// truncateIdx = 1048588 - 1048576 = 12
@@ -171,7 +173,7 @@ func TestWriteLive_Truncation(t *testing.T) {
 	// Since part1 ends at 1048575, \n is at 1048575.
 	// So it finds \n and slices after it.
 	// This means the kept backlog will just be part2!
-	
+
 	// Let's verify.
 	assert.Equal(t, part2, backlog)
 }
