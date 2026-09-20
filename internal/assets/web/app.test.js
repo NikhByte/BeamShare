@@ -145,6 +145,32 @@ describe('Gaze Web Receiver Test Suite', () => {
     assert.equal(viewer.getText().includes("Log line 1"), true);
   });
 
+  test('Virtual Log Viewer ANSI Stripping', () => {
+    const viewer = new app.VirtualLogViewer('.terminal-body', 1000);
+    viewer.append("\x1b[32mSuccess\x1b[0m\n\x1b[31mError\x1b[0m\n");
+
+    assert.equal(viewer.lines.length, 2);
+    assert.equal(viewer.lines[0], "\x1b[32mSuccess\x1b[0m");
+    assert.equal(app.stripAnsi(viewer.lines[0]), "Success");
+    assert.equal(viewer.getText().includes("Success\nError"), true);
+  });
+
+  test('Virtual Log Viewer Filtering', () => {
+    const viewer = new app.VirtualLogViewer('.terminal-body', 1000);
+    viewer.append("apple\nbanana\ncherry\n");
+
+    assert.equal(viewer.lines.length, 3);
+
+    viewer.setFilter("ban");
+    assert.equal(viewer.filteredIndices.length, 1);
+    assert.equal(viewer.filteredIndices[0], 1); // index of "banana"
+
+    // Test that new appends are filtered correctly
+    viewer.append("bandana\ndate\n");
+    assert.equal(viewer.filteredIndices.length, 2);
+    assert.equal(viewer.filteredIndices[1], 3); // index of "bandana"
+  });
+
   test('EventSource Live Stream Parsing & Handlers', async () => {
     let mockSourceInstance = null;
 

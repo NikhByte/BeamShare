@@ -709,6 +709,25 @@ body {
   font-weight: 500;
 }
 
+.terminal-search-input {
+  font-family: 'Geist Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--text-hi);
+  background: transparent;
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  width: 120px;
+  transition: all 0.15s;
+}
+.terminal-search-input:focus {
+  outline: none;
+  border-color: var(--zinc-600);
+}
+.terminal-search-input::placeholder {
+  color: var(--subtle);
+}
+
 .terminal-controls {
   display: flex;
   gap: 0.5rem;
