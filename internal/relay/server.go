@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -154,6 +155,11 @@ func (s *Session) IsPipeReady() bool {
 	return s.DataPipeR != nil && s.DataPipeW != nil
 }
 
+type failedAttempt struct {
+	count     int
+	firstSeen time.Time
+}
+
 type Server struct {
 	sessions           map[string]*Session
 	sessionTTL         time.Duration
@@ -163,6 +169,8 @@ type Server struct {
 	wg                 sync.WaitGroup
 	SessionIDGenerator func() string
 	mu                 sync.Mutex
+	failedAttemptsMu   sync.Mutex
+	failedAttempts     map[string]*failedAttempt
 }
 
 func NewServer() *Server {
@@ -172,6 +180,7 @@ func NewServer() *Server {
 func NewServerWithConfig(ttl, cleanupInterval time.Duration) *Server {
 	s := &Server{
 		sessions:        make(map[string]*Session),
+		failedAttempts:  make(map[string]*failedAttempt),
 		sessionTTL:      ttl,
 		cleanupInterval: cleanupInterval,
 		stopChan:        make(chan struct{}),
@@ -255,6 +264,62 @@ func (s *Server) getSession(id string) *Session {
 	return s.GetSession(id)
 }
 
+func (s *Server) checkFailedAttempts(ip string) bool {
+	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	if s.failedAttempts == nil {
+		s.failedAttempts = make(map[string]*failedAttempt)
+		return true
+	}
+	fa, ok := s.failedAttempts[ip]
+	if !ok {
+		return true
+	}
+	if time.Since(fa.firstSeen) > time.Minute {
+		delete(s.failedAttempts, ip)
+		return true
+	}
+	return fa.count < 30
+}
+
+func (s *Server) recordFailedAttempt(ip string) {
+	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	if s.failedAttempts == nil {
+		s.failedAttempts = make(map[string]*failedAttempt)
+	}
+	fa, ok := s.failedAttempts[ip]
+	if !ok || time.Since(fa.firstSeen) > time.Minute {
+		s.failedAttempts[ip] = &failedAttempt{count: 1, firstSeen: time.Now()}
+		return
+	}
+	fa.count++
+}
+
+func (s *Server) getSessionFromQuery(w http.ResponseWriter, r *http.Request, key string) *Session {
+	ip := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+	if !s.checkFailedAttempts(ip) {
+		http.Error(w, "rate limit exceeded: too many failed session lookups", http.StatusTooManyRequests)
+		return nil
+	}
+	id := r.URL.Query().Get(key)
+	if id == "" && key == "s" {
+		id = r.URL.Query().Get("session")
+	} else if id == "" && key == "session" {
+		id = r.URL.Query().Get("s")
+	}
+	sess := s.getSession(id)
+	if sess == nil {
+		s.recordFailedAttempt(ip)
+		http.Error(w, "not found", http.StatusNotFound)
+		return nil
+	}
+	return sess
+}
+
 func (s *Server) createSession() *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -276,11 +341,10 @@ func (s *Server) createSession() *Session {
 			id = s.SessionIDGenerator()
 		} else {
 			b := make([]byte, 16)
-			if _, err := rand.Read(b); err != nil {
-				id = fmt.Sprintf("%x", time.Now().UnixNano())
-			} else {
-				id = hex.EncodeToString(b)
+			if _, err := io.ReadFull(rand.Reader, b); err != nil {
+				panic("crypto/rand is unavailable: " + err.Error())
 			}
+			id = hex.EncodeToString(b)
 		}
 		if _, exists := s.sessions[id]; !exists {
 			break
@@ -345,12 +409,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	sess := s.getSession(r.URL.Query().Get("session"))
+	sess := s.getSessionFromQuery(w, r, "session")
 	if sess == nil {
-		http.Error(w, "not found", 404)
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
 	var req struct {
 		Offer      string                   `json:"offer"`
 		IceServers []map[string]interface{} `json:"iceServers"`
@@ -424,9 +488,8 @@ func respondWithDownload(w http.ResponseWriter, dlReq DownloadRequest) {
 }
 
 func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
-	sess := s.getSession(r.URL.Query().Get("session"))
+	sess := s.getSessionFromQuery(w, r, "session")
 	if sess == nil {
-		http.Error(w, "not found", 404)
 		return
 	}
 
@@ -465,9 +528,8 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
-	sess := s.getSession(r.URL.Query().Get("session"))
+	sess := s.getSessionFromQuery(w, r, "session")
 	if sess == nil {
-		http.Error(w, "not found", 404)
 		return
 	}
 
@@ -683,9 +745,8 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
-	sess := s.getSession(r.URL.Query().Get("s"))
+	sess := s.getSessionFromQuery(w, r, "s")
 	if sess == nil {
-		http.Error(w, "not found", 404)
 		return
 	}
 	sess.mu.Lock()
@@ -703,9 +764,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
-	sess := s.getSession(r.URL.Query().Get("s"))
+	sess := s.getSessionFromQuery(w, r, "s")
 	if sess == nil {
-		http.Error(w, "not found", 404)
 		return
 	}
 	sess.mu.Lock()
@@ -726,12 +786,12 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess := s.getSession(r.URL.Query().Get("s"))
+	sess := s.getSessionFromQuery(w, r, "s")
 	if sess == nil {
-		http.Error(w, "not found", 404)
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1*1024*1024)
 	body, _ := io.ReadAll(r.Body)
 	select {
 	case sess.AnswerReady <- string(body):
@@ -742,9 +802,8 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCandidates(w http.ResponseWriter, r *http.Request) {
-	sess := s.getSession(r.URL.Query().Get("s"))
+	sess := s.getSessionFromQuery(w, r, "s")
 	if sess == nil {
-		http.Error(w, "not found", 404)
 		return
 	}
 	sess.mu.Lock()
@@ -758,9 +817,8 @@ func (s *Server) handleCandidates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	sess := s.getSession(r.URL.Query().Get("s"))
+	sess := s.getSessionFromQuery(w, r, "s")
 	if sess == nil {
-		http.Error(w, "not found", 404)
 		return
 	}
 

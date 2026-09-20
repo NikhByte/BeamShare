@@ -225,3 +225,40 @@ func TestServer_NotFoundHandler(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "Page Not Found")
 }
 
+func TestServer_SessionIDEntropyAndUniqueness(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	seen := make(map[string]bool)
+	for i := 0; i < 50; i++ {
+		sess := srv.createSession()
+		require.NotNil(t, sess)
+		// 16 bytes = 32 hex characters
+		assert.Equal(t, 32, len(sess.ID), "Session ID should be 32 hex characters (128-bit entropy)")
+		assert.False(t, seen[sess.ID], "Session IDs must be distinct and non-repeating")
+		seen[sess.ID] = true
+	}
+}
+
+func TestServer_SessionEnumerationRateLimited(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	// Simulate repeated failed session lookups from the same IP
+	rateLimited := false
+	for i := 0; i < 40; i++ {
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/signal/offer?s=nonexistent_%d", i), nil)
+		req.RemoteAddr = "192.0.2.1:12345"
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		if rr.Code == http.StatusTooManyRequests {
+			rateLimited = true
+			break
+		}
+	}
+
+	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+
