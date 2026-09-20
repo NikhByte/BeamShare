@@ -438,11 +438,34 @@ function storeChunkIDB(chunk) {
   });
 }
 
-function getAllChunksIDB() {
+function getAllChunksIDB(mimeType = 'application/octet-stream') {
   return new Promise((resolve, reject) => {
     const tx = idb.transaction(IDB_STORE, 'readonly');
-    const req = tx.objectStore(IDB_STORE).getAll();
-    req.onsuccess = (e) => resolve(e.target.result);
+    const req = tx.objectStore(IDB_STORE).openCursor();
+    const blobs = [];
+    let currentBatch = [];
+    let currentBatchSize = 0;
+    const BATCH_LIMIT = 10 * 1024 * 1024; // 10 MB
+
+    req.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) {
+        currentBatch.push(cursor.value);
+        currentBatchSize += cursor.value.byteLength || cursor.value.size || cursor.value.length || 0;
+
+        if (currentBatchSize >= BATCH_LIMIT) {
+          blobs.push(new Blob(currentBatch));
+          currentBatch = [];
+          currentBatchSize = 0;
+        }
+        cursor.continue();
+      } else {
+        if (currentBatch.length > 0) {
+          blobs.push(new Blob(currentBatch));
+        }
+        resolve(new Blob(blobs, { type: mimeType }));
+      }
+    };
     req.onerror = (e) => reject(e.target.error);
   });
 }
@@ -611,8 +634,7 @@ function init() {
 
   document.getElementById('btn-terminal-download')?.addEventListener('click', async () => {
     if (useIndexedDB) {
-      const chunks = await getAllChunksIDB();
-      const blob = new Blob(chunks, { type: 'text/plain;charset=utf-8' });
+      const blob = await getAllChunksIDB('text/plain;charset=utf-8');
       triggerSave(blob, currentFile ? currentFile.name : 'stream.log');
     } else {
       if (virtualViewer) {
@@ -981,12 +1003,14 @@ async function startHTTPDownload() {
     } else if (swPipePort) {
       swPipePort.postMessage('EOF');
     } else {
-      let finalChunks = receivedChunks;
+      let finalBlob;
       if (useIndexedDB) {
-        finalChunks = await getAllChunksIDB();
+        finalBlob = await getAllChunksIDB(currentFile.mime);
         await clearIDB();
+      } else {
+        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
       }
-      triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
+      triggerSave(finalBlob, currentFile.name);
     }
 
     let modeDesc = diskWritableStream ? (useOPFS ? 'LAN HTTP (OPFS)' : 'LAN HTTP (Direct Disk)') : (swPipePort ? 'LAN HTTP (SW Pipe)' : (useIndexedDB ? 'LAN HTTP (IndexedDB)' : 'LAN HTTP (RAM Blob)'));
@@ -1335,12 +1359,14 @@ async function startWebRTC() {
                 } else if (swPipePort) {
                   swPipePort.postMessage("EOF");
                 } else {
-                  let finalChunks = receivedChunks;
+                  let finalBlob;
                   if (useIndexedDB) {
-                    finalChunks = await getAllChunksIDB();
+                    finalBlob = await getAllChunksIDB(currentFile.mime);
                     await clearIDB();
+                  } else {
+                    finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
                   }
-                  triggerSave(new Blob(finalChunks, { type: currentFile.mime }), currentFile.name);
+                  triggerSave(finalBlob, currentFile.name);
                 }
                 resolve();
               }).catch((err) => {
