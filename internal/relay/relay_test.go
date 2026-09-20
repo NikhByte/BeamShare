@@ -935,4 +935,50 @@ func TestRelayServer_TransferStreamSeekingOnUnseekedUpload(t *testing.T) {
 	}
 }
 
+func TestRelayClient_ExponentialBackoffCalculation(t *testing.T) {
+	cfg := DefaultBackoffConfig()
+	assert.Equal(t, 1*time.Second, cfg.BaseDelay)
+	assert.Equal(t, 30*time.Second, cfg.MaxDelay)
+	assert.Equal(t, 2.0, cfg.Factor)
+
+	// Attempt 0 -> BaseDelay (1s)
+	assert.Equal(t, 1*time.Second, cfg.CalculateBackoff(0))
+	assert.Equal(t, 1*time.Second, cfg.CalculateBackoff(-1))
+
+	// Attempt 1 -> 2s
+	assert.Equal(t, 2*time.Second, cfg.CalculateBackoff(1))
+
+	// Attempt 2 -> 4s
+	assert.Equal(t, 4*time.Second, cfg.CalculateBackoff(2))
+
+	// Attempt 3 -> 8s
+	assert.Equal(t, 8*time.Second, cfg.CalculateBackoff(3))
+
+	// Attempt 4 -> 16s
+	assert.Equal(t, 16*time.Second, cfg.CalculateBackoff(4))
+
+	// Attempt 5 -> 30s (capped at MaxDelay)
+	assert.Equal(t, 30*time.Second, cfg.CalculateBackoff(5))
+
+	// High attempt -> capped at MaxDelay
+	assert.Equal(t, 30*time.Second, cfg.CalculateBackoff(10))
+	assert.Equal(t, 30*time.Second, cfg.CalculateBackoff(100))
+}
+
+func TestRelayClient_ExponentialBackoffCustomConfig(t *testing.T) {
+	custom := BackoffConfig{
+		BaseDelay: 500 * time.Millisecond,
+		MaxDelay:  5 * time.Second,
+		Factor:    1.5,
+	}
+
+	assert.Equal(t, 500*time.Millisecond, custom.CalculateBackoff(0))
+	assert.Equal(t, 750*time.Millisecond, custom.CalculateBackoff(1))
+	assert.Equal(t, 1125*time.Millisecond, custom.CalculateBackoff(2))
+
+	// Ensure it respects max delay cap
+	assert.Equal(t, 5*time.Second, custom.CalculateBackoff(20))
+}
+
+
 

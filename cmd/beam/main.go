@@ -353,8 +353,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					fmt.Fprintf(os.Stderr, "  warn: Relay PushState failed (%v)\n", errPush)
 				}
 
-				// Poll for answer and download commands
+				// Poll for answer and download commands with exponential backoff
 				go func() {
+					retryAttempt := 0
+					backoff := relay.DefaultBackoffConfig()
 					for {
 						select {
 						case <-mainCtx.Done():
@@ -366,9 +368,16 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if mainCtx.Err() != nil {
 								return
 							}
-							time.Sleep(1 * time.Second)
+							delay := backoff.CalculateBackoff(retryAttempt)
+							retryAttempt++
+							select {
+							case <-time.After(delay):
+							case <-mainCtx.Done():
+								return
+							}
 							continue
 						}
+						retryAttempt = 0
 						if cmd.Action == "answer" {
 							session.ProvideAnswer(cmd.Answer)
 						} else if cmd.Action == "download" {

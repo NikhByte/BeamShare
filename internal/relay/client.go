@@ -6,10 +6,46 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"time"
 )
+
+// BackoffConfig defines exponential backoff retry parameters for relay client reconnections.
+type BackoffConfig struct {
+	BaseDelay time.Duration
+	MaxDelay  time.Duration
+	Factor    float64
+}
+
+// DefaultBackoffConfig provides standard backoff defaults (1s base, 30s max, 2.0x factor).
+func DefaultBackoffConfig() BackoffConfig {
+	return BackoffConfig{
+		BaseDelay: 1 * time.Second,
+		MaxDelay:  30 * time.Second,
+		Factor:    2.0,
+	}
+}
+
+// CalculateBackoff computes the exponential backoff duration for a given retry attempt (0-indexed).
+// It ensures that delays increase exponentially and never exceed MaxDelay.
+func (b BackoffConfig) CalculateBackoff(attempt int) time.Duration {
+	if attempt <= 0 {
+		return b.BaseDelay
+	}
+	base := float64(b.BaseDelay)
+	factor := b.Factor
+	if factor <= 1.0 {
+		factor = 2.0
+	}
+
+	delay := base * math.Pow(factor, float64(attempt))
+	if delay > float64(b.MaxDelay) || delay <= 0 {
+		return b.MaxDelay
+	}
+	return time.Duration(delay)
+}
 
 // HTTPClient defines an abstract HTTP transport interface for relay operations.
 type HTTPClient interface {
