@@ -537,4 +537,19 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('getIceServers extracts TURN server and credentials from URL parameters during embedded offer handling', () => {
+    // Mock location with turn query parameters
+    dom.reconfigure({
+      url: 'http://localhost:8080/?mode=webrtc&turn_server=turn%3Aturn.example.com%3A3478&turn_username=alice&turn_credential=secret'
+    });
+
+    const offer = { type: 'offer', sdp: 'v=0...', iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    const servers = app.getIceServers(offer);
+
+    assert.equal(servers.length, 1);
+    assert.deepEqual(servers[0].urls, ['turn:turn.example.com:3478']);
+    assert.equal(servers[0].username, 'alice');
+    assert.equal(servers[0].credential, 'secret');
+  });
 });
