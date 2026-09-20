@@ -635,7 +635,7 @@ function getAllChunksIDB(mimeType = 'application/octet-stream') {
 }
 
 // ── State machine ─────────────────────────────────────────────────────────────
-const STATES = ['loading', 'ready', 'webrtc', 'downloading', 'livepipe', 'done', 'error', 'send-home', 'send-ready', 'send-sharing'];
+const STATES = ['receive-home', 'loading', 'ready', 'webrtc', 'downloading', 'livepipe', 'done', 'error', 'send-home', 'send-ready', 'send-sharing'];
 
 function setState(name) {
   STATES.forEach((s) => {
@@ -750,6 +750,89 @@ function checkRamWarning(size) {
   });
 }
 
+// ── QR Scanning ───────────────────────────────────────────────────────────────
+let qrStream = null;
+let qrScanFrame = null;
+let barcodeDetector = null;
+
+async function startQRScanner() {
+  const modal = document.getElementById('qr-scan-modal');
+  const video = document.getElementById('qr-video');
+  const errorDiv = document.getElementById('qr-scan-error');
+
+  if (!modal || !video || !errorDiv) return;
+
+  modal.classList.remove('hidden');
+  errorDiv.classList.add('hidden');
+
+  if (!('BarcodeDetector' in window)) {
+    errorDiv.textContent = "QR scanning is not supported by your browser.";
+    errorDiv.classList.remove('hidden');
+    return;
+  }
+
+  if (!barcodeDetector) {
+    try {
+        barcodeDetector = new window.BarcodeDetector({ formats: ['qr_code'] });
+    } catch(err) {
+        errorDiv.textContent = "QR scanning is not supported by your browser.";
+        errorDiv.classList.remove('hidden');
+        return;
+    }
+  }
+
+  try {
+    qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    video.srcObject = qrStream;
+
+    video.onloadedmetadata = () => {
+      video.play();
+      scanQRCode();
+    };
+  } catch (err) {
+    console.error("Camera error:", err);
+    errorDiv.textContent = "Camera access denied or unavailable.";
+    errorDiv.classList.remove('hidden');
+  }
+}
+
+function stopQRScanner() {
+  const modal = document.getElementById('qr-scan-modal');
+  if (modal) modal.classList.add('hidden');
+
+  if (qrScanFrame) {
+    cancelAnimationFrame(qrScanFrame);
+    qrScanFrame = null;
+  }
+
+  if (qrStream) {
+    qrStream.getTracks().forEach(track => track.stop());
+    qrStream = null;
+  }
+
+  const video = document.getElementById('qr-video');
+  if (video) video.srcObject = null;
+}
+
+async function scanQRCode() {
+  const video = document.getElementById('qr-video');
+  if (!video || !qrStream) return;
+
+  try {
+    const barcodes = await barcodeDetector.detect(video);
+    if (barcodes.length > 0) {
+      const url = barcodes[0].rawValue;
+      stopQRScanner();
+      window.location.href = url;
+      return;
+    }
+  } catch (err) {
+    // Ignore frame errors, continue scanning
+  }
+
+  qrScanFrame = requestAnimationFrame(scanQRCode);
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 function init() {
   if ('serviceWorker' in navigator) {
@@ -771,9 +854,11 @@ function init() {
     setTimeout(bootstrap, 400);
   });
   document.getElementById('btn-again')?.addEventListener('click', () => {
-    resetState();
-    setTimeout(bootstrap, 400);
+    window.location.href = window.location.pathname; // strip query params to go to receive-home
   });
+
+  document.getElementById('btn-scan-qr')?.addEventListener('click', startQRScanner);
+  document.getElementById('btn-qr-cancel')?.addEventListener('click', stopQRScanner);
 
   document.getElementById('btn-copy-share-url')?.addEventListener('click', () => {
     if (currentShareURL) {
@@ -923,9 +1008,8 @@ async function bootstrap() {
   }
 
   if (!localURL && !sessionID) {
-    if (errorLabel) errorLabel.textContent = "Gaze is ready";
-    showError("No active transfer session. Run 'beam send <file>' on the sending device and open the generated link or scan the QR code to receive.");
-    if (retryBtn) retryBtn.classList.add('hidden');
+    setState('receive-home');
+    setMode('ready', 'Gaze is ready');
     return;
   }
 
