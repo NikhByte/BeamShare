@@ -1456,8 +1456,11 @@ async function handleUploadFile(e) {
         reader.readAsArrayBuffer(chunkBlob);
       });
 
-      while (webrtcDataChannel.bufferedAmount > 1024 * 1024) {
-        await new Promise(resolve => setTimeout(resolve, 10));
+      webrtcDataChannel.bufferedAmountLowThreshold = 512 * 1024;
+      if (webrtcDataChannel.bufferedAmount > 1024 * 1024) {
+        await new Promise(resolve => {
+          webrtcDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
+        });
       }
       webrtcDataChannel.send(chunkBuffer);
       offset += chunkBuffer.byteLength;
@@ -1467,8 +1470,11 @@ async function handleUploadFile(e) {
       updateSpeed(offset);
     }
 
-    while (webrtcDataChannel.bufferedAmount > 0) {
-      await new Promise(resolve => setTimeout(resolve, 10));
+    webrtcDataChannel.bufferedAmountLowThreshold = 0;
+    if (webrtcDataChannel.bufferedAmount > 0) {
+      await new Promise(resolve => {
+        webrtcDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
+      });
     }
     webrtcDataChannel.send("UPLOAD_EOF");
     showDone(file.name, file.size, "WebRTC P2P Upload");
@@ -1850,9 +1856,16 @@ async function streamFileToDataChannel(initialOffset) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
+    senderDataChannel.bufferedAmountLowThreshold = 512 * 1024;
     while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
       if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      await new Promise(resolve => setTimeout(resolve, 10));
+      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
+        await new Promise(resolve => {
+          senderDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
+        });
+      } else if (senderPaused) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
     }
 
     senderDataChannel.send(chunkBuffer);
@@ -1871,8 +1884,11 @@ async function streamFileToDataChannel(initialOffset) {
 
   if (senderAborted) return;
 
-  while (senderDataChannel.bufferedAmount > 0) {
-    await new Promise(resolve => setTimeout(resolve, 10));
+  senderDataChannel.bufferedAmountLowThreshold = 0;
+  if (senderDataChannel.bufferedAmount > 0) {
+    await new Promise(resolve => {
+      senderDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
+    });
   }
   senderDataChannel.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
