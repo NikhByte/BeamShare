@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Beamshare — Documentation</title>
+  <meta name="description" content="Documentation for Beamshare features, architecture, and security." />
+  <meta property="og:title" content="Beamshare — Documentation" />
+  <meta property="og:description" content="Documentation for Beamshare features, architecture, and security." />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Beamshare" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebPage",
+      "name": "Beamshare Documentation",
+      "url": "https://beamshare.com/docs",
+      "description": "Documentation for Beamshare features, architecture, and security."
+    }
+  </script>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1>Beamshare Documentation</h1>
+      <nav>
+        <a href="/">Receiver</a>
+        <a href="/docs">Docs</a>
+        <a href="/cli">CLI Guide</a>
+      </nav>
+    </header>
+
+    <main>
+      <section>
+        <h2>Features</h2>
+        <ul>
+          <li><strong>Peer-to-peer file transfer</strong>: Transfer files directly between devices without going through a central server.</li>
+          <li><strong>Optical QR Pairing</strong>: Easily pair devices by scanning a QR code.</li>
+          <li><strong>Zero-cloud End-to-End Encryption</strong>: All transfers are encrypted end-to-end, ensuring your data remains private and secure.</li>
+          <li><strong>LAN & Global Relay Fallback</strong>: Transfers occur over the local network when possible, with a global relay fallback for cross-network connections.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Installation</h2>
+        <p>To install the Beam CLI, download the binary from the latest release on our GitHub page and add it to your PATH.</p>
+        <p>Alternatively, you can build from source using Go:</p>
+        <pre><code>go install github.com/beamshare/beam/cmd/beam@latest</code></pre>
+      </section>
+
+      <section>
+        <h2>Security Architecture</h2>
+        <p>Beamshare uses WebRTC for peer-to-peer connections. Data channels are encrypted end-to-end using DTLS (Datagram Transport Layer Security). Our relay server only facilitates connection signaling and does not have access to the transferred data.</p>
+      </section>
+    </main>
+
+    <footer>
+      <p>&copy; 2024 Beamshare. All rights reserved.</p>
+    </footer>
+  </div>
+</body>
+</html>

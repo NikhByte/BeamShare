@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Beamshare — CLI Guide</title>
+  <meta name="description" content="Guide to using the Beam CLI for sending and receiving files, and live piping." />
+  <meta property="og:title" content="Beamshare — CLI Guide" />
+  <meta property="og:description" content="Guide to using the Beam CLI for sending and receiving files, and live piping." />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Beamshare" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebPage",
+      "name": "Beamshare CLI Guide",
+      "url": "https://beamshare.com/cli",
+      "description": "Guide to using the Beam CLI for sending and receiving files, and live piping."
+    }
+  </script>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1>Beamshare CLI Guide</h1>
+      <nav>
+        <a href="/">Receiver</a>
+        <a href="/docs">Docs</a>
+        <a href="/cli">CLI Guide</a>
+      </nav>
+    </header>
+
+    <main>
+      <section>
+        <h2>Sending Files</h2>
+        <p>Use the <code>beam send</code> command to share a file.</p>
+        <pre><code>beam send /path/to/your/file.txt</code></pre>
+        <p>This will generate a short phrase (e.g. "brave-eagle") and a QR code. The receiver can enter the phrase on another CLI or scan the QR code with their mobile device on the receiver website.</p>
+      </section>
+
+      <section>
+        <h2>Receiving Files</h2>
+        <p>Use the <code>beam receive</code> command to download a file sent by another user.</p>
+        <pre><code>beam receive brave-eagle</code></pre>
+      </section>
+
+      <section>
+        <h2>Live Pipe</h2>
+        <p>You can pipe data directly into Beam to share it live over the network.</p>
+        <pre><code>tar cvz . | beam send</code></pre>
+        <p>On the receiving end, you can pipe the output directly to another command:</p>
+        <pre><code>beam receive brave-eagle | tar xvz</code></pre>
+      </section>
+    </main>
+
+    <footer>
+      <p>&copy; 2024 Beamshare. All rights reserved.</p>
+    </footer>
+  </div>
+</body>
+</html>

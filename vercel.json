@@ -8,7 +8,9 @@
     { "source": "/static/pako.min.js", "destination": "/pako.min.js" },
     { "source": "/sw.js", "destination": "/sw.js" },
     { "source": "/robots.txt", "destination": "/robots.txt" },
-    { "source": "/sitemap.xml", "destination": "/sitemap.xml" }
+    { "source": "/sitemap.xml", "destination": "/sitemap.xml" },
+    { "source": "/docs", "destination": "/docs.html" },
+    { "source": "/cli", "destination": "/cli.html" }
   ],
   "headers": [
     {
