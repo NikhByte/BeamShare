@@ -1215,6 +1215,48 @@ async function fetchMetaAndShowReady() {
   }
 }
 
+function extractKeyFragment(hash) {
+  if (!hash) return null;
+  let rawHash = hash.startsWith('#') ? hash.slice(1) : hash;
+  
+  let decoded = rawHash;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch (e) {
+      break;
+    }
+  }
+
+  let match = decoded.match(/(?:^|[&?#;])k=([^&;#\s]+)/i);
+  if (!match) {
+    match = rawHash.match(/(?:^|[&?#;])k(?:=|%3d|%3D)([^&;#\s]+)/i);
+  }
+  if (!match) return null;
+
+  let keyStr = match[1];
+  try {
+    keyStr = decodeURIComponent(keyStr);
+  } catch (e) {}
+
+  keyStr = keyStr.replace(/-/g, '+').replace(/_/g, '/').replace(/\s/g, '');
+  while (keyStr.length % 4 !== 0) {
+    keyStr += '=';
+  }
+  return keyStr;
+}
+
+async function parseDecryptionKeyFromHash(hash) {
+  const b64 = extractKeyFragment(hash);
+  if (!b64) return null;
+  const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  return await crypto.subtle.importKey(
+    "raw", raw, { name: "AES-GCM" }, false, ["decrypt"]
+  );
+}
+
 async function startHTTPDownload() {
   if (!currentFile) return;
 
@@ -1302,25 +1344,14 @@ async function startHTTPDownload() {
 
     const reader = res.body.getReader();
     let received = initialOffset;
-    
     let decryptionKey = null;
     let encBuffer = new Uint8Array(0);
-    if (window.location.hash.includes('k=')) {
-      try {
-        let b64 = window.location.hash.split('k=')[1].split('&')[0];
-        b64 = decodeURIComponent(b64).replace(/-/g, '+').replace(/_/g, '/');
-        while (b64.length % 4 !== 0) {
-          b64 += '=';
-        }
-        const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-        decryptionKey = await crypto.subtle.importKey(
-          "raw", raw, { name: "AES-GCM" }, false, ["decrypt"]
-        );
-      } catch(e) {
-        console.error("Failed to import decryption key", e);
-        showError("Decryption key error: " + e.message);
-        return;
-      }
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch(e) {
+      console.error("Failed to import decryption key", e);
+      showError("Decryption key error: " + e.message);
+      return;
     }
 
     while (true) {
@@ -2518,6 +2549,8 @@ if (typeof module !== 'undefined' && module.exports) {
     get_senderEncryptionKey: () => senderEncryptionKey,
     OPFSStreamWriter,
     createOPFSWriter,
-    checkRamWarning
+    checkRamWarning,
+    extractKeyFragment,
+    parseDecryptionKeyFromHash
   };
 }

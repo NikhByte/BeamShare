@@ -484,4 +484,36 @@ describe('Gaze Web Sender Test Suite', () => {
     const resultSmall = await app.checkRamWarning(100 * 1024 * 1024); // 100 MB
     assert.equal(resultSmall, true);
   });
+
+  test('extractKeyFragment decodes standard, URL-safe, and percent-encoded keys', () => {
+    // Standard base64
+    assert.equal(app.extractKeyFragment('#k=dGVzdGtleQ=='), 'dGVzdGtleQ==');
+    // Without padding
+    assert.equal(app.extractKeyFragment('#k=dGVzdGtleQ'), 'dGVzdGtleQ==');
+    // Percent-encoded padding (%3D)
+    assert.equal(app.extractKeyFragment('#k=dGVzdGtleQ%3D%3D'), 'dGVzdGtleQ==');
+    // Percent-encoded key parameter name (#k%3D)
+    assert.equal(app.extractKeyFragment('#k%3DdGVzdGtleQ%3D%3D'), 'dGVzdGtleQ==');
+    // Double percent-encoded (%253D)
+    assert.equal(app.extractKeyFragment('#k%3DdGVzdGtleQ%253D%253D'), 'dGVzdGtleQ==');
+    // Embedded inside query params in hash
+    assert.equal(app.extractKeyFragment('#mode=webrtc&k=dGVzdGtleQ%3D%3D'), 'dGVzdGtleQ==');
+    assert.equal(app.extractKeyFragment('#mode=webrtc&k%3DdGVzdGtleQ'), 'dGVzdGtleQ==');
+    // URL-safe base64 hyphens and underscores
+    assert.equal(app.extractKeyFragment('#k=dGVzdC1rZXlfMDEyMzQ1Njc4OTA='), 'dGVzdC1rZXlfMDEyMzQ1Njc4OTA=');
+    // Missing or invalid hash
+    assert.equal(app.extractKeyFragment(''), null);
+    assert.equal(app.extractKeyFragment('#mode=webrtc'), null);
+  });
+
+  test('parseDecryptionKeyFromHash successfully imports AES-GCM CryptoKey for percent-encoded key', async () => {
+    // 32-byte key in base64: 32 bytes of 0x01
+    const raw32 = new Uint8Array(32).fill(1);
+    const b64 = Buffer.from(raw32).toString('base64');
+    const encodedHash = `#k%3D${encodeURIComponent(b64)}`;
+
+    const key = await app.parseDecryptionKeyFromHash(encodedHash);
+    assert.notEqual(key, null);
+    assert.equal(key.algorithm.name, 'AES-GCM');
+  });
 });
