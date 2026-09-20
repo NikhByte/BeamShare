@@ -456,3 +456,62 @@ func TestMinifySDPRelayCandidate(t *testing.T) {
 	sizeDiff := len(compressed) - len(compressedNoRelay)
 	assert.LessOrEqual(t, sizeDiff, 80, "Compressed SDP length increase with TURN candidate should be <= 80 bytes")
 }
+
+func BenchmarkDecompressSDP(b *testing.B) {
+	sampleSDP := "v=0\r\n" +
+		"o=- 1234567890 2 IN IP4 127.0.0.1\r\n" +
+		"s=-\r\n" +
+		"t=0 0\r\n" +
+		"a=group:BUNDLE 0\r\n" +
+		"m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" +
+		"c=IN IP4 0.0.0.0\r\n" +
+		"a=setup:actpass\r\n" +
+		"a=mid:0\r\n" +
+		"a=sctp-port:5000\r\n" +
+		"a=max-message-size:262144\r\n" +
+		"a=candidate:1 1 UDP 2122260223 192.168.1.50 54321 typ host\r\n" +
+		"a=candidate:2 1 UDP 1694498815 203.0.113.1 54322 typ srflx raddr 192.168.1.50 rport 54321\r\n" +
+		"a=candidate:3 1 UDP 84215039 198.51.100.1 54323 typ relay\r\n"
+
+	compressed, err := CompressSDP(sampleSDP)
+	if err != nil {
+		b.Fatalf("failed to compress sample SDP: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, err := DecompressSDP(compressed)
+		if err != nil {
+			b.Fatalf("decompression failed: %v", err)
+		}
+	}
+}
+
+func BenchmarkCompressSDP(b *testing.B) {
+	sampleSDP := "v=0\r\n" +
+		"o=- 1234567890 2 IN IP4 127.0.0.1\r\n" +
+		"s=-\r\n" +
+		"t=0 0\r\n" +
+		"a=group:BUNDLE 0\r\n" +
+		"m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" +
+		"c=IN IP4 0.0.0.0\r\n" +
+		"a=setup:actpass\r\n" +
+		"a=mid:0\r\n" +
+		"a=sctp-port:5000\r\n" +
+		"a=max-message-size:262144\r\n" +
+		"a=candidate:1 1 UDP 2122260223 192.168.1.50 54321 typ host\r\n" +
+		"a=candidate:2 1 UDP 1694498815 203.0.113.1 54322 typ srflx raddr 192.168.1.50 rport 54321\r\n"
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, err := CompressSDP(sampleSDP)
+		if err != nil {
+			b.Fatalf("compression failed: %v", err)
+		}
+	}
+}
+
