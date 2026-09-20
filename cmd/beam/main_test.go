@@ -1,8 +1,14 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+
 	"reflect"
 	"testing"
+	"github.com/beamshare/beam/internal/server"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -48,5 +54,61 @@ func TestBufferSizeClamping(t *testing.T) {
 	parseFlags(argsSubMin)
 	if liveBufferSize != 64*1024 {
 		t.Fatalf("expected liveBufferSize clamped to 64KB, got %d", liveBufferSize)
+	}
+}
+
+func TestDownloadFile_PlainHTTP(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+		meta := server.FileMeta{
+			Name: "test_download.txt",
+			Size: 12,
+		}
+		json.NewEncoder(w).Encode(meta)
+	})
+	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("Hello World!"))
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	defer os.Remove("received_test_download.txt")
+
+	err := downloadFile(ts.URL)
+	if err != nil {
+		t.Fatalf("downloadFile failed: %v", err)
+	}
+}
+
+func TestDownloadFile_Relay(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("s") != "session123" {
+			t.Fatalf("expected session ID 'session123', got '%s'", r.URL.Query().Get("s"))
+		}
+		meta := server.FileMeta{
+			Name: "test_download_relay.txt",
+			Size: 15,
+		}
+		json.NewEncoder(w).Encode(meta)
+	})
+	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("s") != "session123" {
+			t.Fatalf("expected session ID 'session123', got '%s'", r.URL.Query().Get("s"))
+		}
+		w.Write([]byte("Relay Data 1234"))
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	defer os.Remove("received_test_download_relay.txt")
+
+	urlWithSession := "http://example.com/?backend=" + ts.URL + "&s=session123"
+
+	err := downloadFile(urlWithSession)
+	if err != nil {
+		t.Fatalf("downloadFile failed: %v", err)
 	}
 }

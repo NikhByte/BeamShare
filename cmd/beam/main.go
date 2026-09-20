@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"encoding/json"
+	"net/http"
 	"io"
 	"net/url"
 	"os"
@@ -88,6 +90,13 @@ func main() {
 			os.Exit(1)
 		}
 		runSend(args[1], iceServers, discoveryTimeout)
+	case "receive":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "beam: 'receive' requires a connection code or URL")
+			os.Exit(1)
+		}
+		runReceive(args[1])
+		os.Exit(0)
 	case "version", "--version", "-v":
 		fmt.Printf("beam version %s\n", version)
 	case "help", "--help", "-h":
@@ -755,6 +764,7 @@ func printHelp() {
     beam send <file>     Share a file — prints URL + QR, opens WebRTC tunnel
     beam <file>          Shorthand for 'beam send <file>'
     beam [piped stdin]   Live Terminal Piping mode (Phase 5)
+    beam receive <code>  Download a file from an active Beam sender or relay session
     beam version         Print version information
     beam help            Show this help message
 
@@ -786,3 +796,123 @@ func printHelp() {
 
 func dimStr(s string) string   { return "\033[2m" + s + "\033[0m" }
 func greenStr(s string) string { return "\033[32m" + s + "\033[0m" }
+func runReceive(code string) {
+	err := downloadFile(code)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n  ❌ Download failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func downloadFile(code string) error {
+	if !strings.HasPrefix(code, "http://") && !strings.HasPrefix(code, "https://") {
+		code = "http://" + code
+	}
+	u, err := url.Parse(code)
+	if err != nil {
+		return fmt.Errorf("invalid code/URL: %w", err)
+	}
+
+	backend := u.Query().Get("backend")
+	if backend == "" {
+		backend = u.Scheme + "://" + u.Host
+	}
+	backend = strings.TrimRight(backend, "/")
+
+	s := u.Query().Get("s")
+	k := u.Fragment
+	if strings.HasPrefix(k, "k=") {
+		k = k[2:]
+	}
+
+	metaURL := backend + "/api/meta"
+	if s != "" {
+		metaURL += "?s=" + s
+	}
+
+	fmt.Printf("  %s\n", dimStr("Fetching metadata..."))
+	respMeta, err := http.Get(metaURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch metadata: %w", err)
+	}
+	defer respMeta.Body.Close()
+	if respMeta.StatusCode != http.StatusOK {
+		return fmt.Errorf("metadata request failed: HTTP %d", respMeta.StatusCode)
+	}
+
+	var meta server.FileMeta
+	if err := json.NewDecoder(respMeta.Body).Decode(&meta); err != nil {
+		return fmt.Errorf("failed to parse metadata: %w", err)
+	}
+
+	ui.PrintFileMeta(meta.Name, meta.Size)
+
+	downloadURL := backend + "/api/download"
+	if s != "" {
+		downloadURL += "?s=" + s
+	}
+
+	fmt.Printf("  %s\n", dimStr("Starting download..."))
+	respDL, err := http.Get(downloadURL)
+	if err != nil {
+		return fmt.Errorf("failed to start download: %w", err)
+	}
+	defer respDL.Body.Close()
+	if respDL.StatusCode != http.StatusOK && respDL.StatusCode != http.StatusPartialContent {
+		return fmt.Errorf("download request failed: HTTP %d", respDL.StatusCode)
+	}
+
+	var r io.Reader = respDL.Body
+	if k != "" {
+		keyBytes, err := base64.URLEncoding.DecodeString(k)
+		if err == nil && len(keyBytes) == 32 {
+			r, err = relay.NewDecryptingReader(respDL.Body, keyBytes)
+			if err != nil {
+				return fmt.Errorf("failed to initialize decryptor: %w", err)
+			}
+			fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
+		}
+	}
+
+	cleanBase := filepath.Base(filepath.Clean(meta.Name))
+	cleanBase = strings.Trim(cleanBase, "\x00./\\")
+	if cleanBase == "" {
+		cleanBase = "download.bin"
+	}
+	outName := "received_" + cleanBase
+	outFile, err := os.Create(outName)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outFile.Close()
+
+	start := time.Now()
+	totalWritten := int64(0)
+	buf := make([]byte, 64*1024)
+	for {
+		n, errRead := r.Read(buf)
+		if n > 0 {
+			nWrite, errWrite := outFile.Write(buf[:n])
+			if errWrite != nil {
+				return fmt.Errorf("write error: %w", errWrite)
+			}
+			totalWritten += int64(nWrite)
+
+			fmt.Printf("\r  %s  %s / %s  %s",
+				ui.FormatPercentage(totalWritten, meta.Size),
+				ui.FormatBytes(totalWritten),
+				ui.FormatBytes(meta.Size),
+				ui.FormatSpeed(totalWritten, time.Since(start)),
+			)
+		}
+		if errRead != nil {
+			if errRead == io.EOF {
+				break
+			}
+			return fmt.Errorf("read error: %w", errRead)
+		}
+	}
+
+	fmt.Printf("\n\n  ✅ Saved to %s\n", outName)
+	return nil
+}
