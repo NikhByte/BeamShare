@@ -76,13 +76,15 @@ func TestServer_RapidSuccessiveDownloadRequestsQueued(t *testing.T) {
 
 	sess := relayServer.getSession(sessID)
 	require.NotNil(t, sess)
-	assert.Equal(t, 1, sess.DownloadQueueLen())
+	assert.Equal(t, len(ranges), sess.DownloadQueueLen())
 
-	// Poll should yield the latest request in single-slot buffer
-	cmd, errPoll := client.Poll(testCtx)
-	require.NoError(t, errPoll)
-	assert.Equal(t, "download", cmd.Action)
-	assert.Equal(t, ranges[len(ranges)-1], cmd.Range)
+	// Long-poll 5 times and verify FIFO ordering
+	for i, expectedRange := range ranges {
+		cmd, errPoll := client.Poll(testCtx)
+		require.NoError(t, errPoll, "Poll failed at index %d", i)
+		assert.Equal(t, "download", cmd.Action)
+		assert.Equal(t, expectedRange, cmd.Range)
+	}
 
 	for _, cancel := range cancels {
 		cancel()
@@ -145,12 +147,14 @@ func TestServer_ConcurrentDownloadRequestsThreadSafety(t *testing.T) {
 
 	sess := relayServer.getSession(sessID)
 	require.NotNil(t, sess)
-	assert.Equal(t, 1, sess.DownloadQueueLen())
+	assert.Equal(t, numGoroutines, sess.DownloadQueueLen())
 
-	// Poll item
-	cmd, errPoll := client.Poll(testCtx)
-	require.NoError(t, errPoll)
-	assert.Equal(t, "download", cmd.Action)
+	// Poll all items
+	for i := 0; i < numGoroutines; i++ {
+		cmd, errPoll := client.Poll(testCtx)
+		require.NoError(t, errPoll)
+		assert.Equal(t, "download", cmd.Action)
+	}
 
 	for _, cancel := range cancels {
 		cancel()
@@ -160,24 +164,31 @@ func TestServer_ConcurrentDownloadRequestsThreadSafety(t *testing.T) {
 	assert.Equal(t, 0, sess.DownloadQueueLen())
 }
 
-func TestServer_DownloadQueueSingleSlotReplacement(t *testing.T) {
+func TestServer_DownloadQueueMaxCapacityLimit(t *testing.T) {
 	sess := &Session{
 		ID:             "test-cap-sess",
-		downloadNotify: make(chan struct{}, 1),
+		downloadNotify: make(chan struct{}, maxDownloadQueueSize),
 	}
 
-	// Repeatedly enqueue requests beyond capacity
-	for i := 0; i < 100; i++ {
+	// Fill queue up to max capacity
+	for i := 0; i < maxDownloadQueueSize; i++ {
 		ok := sess.EnqueueDownload(DownloadRequest{Offset: int64(i)})
-		assert.True(t, ok, "Enqueue should always succeed with single-slot replacement at %d", i)
+		assert.True(t, ok, "Enqueue failed before reaching capacity at %d", i)
 	}
 
-	assert.Equal(t, 1, sess.DownloadQueueLen())
+	assert.Equal(t, maxDownloadQueueSize, sess.DownloadQueueLen())
 
-	// Dequeue should yield the latest request (offset 99)
-	req, ok := sess.DequeueDownload()
-	assert.True(t, ok)
-	assert.Equal(t, int64(99), req.Offset)
+	// Overflow request beyond capacity should be rejected
+	ok := sess.EnqueueDownload(DownloadRequest{Offset: 9999})
+	assert.False(t, ok, "Enqueue should return false when queue is full")
+	assert.Equal(t, maxDownloadQueueSize, sess.DownloadQueueLen())
+
+	// Dequeue all items
+	for i := 0; i < maxDownloadQueueSize; i++ {
+		req, ok := sess.DequeueDownload()
+		assert.True(t, ok)
+		assert.Equal(t, int64(i), req.Offset)
+	}
 
 	assert.Equal(t, 0, sess.DownloadQueueLen())
 }
@@ -190,7 +201,7 @@ func TestServer_DownloadQueueCleanupOnSessionExpiration(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		sess.EnqueueDownload(DownloadRequest{Offset: int64(i)})
 	}
-	assert.Equal(t, 1, sess.DownloadQueueLen())
+	assert.Equal(t, 10, sess.DownloadQueueLen())
 
 	// Wait for sweeper to clean up expired session
 	assert.Eventually(t, func() bool {
