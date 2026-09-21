@@ -617,6 +617,30 @@ func TestSeekingReader_SenderOffsetExceedsRequestedOffset(t *testing.T) {
 	assert.Contains(t, err.Error(), "relay stream offset mismatch: sender offset 2000 exceeds requested offset 1000")
 }
 
+func TestSeekingReader_NegativeSkipCountImmediateValidation(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	sess := &Session{
+		RequestedOffset: 50,
+		SenderOffset:    100,
+	}
+
+	sr := &seekingReader{
+		pr:   pr,
+		sess: sess,
+		ctx:  context.Background(),
+	}
+
+	// Should return error immediately without blocking on pipe read
+	buf := make([]byte, 64)
+	n, err := sr.Read(buf)
+	assert.Equal(t, 0, n)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "relay stream offset mismatch: sender offset 100 exceeds requested offset 50")
+}
+
 func TestHandleData_SenderOffsetExceedsRequestedOffset(t *testing.T) {
 	srv := NewServer()
 	ts := httptest.NewServer(srv)
