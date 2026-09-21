@@ -531,9 +531,8 @@ func DecompressSDP(compressed string) (string, error) {
 
 func (s *Session) GetCandidates() []webrtc.ICECandidateInit {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	cands := make([]webrtc.ICECandidateInit, len(s.candidates))
-	copy(cands, s.candidates)
+	cands := append([]webrtc.ICECandidateInit(nil), s.candidates...)
+	s.mu.Unlock()
 	return cands
 }
 
