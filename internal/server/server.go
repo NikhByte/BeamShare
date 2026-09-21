@@ -706,3 +706,125 @@ func (r *RingBuffer) Bytes() []byte {
 	}
 	return res
 }
+
+// LiveStreamReader is an io.ReadCloser that continuously streams live piped stdin
+// from a Server session, serving backlog first and then blocking on live stream channels until EOF.
+type LiveStreamReader struct {
+	srv    *Server
+	ch     chan []byte
+	buf    []byte
+	ctx    context.Context
+	cancel context.CancelFunc
+	closed bool
+	mu     sync.Mutex
+}
+
+// NewLiveStreamReader instantiates a continuous streaming adapter for live stdin pipe transfers.
+func (s *Server) NewLiveStreamReader(ctx context.Context, offset int64) *LiveStreamReader {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	r := &LiveStreamReader{
+		srv:    s,
+		ch:     make(chan []byte, 1024),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+
+	var backlog []byte
+	if s.liveBuf != nil {
+		backlog = s.liveBuf.Bytes()
+	}
+
+	if offset > 0 {
+		if offset < int64(len(backlog)) {
+			r.buf = make([]byte, len(backlog)-int(offset))
+			copy(r.buf, backlog[offset:])
+		}
+	} else if len(backlog) > 0 {
+		r.buf = make([]byte, len(backlog))
+		copy(r.buf, backlog)
+	}
+
+	if !s.liveFinished {
+		s.liveClients = append(s.liveClients, r.ch)
+	} else {
+		close(r.ch)
+	}
+
+	return r
+}
+
+func (r *LiveStreamReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return 0, io.EOF
+	}
+
+	if len(r.buf) > 0 {
+		n := copy(p, r.buf)
+		r.buf = r.buf[n:]
+		r.mu.Unlock()
+		return n, nil
+	}
+	r.mu.Unlock()
+
+	if r.ctx.Err() != nil {
+		return 0, r.ctx.Err()
+	}
+
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	case chunk, ok := <-r.ch:
+		if !ok {
+			r.mu.Lock()
+			r.closed = true
+			r.mu.Unlock()
+			return 0, io.EOF
+		}
+		if len(chunk) == 0 {
+			return r.Read(p)
+		}
+		r.mu.Lock()
+		n := copy(p, chunk)
+		if n < len(chunk) {
+			r.buf = make([]byte, len(chunk)-n)
+			copy(r.buf, chunk[n:])
+		}
+		r.mu.Unlock()
+		return n, nil
+	}
+}
+
+func (r *LiveStreamReader) Close() error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	r.cancel()
+	r.mu.Unlock()
+
+	r.srv.mu.Lock()
+	for i, c := range r.srv.liveClients {
+		if c == r.ch {
+			r.srv.liveClients = append(r.srv.liveClients[:i], r.srv.liveClients[i+1:]...)
+			break
+		}
+	}
+	r.srv.mu.Unlock()
+
+	return nil
+}

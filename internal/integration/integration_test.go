@@ -403,3 +403,86 @@ func TestEndToEndLiveStdinPipeStreaming(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "eof", eofEv["type"])
 }
+
+// TestEndToEndRelayLiveStreamPipeTransfer tests live stdin pipe transfer continuously streaming over relay bridge.
+func TestEndToEndRelayLiveStreamPipeTransfer(t *testing.T) {
+	relayServer := relay.NewServer()
+	tsRelay := httptest.NewServer(relayServer)
+	defer tsRelay.Close()
+
+	srv, err := server.New("", 10*1024*1024)
+	require.NoError(t, err)
+
+	relayClient := relay.NewClient(tsRelay.URL)
+	sessionID, err := relayClient.Register(context.Background())
+	require.NoError(t, err)
+
+	err = relayClient.PushState(context.Background(), "offer-sdp", nil, map[string]interface{}{"name": "live.log", "size": -1}, nil)
+	require.NoError(t, err)
+
+	// Write initial backlog before receiver connects
+	srv.WriteLive([]byte("initial backlog line 1\n"))
+
+	downloadURL := fmt.Sprintf("%s/api/download?s=%s", tsRelay.URL, sessionID)
+
+	var downloadedData []byte
+	var downloadErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		resp, errGet := http.Get(downloadURL)
+		if errGet != nil {
+			downloadErr = errGet
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			downloadErr = fmt.Errorf("unexpected download status: %d", resp.StatusCode)
+			return
+		}
+
+		downloadedData, downloadErr = io.ReadAll(resp.Body)
+	}()
+
+	// Wait for relay download request pipe to be attached
+	require.Eventually(t, func() bool {
+		sess := relayServer.GetSession(sessionID)
+		return sess != nil && sess.IsPipeReady()
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Poll download command and stream live reader over relay
+	mainCtx, mainCancel := context.WithCancel(context.Background())
+	defer mainCancel()
+
+	cmd, err := relayClient.Poll(mainCtx)
+	require.NoError(t, err)
+	require.Equal(t, "download", cmd.Action)
+
+	// Sender starts continuous streaming upload via LiveStreamReader
+	uploadDone := make(chan error, 1)
+	go func() {
+		r := srv.NewLiveStreamReader(mainCtx, cmd.Offset)
+		defer r.Close()
+		uploadDone <- relayClient.UploadReaderAtOffset(mainCtx, r, cmd.Offset)
+	}()
+
+	// Simulate post-bridge stdin live updates
+	time.Sleep(50 * time.Millisecond)
+	srv.WriteLive([]byte("realtime piped input line 2\n"))
+	time.Sleep(50 * time.Millisecond)
+	srv.WriteLive([]byte("realtime piped input line 3\n"))
+	time.Sleep(50 * time.Millisecond)
+
+	// Close live pipe (stdin EOF)
+	srv.CloseLive()
+
+	require.NoError(t, <-uploadDone)
+	wg.Wait()
+	require.NoError(t, downloadErr)
+
+	expected := "initial backlog line 1\nrealtime piped input line 2\nrealtime piped input line 3\n"
+	assert.Equal(t, expected, string(downloadedData))
+}
