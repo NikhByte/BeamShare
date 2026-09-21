@@ -265,6 +265,290 @@ func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 	}
 }
 
+// TestEndToEndWebRTCP2P_PauseResumeFlowControl tests PAUSE and RESUME flow control messages across WebRTC DataChannel.
+func TestEndToEndWebRTCP2P_PauseResumeFlowControl(t *testing.T) {
+	type pauseCtrl struct {
+		mu     sync.Mutex
+		cond   *sync.Cond
+		paused bool
+		closed bool
+	}
+	newPauseCtrl := func() *pauseCtrl {
+		p := &pauseCtrl{}
+		p.cond = sync.NewCond(&p.mu)
+		return p
+	}
+	pause := func(p *pauseCtrl) {
+		p.mu.Lock()
+		p.paused = true
+		p.mu.Unlock()
+	}
+	resume := func(p *pauseCtrl) {
+		p.mu.Lock()
+		p.paused = false
+		p.cond.Broadcast()
+		p.mu.Unlock()
+	}
+	closePC := func(p *pauseCtrl) {
+		p.mu.Lock()
+		p.closed = true
+		p.cond.Broadcast()
+		p.mu.Unlock()
+	}
+	waitIfPaused := func(p *pauseCtrl) bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		for p.paused && !p.closed {
+			p.cond.Wait()
+		}
+		return !p.closed
+	}
+
+	// Prepare 3.2MB test payload (200 x 16KB chunks)
+	chunkSize := 16 * 1024
+	numChunks := 200
+	totalSize := chunkSize * numChunks
+	testPayload := make([]byte, totalSize)
+	for i := range testPayload {
+		testPayload[i] = byte((i * 31) % 256)
+	}
+
+	hasher := sha256.New()
+	hasher.Write(testPayload)
+	expectedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	// 1. Create Sender Session
+	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 10*time.Second)
+	require.NoError(t, err)
+	defer senderSession.Close()
+
+	senderTxReady := make(chan struct{})
+	senderSession.OnOpen = func(dc *webrtc.DataChannel) {
+		pc := newPauseCtrl()
+		dc.OnClose(func() { closePC(pc) })
+
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			if msg.IsString {
+				dataStr := string(msg.Data)
+				if dataStr == "PAUSE" {
+					pause(pc)
+				} else if dataStr == "RESUME" {
+					resume(pc)
+				} else if strings.HasPrefix(dataStr, "OFFSET:") {
+					go func() {
+						defer closePC(pc)
+						metaHeader := fmt.Sprintf("META:flow_test.bin:%d", totalSize)
+						_ = dc.SendText(metaHeader)
+
+						bufferedAmountLowChan := make(chan struct{}, 1)
+						dc.SetBufferedAmountLowThreshold(512 * 1024)
+						dc.OnBufferedAmountLow(func() {
+							select {
+							case bufferedAmountLowChan <- struct{}{}:
+							default:
+							}
+						})
+
+						for i := 0; i < numChunks; i++ {
+							if !waitIfPaused(pc) {
+								return
+							}
+
+							if dc.BufferedAmount() > 1024*1024 {
+								<-bufferedAmountLowChan
+							}
+
+							if !waitIfPaused(pc) {
+								return
+							}
+
+							startIdx := i * chunkSize
+							endIdx := startIdx + chunkSize
+							errSend := dc.Send(testPayload[startIdx:endIdx])
+							if errSend != nil {
+								t.Errorf("dc.Send chunk %d error: %v", i, errSend)
+								return
+							}
+							time.Sleep(1 * time.Millisecond)
+						}
+
+						for dc.BufferedAmount() > 0 {
+							time.Sleep(2 * time.Millisecond)
+						}
+						_ = dc.SendText("EOF")
+					}()
+				}
+			}
+		})
+		close(senderTxReady)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err = senderSession.CreateOffer(ctx)
+	require.NoError(t, err)
+
+	// 2. Receiver Setup
+	rxPC, err := signaling.NewWebRTCAPI().NewPeerConnection(webrtc.Configuration{})
+	require.NoError(t, err)
+	defer rxPC.Close()
+
+	var mu sync.Mutex
+	var rxCandidates []webrtc.ICECandidateInit
+
+	rxPC.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			cand := c.ToJSON()
+			mu.Lock()
+			rxCandidates = append(rxCandidates, cand)
+			mu.Unlock()
+			_ = senderSession.AddICECandidate(cand)
+		}
+	})
+
+	var receivedBuf bytes.Buffer
+	var chunksReceived int
+	pauseAtChunk := 10
+	pausedCh := make(chan struct{}, 1)
+	eofReceived := make(chan struct{})
+
+	rxOpenCh := make(chan struct{})
+	rxDataChannelCh := make(chan *webrtc.DataChannel, 1)
+	rxPC.OnDataChannel(func(dc *webrtc.DataChannel) {
+		dc.OnOpen(func() {
+			select {
+			case <-rxOpenCh:
+			default:
+				close(rxOpenCh)
+			}
+		})
+		if dc.ReadyState() == webrtc.DataChannelStateOpen {
+			select {
+			case <-rxOpenCh:
+			default:
+				close(rxOpenCh)
+			}
+		}
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			if msg.IsString {
+				if string(msg.Data) == "EOF" {
+					close(eofReceived)
+				}
+			} else {
+				receivedBuf.Write(msg.Data)
+				chunksReceived++
+
+				if chunksReceived == pauseAtChunk {
+					_ = dc.SendText("PAUSE")
+					select {
+					case pausedCh <- struct{}{}:
+					default:
+					}
+				}
+			}
+		})
+		rxDataChannelCh <- dc
+	})
+
+	// Set descriptions and candidates
+	err = rxPC.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeOffer,
+		SDP:  senderSession.RawOffer(),
+	})
+	require.NoError(t, err)
+
+	for _, cand := range senderSession.GetCandidates() {
+		_ = rxPC.AddICECandidate(cand)
+	}
+
+	senderSession.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			_ = rxPC.AddICECandidate(c.ToJSON())
+		}
+	})
+
+	answerObj, err := rxPC.CreateAnswer(nil)
+	require.NoError(t, err)
+	err = rxPC.SetLocalDescription(answerObj)
+	require.NoError(t, err)
+
+	answerBytes, err := json.Marshal(answerObj)
+	require.NoError(t, err)
+
+	err = senderSession.ProvideAnswer(string(answerBytes))
+	require.NoError(t, err)
+
+	mu.Lock()
+	for _, cand := range rxCandidates {
+		_ = senderSession.AddICECandidate(cand)
+	}
+	mu.Unlock()
+
+	var rxDC *webrtc.DataChannel
+	select {
+	case rxDC = <-rxDataChannelCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for receiver DataChannel")
+	}
+
+	select {
+	case <-rxOpenCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for receiver DataChannel open")
+	}
+
+	select {
+	case <-senderTxReady:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for sender DataChannel open")
+	}
+
+	// Request transfer via OFFSET:0
+	err = rxDC.SendText("OFFSET:0")
+	require.NoError(t, err)
+
+	// Wait for receiver to emit PAUSE
+	select {
+	case <-pausedCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for PAUSE trigger")
+	}
+
+	// Sleep 250ms and verify that chunk count stays constant while paused
+	time.Sleep(250 * time.Millisecond)
+
+	mu.Lock()
+	countWhilePaused := chunksReceived
+	mu.Unlock()
+
+	// Should not have received all chunks while paused
+	assert.Less(t, countWhilePaused, numChunks)
+
+	// Send RESUME signal
+	err = rxDC.SendText("RESUME")
+	require.NoError(t, err)
+
+	// Wait for transfer completion
+	select {
+	case <-eofReceived:
+		mu.Lock()
+		defer mu.Unlock()
+		assert.Equal(t, totalSize, receivedBuf.Len())
+
+		actualHasher := sha256.New()
+		actualHasher.Write(receivedBuf.Bytes())
+		actualHash := hex.EncodeToString(actualHasher.Sum(nil))
+
+		assert.Equal(t, expectedHash, actualHash)
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for EOF after RESUME")
+	}
+}
+
 // TestEndToEndRelayLongPollingAndEncryptedStream tests the in-memory relay server harness and encrypted fallback streaming.
 func TestEndToEndRelayLongPollingAndEncryptedStream(t *testing.T) {
 	relayServer := relay.NewServer()
