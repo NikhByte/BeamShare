@@ -38,6 +38,48 @@ var (
 	liveBufferSize int = 10 * 1024 * 1024 // 10MB
 )
 
+type pauseController struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	paused bool
+	closed bool
+}
+
+func newPauseController() *pauseController {
+	pc := &pauseController{}
+	pc.cond = sync.NewCond(&pc.mu)
+	return pc
+}
+
+func (pc *pauseController) Pause() {
+	pc.mu.Lock()
+	pc.paused = true
+	pc.mu.Unlock()
+}
+
+func (pc *pauseController) Resume() {
+	pc.mu.Lock()
+	pc.paused = false
+	pc.cond.Broadcast()
+	pc.mu.Unlock()
+}
+
+func (pc *pauseController) Close() {
+	pc.mu.Lock()
+	pc.closed = true
+	pc.cond.Broadcast()
+	pc.mu.Unlock()
+}
+
+func (pc *pauseController) WaitIfPaused() bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	for pc.paused && !pc.closed {
+		pc.cond.Wait()
+	}
+	return !pc.closed
+}
+
 func main() {
 	relayURL = os.Getenv("BEAM_RELAY_URL")
 	receiverURL = os.Getenv("BEAM_RECEIVER_URL")
@@ -451,6 +493,12 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 			// Hook up data channel handler
 			session.OnOpen = func(dc *webrtc.DataChannel) {
+				pauseCtrl := newPauseController()
+
+				dc.OnClose(func() {
+					pauseCtrl.Close()
+				})
+
 				// Upload state variables for incoming files from receiver
 				var (
 					uploadFile *os.File
@@ -463,7 +511,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
 						dataStr := string(msg.Data)
-						if strings.HasPrefix(dataStr, "UPLOAD_META:") {
+						if dataStr == "PAUSE" {
+							pauseCtrl.Pause()
+						} else if dataStr == "RESUME" {
+							pauseCtrl.Resume()
+						} else if strings.HasPrefix(dataStr, "UPLOAD_META:") {
 							parts := strings.SplitN(dataStr, ":", 3)
 							if len(parts) == 3 {
 								name := parts[1]
@@ -510,7 +562,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if len(parts) == 2 {
 								offset, _ = strconv.ParseInt(parts[1], 10, 64)
 							}
-							// File sender goroutine (Direct-to-Disk + Backpressure)
+							// File sender goroutine (Direct-to-Disk + Backpressure + Pause/Resume Flow Control)
 							go func() {
 								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
 								file, err := os.Open(filePath)
@@ -519,6 +571,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									return
 								}
 								defer file.Close()
+								defer pauseCtrl.Close()
 
 								if offset > 0 {
 									_, err = file.Seek(offset, io.SeekStart)
@@ -549,9 +602,17 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								start := time.Now()
 
 								for {
+									if !pauseCtrl.WaitIfPaused() {
+										return
+									}
+
 									// Backpressure check: wait if buffered amount > 1MB
 									if dc.BufferedAmount() > 1024*1024 {
 										<-bufferedAmountLowChan
+									}
+
+									if !pauseCtrl.WaitIfPaused() {
+										return
 									}
 
 									n, err := file.Read(buffer)
