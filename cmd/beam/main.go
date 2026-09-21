@@ -589,7 +589,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							// File sender goroutine (Direct-to-Disk + Backpressure + Pause/Resume Flow Control)
 							go func(ctx context.Context, reqOffset int64) {
 								defer streamActive.Store(false)
-
 								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
 								file, err := os.Open(filePath)
 								if err != nil {
