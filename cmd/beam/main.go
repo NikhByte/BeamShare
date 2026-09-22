@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -451,6 +452,8 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 			// Hook up data channel handler
 			session.OnOpen = func(dc *webrtc.DataChannel) {
+				var senderPaused atomic.Bool
+
 				// Upload state variables for incoming files from receiver
 				var (
 					uploadFile *os.File
@@ -463,7 +466,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
 						dataStr := string(msg.Data)
-						if strings.HasPrefix(dataStr, "UPLOAD_META:") {
+						if dataStr == "PAUSE" {
+							senderPaused.Store(true)
+						} else if dataStr == "RESUME" {
+							senderPaused.Store(false)
+						} else if strings.HasPrefix(dataStr, "UPLOAD_META:") {
 							parts := strings.SplitN(dataStr, ":", 3)
 							if len(parts) == 3 {
 								name := parts[1]
@@ -549,9 +556,16 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								start := time.Now()
 
 								for {
-									// Backpressure check: wait if buffered amount > 1MB
-									if dc.BufferedAmount() > 1024*1024 {
-										<-bufferedAmountLowChan
+									// Backpressure check: wait if buffered amount > 1MB or receiver paused transfer
+									for dc.BufferedAmount() > 1024*1024 || senderPaused.Load() {
+										if senderPaused.Load() {
+											time.Sleep(10 * time.Millisecond)
+										} else if dc.BufferedAmount() > 1024*1024 {
+											select {
+											case <-bufferedAmountLowChan:
+											case <-time.After(10 * time.Millisecond):
+											}
+										}
 									}
 
 									n, err := file.Read(buffer)
