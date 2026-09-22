@@ -412,6 +412,9 @@ func minifySDP(sdp string) string {
 			if idx := strings.Index(minLine, " raddr"); idx > 0 {
 				minLine = minLine[:idx]
 			}
+			if idx := strings.Index(minLine, " rport"); idx > 0 {
+				minLine = minLine[:idx]
+			}
 			if strings.Contains(line, "typ host") {
 				if anyHostCandidate == "" {
 					anyHostCandidate = minLine

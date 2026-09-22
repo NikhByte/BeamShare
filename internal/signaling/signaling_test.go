@@ -427,9 +427,22 @@ func TestMinifySDPRelayCandidate(t *testing.T) {
 	assert.Contains(t, minified, "typ host")
 	assert.Contains(t, minified, "typ srflx")
 
+	// Verify candidate ordering sequence: host -> srflx -> relay
+	hostIdx := strings.Index(minified, "typ host")
+	srflxIdx := strings.Index(minified, "typ srflx")
+	relayIdx := strings.Index(minified, "typ relay")
+	assert.True(t, hostIdx >= 0 && srflxIdx >= 0 && relayIdx >= 0, "All candidate types should be present")
+	assert.True(t, hostIdx < srflxIdx && srflxIdx < relayIdx, "Candidate order must prioritize host -> srflx -> relay")
+
 	// Verify raddr/rport truncation for relay candidate
 	assert.NotContains(t, minified, "raddr")
 	assert.NotContains(t, minified, "rport")
+
+	// Verify stripping works when rport appears alone
+	rawSDPRportOnly := "v=0\r\na=candidate:3 1 UDP 16777215 198.51.100.1 54321 typ relay rport 50000\r\n"
+	minifiedRportOnly := minifySDP(rawSDPRportOnly)
+	assert.NotContains(t, minifiedRportOnly, "rport")
+	assert.Contains(t, minifiedRportOnly, "typ relay")
 
 	// Verify roundtrip compression/decompression
 	compressed, err := CompressSDP(rawSDP)
