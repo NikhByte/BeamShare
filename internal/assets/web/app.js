@@ -659,21 +659,21 @@ class SequentialChunkQueue {
 
       const chunk = this.queue.shift();
       const len = chunk.byteLength || chunk.length || 0;
-      this.totalBytes -= len;
-
-      if (this.isPaused && this.totalBytes <= this.lowWatermark) {
-        this.isPaused = false;
-        if (this.dataChannel && this.dataChannel.readyState === 'open') {
-          try {
-            this.dataChannel.send('RESUME');
-          } catch (e) {
-            console.warn('Failed to send RESUME signal:', e);
-          }
-        }
-      }
 
       try {
         await this.writeHandler(chunk);
+        this.totalBytes -= len;
+
+        if (this.isPaused && this.totalBytes <= this.lowWatermark) {
+          this.isPaused = false;
+          if (this.dataChannel && this.dataChannel.readyState === 'open') {
+            try {
+              this.dataChannel.send('RESUME');
+            } catch (e) {
+              console.warn('Failed to send RESUME signal:', e);
+            }
+          }
+        }
       } catch (err) {
         this.error = err;
         this._rejectDrain(err);
@@ -1783,7 +1783,7 @@ async function startWebRTC() {
         lowWatermark: 4 * 1024 * 1024,
         dataChannel: dc,
         onError: (err) => {
-          if (err.name === 'QuotaExceededError' || (err.message && (err.message.includes('Quota') || err.message.includes('disk is full')))) {
+          if (err.name === 'QuotaExceededError' || err.code === 22 || (err.message && (err.message.includes('Quota') || err.message.includes('disk is full')))) {
             showError("Transfer failed: Device disk is full.");
           } else {
             showError(`Transfer failed: ${err.message}`);
