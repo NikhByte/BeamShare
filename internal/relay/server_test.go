@@ -261,4 +261,45 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
 }
 
+func TestSession_ClearDownloadQueue(t *testing.T) {
+	sess := &Session{
+		ID:             "test-clear-sess",
+		downloadNotify: make(chan struct{}, maxDownloadQueueSize),
+	}
+
+	for i := 0; i < 15; i++ {
+		sess.EnqueueDownload(DownloadRequest{Offset: int64(i)})
+	}
+	assert.Equal(t, 15, sess.DownloadQueueLen())
+
+	sess.ClearDownloadQueue()
+
+	assert.Equal(t, 0, sess.DownloadQueueLen())
+	select {
+	case <-sess.downloadNotify:
+		t.Fatal("downloadNotify channel should be completely drained after ClearDownloadQueue")
+	default:
+	}
+}
+
+func TestServer_HandleDownloadQueueFull(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+	// Fill queue up to capacity
+	for i := 0; i < maxDownloadQueueSize; i++ {
+		sess.EnqueueDownload(DownloadRequest{Offset: int64(i)})
+	}
+	assert.Equal(t, maxDownloadQueueSize, sess.DownloadQueueLen())
+
+	// Send an HTTP download request when queue is full
+	req := httptest.NewRequest(http.MethodGet, "/api/download?s="+sess.ID, nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	assert.Contains(t, rr.Body.String(), "Download queue full")
+}
+
 
