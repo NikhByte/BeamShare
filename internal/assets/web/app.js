@@ -2142,6 +2142,10 @@ async function startWebRTC() {
                   triggerSave(finalBlob, currentFile.name);
                 }
                 resolve();
+              } else if (e.data === "PAUSE") {
+                senderPaused = true;
+              } else if (e.data === "RESUME") {
+                senderPaused = false;
               }
               return;
             }
@@ -2356,8 +2360,14 @@ async function handleUploadFile(e) {
         reader.readAsArrayBuffer(chunkBlob);
       });
 
-      if (webrtcDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(webrtcDataChannel, 512 * 1024);
+      while (webrtcDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
+        if (webrtcDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
+        if (webrtcDataChannel.bufferedAmount > 1024 * 1024) {
+          await waitForBufferedAmountLow(webrtcDataChannel, 512 * 1024);
+        } else if (senderPaused) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      }
       }
       webrtcDataChannel.send(chunkBuffer);
       offset += chunkBuffer.byteLength;

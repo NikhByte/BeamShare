@@ -653,6 +653,46 @@ describe('Gaze Web Receiver Test Suite', () => {
     await decryptChain;
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  test('WebRTC DataChannel String Control Messages (PAUSE/RESUME/EOF)', async () => {
+    let paused = false;
+    let eofEnqueued = false;
+    const receivedChunks = [];
+
+    const mockQueue = {
+      enqueue: (chunk) => receivedChunks.push(chunk[0]),
+      enqueueEOF: () => { eofEnqueued = true; }
+    };
+
+    const handleDataChannelMessage = (e) => {
+      if (typeof e.data === 'string') {
+        if (e.data === 'EOF') {
+          mockQueue.enqueueEOF();
+        } else if (e.data === 'PAUSE') {
+          paused = true;
+        } else if (e.data === 'RESUME') {
+          paused = false;
+        }
+        return;
+      }
+      mockQueue.enqueue(new Uint8Array(e.data));
+    };
+
+    handleDataChannelMessage({ data: new Uint8Array([10]).buffer });
+    assert.equal(paused, false);
+    assert.deepEqual(receivedChunks, [10]);
+
+    handleDataChannelMessage({ data: 'PAUSE' });
+    assert.equal(paused, true);
+    assert.deepEqual(receivedChunks, [10], 'Control message must not be enqueued as data chunk');
+
+    handleDataChannelMessage({ data: new Uint8Array([20]).buffer });
+    assert.deepEqual(receivedChunks, [10, 20]);
+
+    handleDataChannelMessage({ data: 'RESUME' });
+    assert.equal(paused, false);
+
+    handleDataChannelMessage({ data: 'EOF' });
+    assert.equal(eofEnqueued, true);
   });
 });
 
