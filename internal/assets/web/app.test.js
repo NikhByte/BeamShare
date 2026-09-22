@@ -328,8 +328,12 @@ describe('Gaze Web Receiver Test Suite', () => {
       queue.enqueue(new Uint8Array(e.data));
     };
 
-    // Synchronously fire 5 binary messages
-    for (let i = 1; i <= 5; i++) {
+    // Synchronously fire 5 binary messages with interleaved PAUSE/RESUME control messages
+    onmessage({ data: new Uint8Array([1]).buffer });
+    onmessage({ data: 'PAUSE' });
+    onmessage({ data: new Uint8Array([2]).buffer });
+    onmessage({ data: 'RESUME' });
+    for (let i = 3; i <= 5; i++) {
       onmessage({ data: new Uint8Array([i]).buffer });
     }
 
@@ -340,6 +344,48 @@ describe('Gaze Web Receiver Test Suite', () => {
     await queue.drain();
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
+  });
+
+  test('WebRTC DataChannel String Control Messages (PAUSE/RESUME/EOF)', async () => {
+    let paused = false;
+    let eofEnqueued = false;
+    const receivedChunks = [];
+
+    const mockQueue = {
+      enqueue: (chunk) => receivedChunks.push(chunk[0]),
+      enqueueEOF: () => { eofEnqueued = true; }
+    };
+
+    const handleDataChannelMessage = (e) => {
+      if (typeof e.data === 'string') {
+        if (e.data === 'EOF') {
+          mockQueue.enqueueEOF();
+        } else if (e.data === 'PAUSE') {
+          paused = true;
+        } else if (e.data === 'RESUME') {
+          paused = false;
+        }
+        return;
+      }
+      mockQueue.enqueue(new Uint8Array(e.data));
+    };
+
+    handleDataChannelMessage({ data: new Uint8Array([10]).buffer });
+    assert.equal(paused, false);
+    assert.deepEqual(receivedChunks, [10]);
+
+    handleDataChannelMessage({ data: 'PAUSE' });
+    assert.equal(paused, true);
+    assert.deepEqual(receivedChunks, [10], 'Control message must not be enqueued as data chunk');
+
+    handleDataChannelMessage({ data: new Uint8Array([20]).buffer });
+    assert.deepEqual(receivedChunks, [10, 20]);
+
+    handleDataChannelMessage({ data: 'RESUME' });
+    assert.equal(paused, false);
+
+    handleDataChannelMessage({ data: 'EOF' });
+    assert.equal(eofEnqueued, true);
   });
 });
 

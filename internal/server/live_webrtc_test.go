@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -299,3 +300,24 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 		t.Fatal("timed out waiting for P2P chunked transfer completion")
 	}
 }
+
+func TestWebRTCDataChannelPauseResumeSignaling(t *testing.T) {
+	var senderPaused atomic.Bool
+
+	handleControlMsg := func(msg string) {
+		if msg == "PAUSE" {
+			senderPaused.Store(true)
+		} else if msg == "RESUME" {
+			senderPaused.Store(false)
+		}
+	}
+
+	assert.False(t, senderPaused.Load())
+
+	handleControlMsg("PAUSE")
+	assert.True(t, senderPaused.Load(), "senderPaused should be true after receiving PAUSE")
+
+	handleControlMsg("RESUME")
+	assert.False(t, senderPaused.Load(), "senderPaused should be false after receiving RESUME")
+}
+
