@@ -341,6 +341,79 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
   });
+
+  test('getSWPipe awaits READY confirmation from Service Worker before appending iframe', async () => {
+    let iframeAppended = false;
+    let messageSent = null;
+
+    class MockMessagePort {
+      constructor() {
+        this.listeners = {};
+      }
+      addEventListener(event, fn) {
+        this.listeners[event] = fn;
+      }
+      removeEventListener(event, fn) {
+        if (this.listeners[event] === fn) delete this.listeners[event];
+      }
+      start() {}
+      postMessage() {}
+      triggerReady() {
+        if (this.listeners['message']) {
+          this.listeners['message']({ data: { type: 'READY' } });
+        }
+      }
+    }
+
+    let currentChannel = null;
+    class MockMessageChannel {
+      constructor() {
+        this.port1 = new MockMessagePort();
+        this.port2 = new MockMessagePort();
+        currentChannel = this;
+      }
+    }
+
+    global.MessageChannel = MockMessageChannel;
+    window.MessageChannel = MockMessageChannel;
+
+    const mockSW = {
+      postMessage: (msg) => {
+        messageSent = msg;
+        setTimeout(() => {
+          if (currentChannel && currentChannel.port1) {
+            currentChannel.port1.triggerReady();
+          }
+        }, 10);
+      }
+    };
+
+    Object.defineProperty(navigator, 'serviceWorker', {
+      value: {
+        ready: Promise.resolve({ active: mockSW }),
+        controller: mockSW
+      },
+      configurable: true,
+      writable: true
+    });
+
+    const origAppendChild = document.body.appendChild.bind(document.body);
+    document.body.appendChild = (node) => {
+      if (node && node.tagName === 'IFRAME') {
+        iframeAppended = true;
+      }
+      return origAppendChild(node);
+    };
+
+    const pipePromise = app.getSWPipe({ name: 'test.bin', size: 100, mime: 'application/octet-stream' });
+
+    assert.equal(iframeAppended, false, 'iframe must not be appended before READY confirmation');
+
+    const port = await pipePromise;
+    assert.notEqual(port, null);
+    assert.equal(iframeAppended, true, 'iframe must be appended after READY confirmation');
+    assert.equal(messageSent.type, 'INIT_PORT');
+  });
 });
 
 describe('Gaze Web Sender Test Suite', () => {
