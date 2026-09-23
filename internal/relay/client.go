@@ -207,7 +207,10 @@ func (c *Client) UploadReaderAtOffset(ctx context.Context, reader io.Reader, off
 
 	var r io.Reader = reader
 	var err error
-	if len(c.Key) == 32 {
+	if len(c.Key) > 0 {
+		if len(c.Key) != 32 {
+			return fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d bytes", len(c.Key))
+		}
 		r, err = NewEncryptingReader(reader, c.Key)
 		if err != nil {
 			return err
