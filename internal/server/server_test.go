@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -554,5 +555,98 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 		defer srv.mu.Unlock()
 		return len(srv.liveClients) == 0
 	}, 5*time.Second, 20*time.Millisecond)
+}
+
+func TestConcurrentUpdateSharedFileAndHandlers(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	file1 := filepath.Join(tmpDir, "file1.txt")
+	require.NoError(t, os.WriteFile(file1, []byte("content of file 1"), 0644))
+
+	file2 := filepath.Join(tmpDir, "file2.txt")
+	require.NoError(t, os.WriteFile(file2, []byte("content of file 2 and more"), 0644))
+
+	srv, err := New(file1, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+
+	// Goroutine 1: Rapidly calls UpdateSharedFile
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		files := []struct {
+			path string
+			name string
+			size int64
+		}{
+			{file1, "file1.txt", 17},
+			{file2, "file2.txt", 26},
+		}
+		idx := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				f := files[idx%2]
+				srv.UpdateSharedFile(f.path, f.name, f.size)
+				idx++
+				time.Sleep(100 * time.Microsecond)
+			}
+		}
+	}()
+
+	// Goroutine 2: Rapidly calls /api/meta
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		client := &http.Client{Timeout: 1 * time.Second}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				resp, err := client.Get(ts.URL + "/api/meta")
+				if err == nil {
+					assert.Equal(t, http.StatusOK, resp.StatusCode)
+					var meta FileMeta
+					err = json.NewDecoder(resp.Body).Decode(&meta)
+					resp.Body.Close()
+					assert.NoError(t, err)
+					assert.True(t, meta.Name == "file1.txt" || meta.Name == "file2.txt")
+				}
+			}
+		}
+	}()
+
+	// Goroutine 3: Rapidly calls /api/download
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		client := &http.Client{Timeout: 1 * time.Second}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				resp, err := client.Get(ts.URL + "/api/download")
+				if err == nil {
+					assert.Equal(t, http.StatusOK, resp.StatusCode)
+					_, err = io.ReadAll(resp.Body)
+					resp.Body.Close()
+					assert.NoError(t, err)
+				}
+			}
+		}
+	}()
+
+	wg.Wait()
 }
 
