@@ -782,7 +782,7 @@ describe('Gaze Web Sender Test Suite', () => {
     }
 
     global.fetch = async (url) => {
-      fetchedURLs.push(url.toString());
+      if (typeof fetchedURLs !== 'undefined') fetchedURLs.push(url.toString());
       if (url.includes('/poll')) {
           return { ok: false, status: 404 };
       }
@@ -822,7 +822,7 @@ describe('Gaze Web Sender Test Suite', () => {
     let externalRequests = [];
     window.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
@@ -855,7 +855,7 @@ describe('Gaze Web Sender Test Suite', () => {
       if (typeof url === 'string' && (url.includes('qrserver.com') || url.includes('/api/qr'))) {
         externalCallMade = true;
       }
-      return origFetch(url, opts);
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
