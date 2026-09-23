@@ -107,12 +107,18 @@ func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err er
 }
 
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
-	if pr == nil || s.DataPipeR == pr {
+	prClosed := false
+	pwClosed := false
+
+	if pr == nil || (pr != nil && s.DataPipeR == pr) || (pw != nil && s.DataPipeW == pw) {
 		if s.DataPipeW != nil {
 			if err != nil {
 				s.DataPipeW.CloseWithError(err)
 			} else {
 				s.DataPipeW.Close()
+			}
+			if pw != nil && s.DataPipeW == pw {
+				pwClosed = true
 			}
 			s.DataPipeW = nil
 		}
@@ -122,22 +128,50 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			} else {
 				s.DataPipeR.Close()
 			}
+			if pr != nil && s.DataPipeR == pr {
+				prClosed = true
+			}
 			s.DataPipeR = nil
 		}
-	} else {
-		if pw != nil {
+	}
+
+	if pr == nil || (pr != nil && s.UploadPipeR == pr) || (pw != nil && s.UploadPipeW == pw) {
+		if s.UploadPipeW != nil {
 			if err != nil {
-				pw.CloseWithError(err)
+				s.UploadPipeW.CloseWithError(err)
 			} else {
-				pw.Close()
+				s.UploadPipeW.Close()
 			}
+			if pw != nil && s.UploadPipeW == pw {
+				pwClosed = true
+			}
+			s.UploadPipeW = nil
 		}
-		if pr != nil {
+		if s.UploadPipeR != nil {
 			if err != nil {
-				pr.CloseWithError(err)
+				s.UploadPipeR.CloseWithError(err)
 			} else {
-				pr.Close()
+				s.UploadPipeR.Close()
 			}
+			if pr != nil && s.UploadPipeR == pr {
+				prClosed = true
+			}
+			s.UploadPipeR = nil
+		}
+	}
+
+	if pw != nil && !pwClosed {
+		if err != nil {
+			pw.CloseWithError(err)
+		} else {
+			pw.Close()
+		}
+	}
+	if pr != nil && !prClosed {
+		if err != nil {
+			pr.CloseWithError(err)
+		} else {
+			pr.Close()
 		}
 	}
 }
@@ -1058,11 +1092,20 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if part.FormName() == "file" {
-			sess.mu.Lock()
 			pr, pw := io.Pipe()
+
+			sess.mu.Lock()
+			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
+				sess.closePipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new upload request"))
+			}
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
 			sess.mu.Unlock()
+
+			var uploadErr error
+			defer func() {
+				sess.ClosePipesIfMatch(pr, pw, uploadErr)
+			}()
 
 			// Notify sender
 			select {
@@ -1070,10 +1113,68 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 
-			// Stream data to pipe
-			_, err = io.Copy(pw, part)
-			pw.CloseWithError(err)
-			part.Close()
+			copyDone := make(chan error, 1)
+			go func() {
+				type chunk struct {
+					data []byte
+					err  error
+				}
+				chunks := make(chan chunk, 16)
+
+				go func() {
+					defer close(chunks)
+					for {
+						buf := make([]byte, 32*1024)
+						n, readErr := part.Read(buf)
+						if n > 0 {
+							cData := make([]byte, n)
+							copy(cData, buf[:n])
+							chunks <- chunk{data: cData}
+						}
+						if readErr != nil {
+							if readErr != io.EOF {
+								chunks <- chunk{err: readErr}
+							}
+							break
+						}
+					}
+				}()
+
+				var writeErr error
+				for c := range chunks {
+					if c.err != nil {
+						writeErr = c.err
+						break
+					}
+					if len(c.data) > 0 {
+						_, err := pw.Write(c.data)
+						if err != nil {
+							writeErr = err
+							break
+						}
+					}
+				}
+
+				if writeErr != nil {
+					pw.CloseWithError(writeErr)
+				} else {
+					pw.Close()
+				}
+				part.Close()
+				copyDone <- writeErr
+			}()
+
+			select {
+			case uploadErr = <-copyDone:
+			case <-r.Context().Done():
+				uploadErr = fmt.Errorf("upload context cancelled: %w", r.Context().Err())
+				sess.ClosePipesIfMatch(pr, pw, uploadErr)
+			}
+
+			if uploadErr != nil {
+				http.Error(w, uploadErr.Error(), http.StatusInternalServerError)
+				return
+			}
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})
@@ -1093,6 +1194,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	sess.mu.Lock()
 	pr := sess.UploadPipeR
+	pw := sess.UploadPipeW
 	sess.mu.Unlock()
 
 	if pr == nil {
@@ -1100,6 +1202,23 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var pullErr error
+	defer func() {
+		sess.ClosePipesIfMatch(pr, pw, pullErr)
+	}()
+
 	w.Header().Set("Content-Type", "application/octet-stream")
-	io.Copy(w, pr)
+
+	copyDone := make(chan error, 1)
+	go func() {
+		_, cErr := io.Copy(w, pr)
+		copyDone <- cErr
+	}()
+
+	select {
+	case pullErr = <-copyDone:
+	case <-r.Context().Done():
+		pullErr = fmt.Errorf("pull context cancelled: %w", r.Context().Err())
+		sess.ClosePipesIfMatch(pr, pw, pullErr)
+	}
 }
