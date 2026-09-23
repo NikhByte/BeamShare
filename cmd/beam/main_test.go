@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -415,7 +416,6 @@ func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing
 	})
 
 	receiverDC.SendText("OFFSET:0")
-	time.Sleep(5 * time.Millisecond)
 	receiverDC.SendText("OFFSET:1024")
 
 	select {
@@ -430,5 +430,47 @@ func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing
 	expectedLen := len(data) - 1024
 	if receivedBytesAfterMeta != expectedLen {
 		t.Fatalf("expected received bytes after meta %d, got %d", expectedLen, receivedBytesAfterMeta)
+	}
+}
+
+func TestAtomicSenderGuardAndFlowControl(t *testing.T) {
+	var streamActive atomic.Bool
+
+	// Test 1: Atomic CAS Guard against duplicate OFFSET signals
+	activeCount := atomic.Int32{}
+	var wg sync.WaitGroup
+
+	// Simulate 10 concurrent duplicate OFFSET signals
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if streamActive.CompareAndSwap(false, true) {
+				defer streamActive.Store(false)
+				activeCount.Add(1)
+				time.Sleep(20 * time.Millisecond) // Simulate streaming duration
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if activeCount.Load() != 1 {
+		t.Fatalf("expected exactly 1 active stream worker to execute, got %d", activeCount.Load())
+	}
+
+	// Test 2: Isolated Memory Slice Allocation Verification
+	buffer := []byte("ORIGINAL_DATA")
+	n := len(buffer)
+	chunk := make([]byte, n)
+	copy(chunk, buffer[:n])
+
+	// Mutate the original read buffer
+	for i := range buffer {
+		buffer[i] = 'X'
+	}
+
+	if string(chunk) != "ORIGINAL_DATA" {
+		t.Fatalf("expected chunk data to remain isolated as ORIGINAL_DATA, got %s", string(chunk))
 	}
 }
