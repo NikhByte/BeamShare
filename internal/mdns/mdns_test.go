@@ -47,6 +47,9 @@ func TestBroadcaster_MockStartStop(t *testing.T) {
 		if port != 9090 {
 			t.Errorf("expected port 9090, got %d", port)
 		}
+		if ifaces == nil || len(ifaces) == 0 {
+			t.Errorf("expected non-nil, non-empty ifaces list, got %v", ifaces)
+		}
 		return mockReg, nil
 	}
 
@@ -62,6 +65,70 @@ func TestBroadcaster_MockStartStop(t *testing.T) {
 	b.Stop()
 	if !mockReg.shutdownCalled {
 		t.Fatalf("expected Shutdown to be called on mock registrar")
+	}
+}
+
+func TestBroadcaster_NoActiveInterfaces(t *testing.T) {
+	b := NewWithRegister("testbeam", 9090, func(instance, service, domain string, port int, text []string, ifaces []net.Interface) (Registrar, error) {
+		return &mockRegistrar{}, nil
+	})
+	b.interfacesFunc = func() ([]net.Interface, error) {
+		return nil, errors.New("no active multicast network interfaces found")
+	}
+
+	err := b.Start()
+	if err == nil {
+		t.Fatalf("expected Start() to fail when no active interfaces exist")
+	}
+}
+
+func TestFilterInterfaces(t *testing.T) {
+	lo := net.Interface{Name: "lo", Flags: net.FlagUp | net.FlagLoopback | net.FlagMulticast}
+	downIface := net.Interface{Name: "eth0", Flags: net.FlagMulticast} // not UP
+	noMulticast := net.Interface{Name: "eth1", Flags: net.FlagUp}        // no multicast
+	noAddrs := net.Interface{Name: "eth2", Flags: net.FlagUp | net.FlagMulticast}
+	validIface := net.Interface{Name: "eth3", Flags: net.FlagUp | net.FlagMulticast}
+
+	getAddrs := func(iface net.Interface) ([]net.Addr, error) {
+		switch iface.Name {
+		case "lo":
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("127.0.0.1")}}, nil
+		case "eth0":
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.10")}}, nil
+		case "eth1":
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.11")}}, nil
+		case "eth2":
+			return nil, nil
+		case "eth3":
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.13")}}, nil
+		default:
+			return nil, errors.New("unknown interface")
+		}
+	}
+
+	ifaces := []net.Interface{lo, downIface, noMulticast, noAddrs, validIface}
+	filtered, err := filterInterfaces(ifaces, getAddrs)
+	if err != nil {
+		t.Fatalf("unexpected error filtering interfaces: %v", err)
+	}
+
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 filtered interface, got %d", len(filtered))
+	}
+	if filtered[0].Name != "eth3" {
+		t.Fatalf("expected eth3, got %s", filtered[0].Name)
+	}
+}
+
+func TestFilterInterfaces_NoActiveInterfaces(t *testing.T) {
+	lo := net.Interface{Name: "lo", Flags: net.FlagUp | net.FlagLoopback | net.FlagMulticast}
+	getAddrs := func(iface net.Interface) ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("127.0.0.1")}}, nil
+	}
+
+	_, err := filterInterfaces([]net.Interface{lo}, getAddrs)
+	if err == nil {
+		t.Fatalf("expected error when no active interfaces exist, got nil")
 	}
 }
 
