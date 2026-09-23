@@ -535,14 +535,45 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									return
 								}
 
-								bufferedAmountLowChan := make(chan struct{}, 1)
-								dc.SetBufferedAmountLowThreshold(512 * 1024)
-								dc.OnBufferedAmountLow(func() {
-									select {
-									case bufferedAmountLowChan <- struct{}{}:
-									default:
+								waitForBufferLow := func(targetThreshold uint64) {
+									dc.SetBufferedAmountLowThreshold(targetThreshold)
+									if dc.BufferedAmount() <= targetThreshold {
+										return
 									}
-								})
+
+									notify := make(chan struct{}, 1)
+									dc.OnBufferedAmountLow(func() {
+										select {
+										case notify <- struct{}{}:
+										default:
+										}
+									})
+									defer dc.OnBufferedAmountLow(nil)
+
+									// Immediate post-registration re-check
+									if dc.BufferedAmount() <= targetThreshold {
+										return
+									}
+
+									ticker := time.NewTicker(30 * time.Millisecond)
+									defer ticker.Stop()
+
+									for {
+										if dc.BufferedAmount() <= targetThreshold {
+											return
+										}
+										select {
+										case <-notify:
+											if dc.BufferedAmount() <= targetThreshold {
+												return
+											}
+										case <-ticker.C:
+											if dc.BufferedAmount() <= targetThreshold {
+												return
+											}
+										}
+									}
+								}
 
 								buffer := make([]byte, 64*1024) // 64KB chunk size
 								totalSent := offset
@@ -551,7 +582,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								for {
 									// Backpressure check: wait if buffered amount > 1MB
 									if dc.BufferedAmount() > 1024*1024 {
-										<-bufferedAmountLowChan
+										waitForBufferLow(512 * 1024)
 									}
 
 									n, err := file.Read(buffer)
@@ -574,9 +605,8 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								}
 
 								// Wait for buffer to clear before sending EOF
-								dc.SetBufferedAmountLowThreshold(0)
 								if dc.BufferedAmount() > 0 {
-									<-bufferedAmountLowChan
+									waitForBufferLow(0)
 								}
 								dc.SendText("EOF")
 
