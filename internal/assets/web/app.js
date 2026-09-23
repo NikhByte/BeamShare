@@ -825,7 +825,7 @@ async function getSWPipe(fileMeta) {
 
   try {
     const swReady = navigator.serviceWorker.ready;
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 10000));
     const reg = await Promise.race([swReady, timeout]);
     let sw = reg && (reg.active || navigator.serviceWorker.controller);
     if (!sw) return null;
@@ -834,6 +834,28 @@ async function getSWPipe(fileMeta) {
     const channel = new MessageChannel();
     const port = channel.port1;
 
+    const readyPromise = new Promise((resolve, reject) => {
+      const readyTimeout = setTimeout(() => {
+        cleanup();
+        reject(new Error('SW confirmation timeout'));
+      }, 10000);
+
+      function onMessage(e) {
+        if (e.data && e.data.type === 'READY') {
+          cleanup();
+          resolve();
+        }
+      }
+
+      function cleanup() {
+        clearTimeout(readyTimeout);
+        port.removeEventListener('message', onMessage);
+      }
+
+      port.addEventListener('message', onMessage);
+      port.start();
+    });
+
     sw.postMessage({
       type: 'INIT_PORT',
       url: swUrl,
@@ -841,6 +863,8 @@ async function getSWPipe(fileMeta) {
       size: fileMeta.size,
       mime: fileMeta.mime
     }, [channel.port2]);
+
+    await readyPromise;
 
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
@@ -2591,6 +2615,7 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    getSWPipe
   };
 }
