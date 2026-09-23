@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -978,6 +979,42 @@ func TestRelayClient_ExponentialBackoffCustomConfig(t *testing.T) {
 
 	// Ensure it respects max delay cap
 	assert.Equal(t, 5*time.Second, custom.CalculateBackoff(20))
+}
+
+func TestRelayServer_HandleQR(t *testing.T) {
+	srv := NewServer()
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// 1. OPTIONS preflight
+	reqOptions, err := http.NewRequest(http.MethodOptions, ts.URL+"/api/qr", nil)
+	require.NoError(t, err)
+	respOptions, err := http.DefaultClient.Do(reqOptions)
+	require.NoError(t, err)
+	defer respOptions.Body.Close()
+	assert.Equal(t, http.StatusNoContent, respOptions.StatusCode)
+	assert.Equal(t, "*", respOptions.Header.Get("Access-Control-Allow-Origin"))
+
+	// 2. GET missing url parameter
+	respNoUrl, err := http.Get(ts.URL + "/api/qr")
+	require.NoError(t, err)
+	defer respNoUrl.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, respNoUrl.StatusCode)
+
+	// 3. GET with valid url parameter
+	testShareURL := "http://localhost:8080/#k=testkey123"
+	respQR, err := http.Get(ts.URL + "/api/qr?url=" + url.QueryEscape(testShareURL))
+	require.NoError(t, err)
+	defer respQR.Body.Close()
+	assert.Equal(t, http.StatusOK, respQR.StatusCode)
+	assert.Equal(t, "image/png", respQR.Header.Get("Content-Type"))
+
+	pngData, err := io.ReadAll(respQR.Body)
+	require.NoError(t, err)
+	assert.True(t, len(pngData) > 0)
+	// PNG magic header check
+	require.True(t, len(pngData) >= 8)
+	assert.Equal(t, []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, pngData[:8])
 }
 
 
