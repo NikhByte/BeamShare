@@ -537,4 +537,80 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('waitForBufferLow handles fast path, events, immediate post-registration re-check, polling fallback, and channel closure', async () => {
+    // 1. Fast path: bufferedAmount <= threshold
+    const mockDCFast = {
+      readyState: 'open',
+      bufferedAmount: 100,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: () => { throw new Error('Should not add listener'); }
+    };
+    await app.waitForBufferLow(mockDCFast, 500);
+    assert.equal(mockDCFast.bufferedAmountLowThreshold, 500);
+
+    // Helper for mock data channel with event listener tracking
+    function createMockDC(initialBufferedAmount) {
+      const listeners = {};
+      return {
+        readyState: 'open',
+        bufferedAmount: initialBufferedAmount,
+        bufferedAmountLowThreshold: 0,
+        listeners,
+        addEventListener(event, fn) {
+          if (!listeners[event]) listeners[event] = [];
+          listeners[event].push(fn);
+        },
+        removeEventListener(event, fn) {
+          if (listeners[event]) {
+            listeners[event] = listeners[event].filter(l => l !== fn);
+          }
+        },
+        dispatchEvent(event) {
+          if (listeners[event]) {
+            listeners[event].forEach(fn => fn());
+          }
+        }
+      };
+    }
+
+    // 2. Standard event path
+    const mockDCEvent = createMockDC(2000);
+    const pEvent = app.waitForBufferLow(mockDCEvent, 500);
+    assert.equal(mockDCEvent.listeners['bufferedamountlow']?.length, 1);
+    mockDCEvent.bufferedAmount = 400;
+    mockDCEvent.dispatchEvent('bufferedamountlow');
+    await pEvent;
+    assert.equal(mockDCEvent.listeners['bufferedamountlow']?.length || 0, 0);
+
+    // 3. TOCTOU immediate post-registration re-check path
+    // In this test, bufferedAmount drops during addEventListener execution before re-check
+    const mockDCTOCTOU = createMockDC(2000);
+    const origAddEventListener = mockDCTOCTOU.addEventListener.bind(mockDCTOCTOU);
+    mockDCTOCTOU.addEventListener = (event, fn) => {
+      origAddEventListener(event, fn);
+      if (event === 'bufferedamountlow') {
+        mockDCTOCTOU.bufferedAmount = 200; // drops below 500 during setup!
+      }
+    };
+    await app.waitForBufferLow(mockDCTOCTOU, 500);
+    assert.equal(mockDCTOCTOU.listeners['bufferedamountlow']?.length || 0, 0);
+
+    // 4. Polling fallback safety net path (event is missed)
+    const mockDCPoll = createMockDC(2000);
+    const pPoll = app.waitForBufferLow(mockDCPoll, 500);
+    assert.equal(mockDCPoll.listeners['bufferedamountlow']?.length, 1);
+    // Simulate buffer drop WITHOUT firing bufferedamountlow event
+    mockDCPoll.bufferedAmount = 100;
+    await pPoll; // Will resolve via 30ms setInterval ticker
+    assert.equal(mockDCPoll.listeners['bufferedamountlow']?.length || 0, 0);
+
+    // 5. Channel close event path
+    const mockDCClose = createMockDC(2000);
+    const pClose = app.waitForBufferLow(mockDCClose, 500);
+    mockDCClose.readyState = 'closed';
+    mockDCClose.dispatchEvent('close');
+    await pClose;
+    assert.equal(mockDCClose.listeners['bufferedamountlow']?.length || 0, 0);
+  });
 });
