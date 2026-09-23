@@ -5,6 +5,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,6 +29,7 @@ type Server struct {
 	fileName     string
 	fileSize     int64
 	port         int
+	token        string
 	srv          *http.Server
 	mux          *http.ServeMux
 	mu           sync.Mutex
@@ -70,6 +74,11 @@ func New(filePath string, bufferSize int) (*Server, error) {
 		return nil, fmt.Errorf("find free port: %w", err)
 	}
 
+	token, err := generateSessionToken()
+	if err != nil {
+		return nil, fmt.Errorf("generate token: %w", err)
+	}
+
 	mux := http.NewServeMux()
 
 	s := &Server{
@@ -77,6 +86,7 @@ func New(filePath string, bufferSize int) (*Server, error) {
 		fileName:       fileName,
 		fileSize:       fileSize,
 		port:           port,
+		token:          token,
 		mux:            mux,
 		isLivePipe:     isLive,
 	}
@@ -104,13 +114,78 @@ func New(filePath string, bufferSize int) (*Server, error) {
 
 	s.srv = &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
-		Handler:      mux,
+		Handler:      s,
 		ReadTimeout:  0, // disable read timeout for large uploads
 		WriteTimeout: 0, // disable write timeout for large downloads
 		IdleTimeout:  120 * time.Second,
 	}
 
 	return s, nil
+}
+
+func generateSessionToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate session token: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// Token returns the session authentication token.
+func (s *Server) Token() string {
+	return s.token
+}
+
+func (s *Server) validateToken(r *http.Request) bool {
+	if s.token == "" {
+		return false
+	}
+
+	// 1. URL query parameter ?token=...
+	if token := r.URL.Query().Get("token"); token != "" {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) == 1 {
+			return true
+		}
+	}
+
+	// 2. HTTP Header X-Beam-Token: ...
+	if token := r.Header.Get("X-Beam-Token"); token != "" {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) == 1 {
+			return true
+		}
+	}
+
+	// 3. Authorization header Bearer ...
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			token := strings.TrimSpace(auth[7:])
+			if subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) == 1 {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		if !s.validateToken(r) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range, X-Beam-Token, Authorization")
+			w.Header().Set("Access-Control-Allow-Private-Network", "true")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+
+	s.mux.ServeHTTP(w, r)
 }
 
 // WriteLive broadcasts new input to all connected SSE clients.
@@ -159,6 +234,11 @@ func (s *Server) Mux() *http.ServeMux { return s.mux }
 // LocalURL returns the http://lan-ip:port URL for this session.
 func (s *Server) LocalURL() string {
 	return fmt.Sprintf("http://%s:%d", GetLocalIP(), s.port)
+}
+
+// LocalURLWithToken returns the http://lan-ip:port/?token=<token> URL for this session.
+func (s *Server) LocalURLWithToken() string {
+	return fmt.Sprintf("http://%s:%d/?token=%s", GetLocalIP(), s.port, s.token)
 }
 
 // Port returns the bound port.
