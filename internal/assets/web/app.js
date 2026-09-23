@@ -1,3 +1,27 @@
+function getSessionToken() {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get('token');
+  if (!token) {
+    const backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
+    if (backend && backend.includes('token=')) {
+      try {
+        const u = new URL(backend);
+        token = u.searchParams.get('token');
+      } catch (e) {}
+    }
+  }
+  if (!token) {
+    const local = params.get('local');
+    if (local && local.includes('token=')) {
+      try {
+        const u = new URL(local);
+        token = u.searchParams.get('token');
+      } catch (e) {}
+    }
+  }
+  return token || '';
+}
+
 function getBackendURL() {
   const params = new URLSearchParams(window.location.search);
   let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
@@ -7,8 +31,13 @@ function getBackendURL() {
       backend = 'https://beamshare.onrender.com';
     }
   }
-  if (backend && backend.endsWith('/')) {
-    backend = backend.slice(0, -1);
+  if (backend) {
+    if (backend.includes('?')) {
+      backend = backend.split('?')[0];
+    }
+    if (backend.endsWith('/')) {
+      backend = backend.slice(0, -1);
+    }
   }
   return backend;
 }
@@ -17,9 +46,13 @@ function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  const token = getSessionToken();
   let fullPath = path;
   if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+    fullPath = fullPath.includes('?') ? fullPath + '&s=' + s : fullPath + '?s=' + s;
+  }
+  if (token && !fullPath.includes('token=')) {
+    fullPath = fullPath.includes('?') ? fullPath + '&token=' + encodeURIComponent(token) : fullPath + '?token=' + encodeURIComponent(token);
   }
   if (backend) {
     return backend + fullPath;
@@ -1203,12 +1236,20 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      const token = getSessionToken();
+      let probeBase = localURL;
+      if (probeBase.includes('?')) {
+        probeBase = probeBase.split('?')[0];
+      }
+      if (probeBase.endsWith('/')) probeBase = probeBase.slice(0, -1);
+      const probeUrl = token ? `${probeBase}/api/meta?token=${encodeURIComponent(token)}` : `${probeBase}/api/meta`;
+
+      const res = await fetch(probeUrl, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
         console.log("Local connection successful, using as backend...");
-        window.GAZE_BACKEND_URL = localURL;
+        window.GAZE_BACKEND_URL = probeBase;
         // Do not return, continue to bootstrap flow using localURL as backend
       }
     } catch (e) {

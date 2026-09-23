@@ -672,7 +672,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}()
 	}
 
-	localURL := srv.LocalURL()
+	localURL := srv.LocalURLWithToken()
 
 	// ── Phase 2: mDNS ────────────────────────────────────────────────────────
 	broadcaster := mdns.New("", srv.Port())
@@ -694,7 +694,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
 
-		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s&token=%s", baseHost, relSessionID, url.QueryEscape(localURL), srv.Token())
 		if receiverURL != "" {
 			relayDisplayURL += "&backend=" + url.QueryEscape(relayURL)
 		}
@@ -702,7 +702,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		fmt.Printf("    %s    (global relay)\n", relayDisplayURL)
 	} else if receiverURL != "" {
 		baseHost := strings.TrimRight(receiverURL, "/")
-		localDisplayURL := fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+		localDisplayURL := fmt.Sprintf("%s/?backend=%s&token=%s", baseHost, url.QueryEscape(localURL), srv.Token())
 		fmt.Printf("    %s    (custom receiver)\n", localDisplayURL)
 	}
 
@@ -715,7 +715,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
 
-		qrURL = fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		qrURL = fmt.Sprintf("%s/?s=%s&local=%s&token=%s", baseHost, relSessionID, url.QueryEscape(localURL), srv.Token())
 		if receiverURL != "" {
 			qrURL += "&backend=" + url.QueryEscape(relayURL)
 		}
@@ -726,14 +726,18 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	} else {
 		if receiverURL != "" {
 			baseHost := strings.TrimRight(receiverURL, "/")
-			qrURL = fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+			qrURL = fmt.Sprintf("%s/?backend=%s&token=%s", baseHost, url.QueryEscape(localURL), srv.Token())
 			if session != nil {
 				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
 			}
 		} else {
 			qrURL = localURL
 			if session != nil {
-				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				if strings.Contains(qrURL, "?") {
+					qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				} else {
+					qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				}
 			}
 		}
 	}
@@ -844,6 +848,17 @@ func downloadFile(code string) error {
 	if backend == "" {
 		backend = u.Scheme + "://" + u.Host
 	}
+
+	token := u.Query().Get("token")
+	if token == "" && backend != "" {
+		if bu, err := url.Parse(backend); err == nil {
+			token = bu.Query().Get("token")
+		}
+	}
+
+	if idx := strings.Index(backend, "?"); idx != -1 {
+		backend = backend[:idx]
+	}
 	backend = strings.TrimRight(backend, "/")
 
 	s := u.Query().Get("s")
@@ -853,8 +868,15 @@ func downloadFile(code string) error {
 	}
 
 	metaURL := backend + "/api/meta"
+	var metaParams []string
 	if s != "" {
-		metaURL += "?s=" + s
+		metaParams = append(metaParams, "s="+url.QueryEscape(s))
+	}
+	if token != "" {
+		metaParams = append(metaParams, "token="+url.QueryEscape(token))
+	}
+	if len(metaParams) > 0 {
+		metaURL += "?" + strings.Join(metaParams, "&")
 	}
 
 	fmt.Printf("  %s\n", dimStr("Fetching metadata..."))
@@ -875,8 +897,15 @@ func downloadFile(code string) error {
 	ui.PrintFileMeta(meta.Name, meta.Size)
 
 	downloadURL := backend + "/api/download"
+	var dlParams []string
 	if s != "" {
-		downloadURL += "?s=" + s
+		dlParams = append(dlParams, "s="+url.QueryEscape(s))
+	}
+	if token != "" {
+		dlParams = append(dlParams, "token="+url.QueryEscape(token))
+	}
+	if len(dlParams) > 0 {
+		downloadURL += "?" + strings.Join(dlParams, "&")
 	}
 
 	fmt.Printf("  %s\n", dimStr("Starting download..."))
