@@ -182,3 +182,42 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 		t.Fatal("consecutive frames reused the same nonce")
 	}
 }
+
+func TestMaxFrameSizeExceeded(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name        string
+		claimLength uint32
+	}{
+		{name: "One Byte Over MaxFrameSize", claimLength: MaxFrameSize + 1},
+		{name: "10MB Oversized Frame", claimLength: 10 * 1024 * 1024},
+		{name: "Max Uint32 Oversized Frame", claimLength: 0xFFFFFFFF},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tc.claimLength)
+			// Do not write actual payload data to ensure no large memory allocation/reads take place
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if err == nil {
+				t.Fatalf("expected error for frame size %d exceeding MaxFrameSize, got nil", tc.claimLength)
+			}
+			if err != ErrFrameTooLarge {
+				t.Fatalf("expected ErrFrameTooLarge (%v), got %v", ErrFrameTooLarge, err)
+			}
+		})
+	}
+}
+
