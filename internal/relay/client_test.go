@@ -226,3 +226,101 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		}
 	})
 }
+
+func TestUploadWithInvalidKeyLengths(t *testing.T) {
+	requestSent := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestSent = true
+		http.Error(w, "should not be called", http.StatusBadRequest)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	client.SessionID = "test-session"
+
+	invalidKeys := [][]byte{
+		make([]byte, 1),
+		make([]byte, 16),
+		make([]byte, 24),
+		make([]byte, 31),
+		make([]byte, 33),
+		make([]byte, 64),
+	}
+
+	for _, key := range invalidKeys {
+		requestSent = false
+		client.Key = key
+
+		err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader([]byte("secret cleartext payload")), 0)
+		if err == nil {
+			t.Fatalf("expected error for key length %d, got nil", len(key))
+		}
+		if requestSent {
+			t.Fatalf("HTTP request was sent for invalid key length %d, expected fail-closed before network transmission", len(key))
+		}
+		expectedErrMsg := "invalid encryption key length: expected 32 bytes"
+		if !bytes.Contains([]byte(err.Error()), []byte(expectedErrMsg)) {
+			t.Fatalf("expected error message to contain '%s', got '%v'", expectedErrMsg, err)
+		}
+
+		// Also test UploadData
+		tmpFile := filepath.Join(t.TempDir(), "test.bin")
+		if err := os.WriteFile(tmpFile, []byte("secret payload"), 0644); err != nil {
+			t.Fatalf("failed to write temp file: %v", err)
+		}
+		err = client.UploadData(context.Background(), tmpFile)
+		if err == nil {
+			t.Fatalf("expected error for UploadData with key length %d, got nil", len(key))
+		}
+		if requestSent {
+			t.Fatalf("HTTP request was sent during UploadData for invalid key length %d", len(key))
+		}
+	}
+}
+
+func TestUploadWithEmptyOrNilKey(t *testing.T) {
+	relayServer := NewServer()
+	ts := httptest.NewServer(relayServer)
+	defer ts.Close()
+
+	testCases := []struct {
+		name string
+		key  []byte
+	}{
+		{name: "NilKey", key: nil},
+		{name: "EmptyByteSliceKey", key: []byte{}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClient(ts.URL)
+			client.Key = tc.key
+
+			sessID, err := client.Register(context.Background())
+			if err != nil {
+				t.Fatalf("Register failed: %v", err)
+			}
+			sess := relayServer.getSession(sessID)
+
+			pr, pw := io.Pipe()
+			sess.SetPipes(pr, pw)
+
+			uploadDone := make(chan []byte, 1)
+			go func() {
+				data, _ := io.ReadAll(pr)
+				uploadDone <- data
+			}()
+
+			payload := []byte("unencrypted payload data")
+			err = client.UploadReaderAtOffset(context.Background(), bytes.NewReader(payload), 0)
+			if err != nil {
+				t.Fatalf("UploadReaderAtOffset failed for %s: %v", tc.name, err)
+			}
+
+			received := <-uploadDone
+			if string(received) != string(payload) {
+				t.Fatalf("expected received data '%s', got '%s'", string(payload), string(received))
+			}
+		})
+	}
+}
