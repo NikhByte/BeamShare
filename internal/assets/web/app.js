@@ -1151,7 +1151,6 @@ function qrToSvgDataUrl(qr, border = 4) {
 }
 
 
-
 function renderQRToCanvas(qr, canvas, border = 4) {
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error("Canvas 2D context unavailable");
@@ -2560,7 +2559,7 @@ function resetState() {
   if (idb) clearIDB().catch(console.error);
   document.getElementById('done-share-container')?.classList.add('hidden');
   
-  if (!virtualViewer) {
+  if (!virtualViewer || !virtualViewer.container || (typeof document !== 'undefined' && !document.contains(virtualViewer.container))) {
     virtualViewer = new VirtualLogViewer('.terminal-body', 100000);
   }
   if (virtualViewer) {
@@ -2904,6 +2903,9 @@ async function startHTTPDownload() {
 async function startHTTPSSE() {
   setState('livepipe');
   const source = new EventSource(apiPath('/api/live/stream'));
+  if (!virtualViewer || !virtualViewer.container || (typeof document !== 'undefined' && !document.contains(virtualViewer.container))) {
+    virtualViewer = new VirtualLogViewer('.terminal-body', 100000);
+  }
   if (virtualViewer) virtualViewer.clear();
 
   const useDiskStream = typeof window.showSaveFilePicker === 'function';
@@ -3186,7 +3188,7 @@ async function startWebRTC() {
     try {
       decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
     } catch(e) {
-      console.error("Failed to import decryption key", e);
+      console.error("Failed to parse decryption key from hash", e);
       showError("Decryption key error: " + e.message);
       if (webrtcDataChannel) webrtcDataChannel.close();
       pc.close();
@@ -3205,8 +3207,6 @@ async function startWebRTC() {
         dc.onopen = () => dc.send(`OFFSET:${initialOffset}`);
       }
 
-      let encBuffer = new Uint8Array(0);
-
       const chunkQueue = new SequentialChunkQueue({
         highWatermark: 16 * 1024 * 1024,
         lowWatermark: 4 * 1024 * 1024,
@@ -3221,243 +3221,79 @@ async function startWebRTC() {
           reject(err);
         },
         writeHandler: async (chunk) => {
-          if (decryptionKey) {
-            let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(chunk, encBuffer.length);
-            encBuffer = newBuffer;
-
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-              const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
-
-                if (frame.length < 12) {
-                  throw new Error("Invalid frame length: shorter than 12-byte nonce size");
-                }
-
-                const nonce = new Uint8Array(frame.subarray(0, 12));
-                const ciphertext = new Uint8Array(frame.subarray(12));
-
-                let decrypted;
-                try {
-                  decrypted = await crypto.subtle.decrypt(
-                    { name: "AES-GCM", iv: nonce },
-                    decryptionKey,
-                    ciphertext
-                  );
-                } catch (decryptErr) {
-                  throw new Error("Decryption failed: " + (decryptErr.message || String(decryptErr)));
-                }
-
-                const decValue = new Uint8Array(decrypted);
-
-                if (diskWritableStream) {
-                  await diskWritableStream.write(decValue);
-                } else if (swPipePort) {
-                  swPipePort.postMessage(decValue);
-                } else if (useIndexedDB) {
-                  await storeChunkIDB(decValue);
-                } else {
-                  receivedChunks.push(decValue);
-                }
-
-                receivedBytes += decValue.length;
-                maybeSaveProgress();
-                if (totalBytes > 0) {
-                  updateProgress(receivedBytes / totalBytes);
-                  updateDLStats(receivedBytes, totalBytes);
-                  updateSpeed(receivedBytes);
-                }
-              } else {
-                break;
-              }
-            }
+          if (diskWritableStream) {
+            await diskWritableStream.write(chunk);
+          } else if (swPipePort) {
+            swPipePort.postMessage(chunk);
+          } else if (useIndexedDB) {
+            await storeChunkIDB(chunk);
           } else {
-            if (diskWritableStream) {
-              await diskWritableStream.write(chunk);
-            } else if (swPipePort) {
-              swPipePort.postMessage(chunk);
-            } else if (useIndexedDB) {
-              await storeChunkIDB(chunk);
-            } else {
-              receivedChunks.push(chunk);
-            }
+            receivedChunks.push(chunk);
+          }
 
-            receivedBytes += chunk.byteLength;
-            maybeSaveProgress();
-            if (totalBytes > 0) {
-              updateProgress(receivedBytes / totalBytes);
-              updateDLStats(receivedBytes, totalBytes);
-              updateSpeed(receivedBytes);
-            }
+          receivedBytes += chunk.byteLength;
+          maybeSaveProgress();
+          if (totalBytes > 0) {
+            updateProgress(receivedBytes / totalBytes);
+            updateDLStats(receivedBytes, totalBytes);
+            updateSpeed(receivedBytes);
           }
         }
       });
 
-      encBuffer = new Uint8Array(0);
-      let decryptChain = Promise.resolve();
+      const decrypter = new WebRTCStreamDecrypter({
+        key: decryptionKey,
+        onChunk: (plaintext) => {
+          chunkQueue.enqueue(plaintext);
+        },
+        onError: (err) => {
+          showError(`Transfer failed: ${err.message}`);
+          try { dc.close(); } catch (e) {}
+          reject(err);
+        }
+      });
 
       dc.onmessage = (e) => {
-        if (decryptionKey) {
-          decryptChain = decryptChain.then(async () => {
-            if (typeof e.data === 'string') {
-              if (e.data === "EOF") {
-                chunkQueue.enqueueEOF();
-                try {
-                  await chunkQueue.drain();
-                  if (diskWritableStream) {
-                    await diskWritableStream.close();
-                    if (useOPFS) {
-                      const file = await diskFileHandle.getFile();
-                      triggerSave(file, currentFile.name);
-                    }
-                  } else if (swPipePort) {
-                    swPipePort.postMessage("EOF");
-                  } else {
-                    let finalBlob;
-                    if (useIndexedDB) {
-                      finalBlob = await getAllChunksIDB(currentFile.mime);
-                      await clearIDB();
-                    } else {
-                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                    }
-                    triggerSave(finalBlob, currentFile.name);
+        try {
+          if (typeof e.data === 'string') {
+            if (e.data === "EOF") {
+              chunkQueue.enqueueEOF();
+              chunkQueue.drain().then(async () => {
+                if (diskWritableStream) {
+                  await diskWritableStream.close();
+                  if (useOPFS) {
+                    const file = await diskFileHandle.getFile();
+                    triggerSave(file, currentFile.name);
                   }
-                  resolve();
-                } catch (err) {
-                  hasError = true;
-                  // Handled in chunkQueue onError callback
-                }
-              }
-              return;
-            }
-
-            const value = new Uint8Array(e.data);
-            let newBuffer = new Uint8Array(encBuffer.length + value.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(value, encBuffer.length);
-            encBuffer = newBuffer;
-
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-              const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
-
-                const nonce = new Uint8Array(frame.subarray(0, 12));
-                const ciphertext = new Uint8Array(frame.subarray(12));
-                const decrypted = await crypto.subtle.decrypt(
-                  { name: "AES-GCM", iv: nonce },
-                  decryptionKey,
-                  ciphertext
-                );
-                const decValue = new Uint8Array(decrypted);
-                chunkQueue.enqueue(decValue);
-              } else {
-                break;
-              }
-            }
-          }).catch((err) => {
-            showError(`Transfer failed: ${err.message}`);
-            dc.close();
-            reject(err);
-          });
-        } else {
-          try {
-            if (typeof e.data === 'string') {
-              if (e.data === "EOF") {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
-                  if (diskWritableStream) {
-                    await diskWritableStream.close();
-                    if (useOPFS) {
-                      const file = await diskFileHandle.getFile();
-                      triggerSave(file, currentFile.name);
-                    }
-                  } else if (swPipePort) {
-                    swPipePort.postMessage("EOF");
+                } else if (swPipePort) {
+                  swPipePort.postMessage("EOF");
+                } else {
+                  let finalBlob;
+                  if (useIndexedDB) {
+                    finalBlob = await getAllChunksIDB(currentFile.mime);
+                    await clearIDB();
                   } else {
-                    let finalBlob;
-                    if (useIndexedDB) {
-                      finalBlob = await getAllChunksIDB(currentFile.mime);
-                      await clearIDB();
-                    } else {
-                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                    }
-                    triggerSave(finalBlob, currentFile.name);
+                    finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
                   }
-                  resolve();
-                }).catch((err) => {
-                  // Handled in chunkQueue onError callback
-                });
-              }
-              return;
-            }
-
-            const chunk = new Uint8Array(e.data);
-            chunkQueue.enqueue(chunk);
-          } catch (err) {
-            showError(`Transfer failed: ${err.message}`);
-            dc.close();
-            reject(err);
-          }
-        }
-
-        const chunk = new Uint8Array(e.data);
-        msgChain = msgChain.then(async () => {
-          if (isTerminated) return;
-
-          if (decryptionKey) {
-            let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(chunk, encBuffer.length);
-            encBuffer = newBuffer;
-
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-              const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
-
-                if (frameLen < 12) {
-                  throw new Error("Invalid frame length: header smaller than nonce size");
+                  triggerSave(finalBlob, currentFile.name);
                 }
-
-                const nonce = new Uint8Array(frame.subarray(0, 12));
-                const ciphertext = new Uint8Array(frame.subarray(12));
-
-                let decrypted;
-                try {
-                  decrypted = await crypto.subtle.decrypt(
-                    { name: "AES-GCM", iv: nonce },
-                    decryptionKey,
-                    ciphertext
-                  );
-                } catch (decryptErr) {
-                  throw new Error("Decryption failed: corrupted frame or invalid key");
-                }
-
-                const decValue = new Uint8Array(decrypted);
-                chunkQueue.enqueue(decValue);
-              } else {
-                break;
-              }
+                resolve();
+              }).catch((err) => {
+                showError(`Transfer failed: ${err.message}`);
+                try { dc.close(); } catch (e) {}
+                reject(err);
+              });
             }
-          } else {
-            chunkQueue.enqueue(chunk);
+            return;
           }
-        }).catch((err) => {
-          if (isTerminated) return;
-          isTerminated = true;
+
+          const chunk = new Uint8Array(e.data);
+          decrypter.write(chunk);
+        } catch (err) {
           showError(`Transfer failed: ${err.message}`);
-          try { dc.close(); } catch (closeErr) {}
+          try { dc.close(); } catch (e) {}
           reject(err);
-        });
+        }
       };
 
       dc.onerror = (e) => reject(new Error('data channel error: ' + e));
@@ -3528,6 +3364,70 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
         resolve();
       }
     }, pollMs);
+  });
+}
+
+function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark = 512 * 1024) {
+  return new Promise((resolve, reject) => {
+    if (!dc || dc.readyState !== 'open') {
+      return reject(new Error("Data channel is closed or closing"));
+    }
+
+    try {
+      dc.bufferedAmountLowThreshold = lowWatermark;
+    } catch (e) {}
+
+    if (dc.bufferedAmount <= lowWatermark) {
+      return resolve();
+    }
+
+    let timer = null;
+
+    const cleanup = () => {
+      if (dc && typeof dc.removeEventListener === 'function') {
+        dc.removeEventListener('bufferedamountlow', onLow);
+        dc.removeEventListener('close', onClose);
+        dc.removeEventListener('error', onClose);
+      }
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+
+    const onLow = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error("Data channel is closed or closing"));
+    };
+
+    dc.addEventListener('bufferedamountlow', onLow);
+    dc.addEventListener('close', onClose);
+    dc.addEventListener('error', onClose);
+
+    if (dc.bufferedAmount <= lowWatermark) {
+      cleanup();
+      return resolve();
+    }
+
+    if (dc.readyState !== 'open') {
+      cleanup();
+      return reject(new Error("Data channel is closed or closing"));
+    }
+
+    timer = setInterval(() => {
+      if (!dc || dc.readyState !== 'open') {
+        cleanup();
+        reject(new Error("Data channel is closed or closing"));
+      } else if (dc.bufferedAmount <= lowWatermark) {
+        cleanup();
+        resolve();
+      }
+    }, 250);
   });
 }
 
@@ -3673,6 +3573,9 @@ function triggerSave(blob, name) {
 }
 
 function appendTerminalText(text) {
+  if (!virtualViewer || !virtualViewer.container || (typeof document !== 'undefined' && !document.contains(virtualViewer.container))) {
+    virtualViewer = new VirtualLogViewer('.terminal-body', 100000);
+  }
   if (virtualViewer) virtualViewer.append(text);
   receivedBytes += text.length;
 }
@@ -3758,372 +3661,6 @@ function initSpotlight() {
     card.style.setProperty('--mouse-x', `${((e.clientX - r.left) / r.width * 100)}%`);
     card.style.setProperty('--mouse-y', `${((e.clientY - r.top)  / r.height * 100)}%`);
   });
-}
-
-// ── Local QR Code Generator ───────────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
-(function initGF256() {
-  let x = 1;
-  for (let i = 0; i < 255; i++) {
-    GF256_EXP[i] = x;
-    GF256_EXP[i + 255] = x;
-    GF256_LOG[x] = i;
-    x <<= 1;
-    if (x & 256) x ^= 285;
-  }
-})();
-
-function gfMul(x, y) {
-  if (x === 0 || y === 0) return 0;
-  return GF256_EXP[GF256_LOG[x] + GF256_LOG[y]];
-}
-
-function rsPolyMul(p1, p2) {
-  const result = new Uint8Array(p1.length + p2.length - 1);
-  for (let i = 0; i < p1.length; i++) {
-    for (let j = 0; j < p2.length; j++) {
-      result[i + j] ^= gfMul(p1[i], p2[j]);
-    }
-  }
-  return result;
-}
-
-function rsGenPoly(numEc) {
-  let g = new Uint8Array([1]);
-  for (let i = 0; i < numEc; i++) {
-    g = rsPolyMul(g, new Uint8Array([1, GF256_EXP[i]]));
-  }
-  return g;
-}
-
-function rsComputeSyndromes(data, numEc) {
-  const gen = rsGenPoly(numEc);
-  const msg = new Uint8Array(data.length + numEc);
-  msg.set(data);
-  for (let i = 0; i < data.length; i++) {
-    const coef = msg[i];
-    if (coef !== 0) {
-      for (let j = 0; j < gen.length; j++) {
-        msg[i + j] ^= gfMul(gen[j], coef);
-      }
-    }
-  }
-  return msg.slice(data.length);
-}
-
-const RS_BLOCK_TABLE_L = [
-  [19, 7, 1, 19, 0, 0], [34, 10, 1, 34, 0, 0], [55, 15, 1, 55, 0, 0], [80, 20, 1, 80, 0, 0],
-  [108, 26, 1, 108, 0, 0], [136, 18, 2, 68, 0, 0], [156, 20, 2, 78, 0, 0], [194, 24, 2, 97, 0, 0],
-  [232, 30, 2, 116, 0, 0], [274, 18, 2, 68, 2, 69], [324, 20, 4, 81, 0, 0], [370, 24, 2, 92, 2, 93],
-  [428, 26, 4, 107, 0, 0], [461, 30, 3, 115, 1, 116], [523, 22, 5, 87, 1, 88], [586, 24, 5, 98, 1, 99],
-  [647, 28, 1, 107, 5, 108], [721, 30, 5, 120, 1, 121], [795, 28, 3, 113, 4, 114], [868, 28, 3, 107, 5, 108],
-  [926, 28, 4, 115, 4, 116], [1002, 28, 2, 125, 6, 126], [1091, 30, 4, 121, 5, 122], [1171, 30, 6, 117, 4, 118],
-  [1277, 26, 8, 106, 4, 107], [1367, 28, 10, 114, 2, 115], [1465, 28, 8, 122, 4, 123], [1528, 30, 3, 117, 10, 118],
-  [1628, 30, 7, 116, 7, 117], [1732, 30, 5, 115, 10, 116], [1840, 30, 13, 115, 3, 116], [1952, 30, 17, 115, 0, 0],
-  [2068, 30, 17, 115, 1, 116], [2188, 30, 19, 115, 1, 116], [2303, 30, 6, 115, 14, 116], [2431, 30, 6, 115, 15, 116],
-  [2563, 30, 17, 115, 5, 116], [2699, 30, 4, 115, 19, 116], [2809, 30, 20, 115, 4, 116], [2953, 30, 19, 115, 6, 116]
-];
-
-const ALIGNMENT_POS = [
-  [], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34],
-  [6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50], [6, 30, 54],
-  [6, 32, 58], [6, 34, 62], [6, 26, 46, 66], [6, 26, 48, 70], [6, 26, 50, 74],
-  [6, 30, 54, 78], [6, 30, 56, 82], [6, 30, 58, 86], [6, 34, 62, 90],
-  [6, 28, 50, 72, 94], [6, 26, 50, 74, 98], [6, 30, 54, 78, 102], [6, 28, 54, 80, 106],
-  [6, 32, 58, 84, 110], [6, 30, 58, 86, 114], [6, 34, 62, 90, 118], [6, 26, 50, 74, 98, 122],
-  [6, 30, 54, 78, 102, 126], [6, 26, 52, 78, 104, 130], [6, 30, 56, 82, 108, 134],
-  [6, 34, 60, 86, 112, 138], [6, 30, 58, 86, 114, 142], [6, 34, 62, 90, 118, 146],
-  [6, 30, 54, 78, 102, 126, 150], [6, 24, 50, 76, 102, 128, 154], [6, 28, 54, 80, 106, 132, 158],
-  [6, 32, 58, 84, 110, 136, 162], [6, 26, 54, 82, 110, 138, 166], [6, 30, 58, 86, 114, 142, 170]
-];
-
-function getFormatInfo(ecLevelBit, maskPattern) {
-  const data = (ecLevelBit << 3) | maskPattern;
-  let rem = data << 10;
-  for (let i = 4; i >= 0; i--) {
-    if (rem & (1 << (i + 10))) {
-      rem ^= (0x537 << i);
-    }
-  }
-  return ((data << 10) | rem) ^ 0x5370;
-}
-
-function getVersionInfo(version) {
-  let rem = version << 12;
-  for (let i = 5; i >= 0; i--) {
-    if (rem & (1 << (i + 12))) {
-      rem ^= (0x1F25 << i);
-    }
-  }
-  return (version << 12) | rem;
-}
-
-function generateQRCodeSVG(text) {
-  let bytes;
-  if (typeof TextEncoder !== 'undefined') {
-    bytes = new TextEncoder().encode(text);
-  } else {
-    bytes = new Uint8Array(text.length);
-    for (let i = 0; i < text.length; i++) {
-      bytes[i] = text.charCodeAt(i) & 0xff;
-    }
-  }
-
-  let version = 1;
-  let spec = null;
-  for (let v = 1; v <= 40; v++) {
-    spec = RS_BLOCK_TABLE_L[v - 1];
-    const totalDataCap = spec[0];
-    const headerBits = 4 + (v >= 10 ? 16 : 8);
-    const requiredBits = headerBits + bytes.length * 8;
-    if (requiredBits <= totalDataCap * 8) {
-      version = v;
-      break;
-    }
-  }
-
-  const specCap = spec[0];
-  const ecPerBlock = spec[1];
-  const g1Blocks = spec[2];
-  const g1Data = spec[3];
-  const g2Blocks = spec[4];
-  const g2Data = spec[5];
-  const totalBlocks = g1Blocks + g2Blocks;
-
-  const bits = [];
-  function pushBits(val, count) {
-    for (let i = count - 1; i >= 0; i--) {
-      bits.push((val >> i) & 1);
-    }
-  }
-
-  pushBits(4, 4);
-  pushBits(bytes.length, version >= 10 ? 16 : 8);
-  for (let b of bytes) {
-    pushBits(b, 8);
-  }
-  const totalBitsCap = specCap * 8;
-  const termBits = Math.min(4, totalBitsCap - bits.length);
-  pushBits(0, termBits);
-  while (bits.length % 8 !== 0) {
-    bits.push(0);
-  }
-  const padBytes = [0xEC, 0x11];
-  let padIdx = 0;
-  while (bits.length < totalBitsCap) {
-    pushBits(padBytes[padIdx % 2], 8);
-    padIdx++;
-  }
-
-  const dataCodewords = new Uint8Array(specCap);
-  for (let i = 0; i < specCap; i++) {
-    let byteVal = 0;
-    for (let b = 0; b < 8; b++) {
-      byteVal = (byteVal << 1) | bits[i * 8 + b];
-    }
-    dataCodewords[i] = byteVal;
-  }
-
-  const blocks = [];
-  let cwOffset = 0;
-  for (let b = 0; b < g1Blocks; b++) {
-    const blockData = dataCodewords.slice(cwOffset, cwOffset + g1Data);
-    cwOffset += g1Data;
-    const ec = rsComputeSyndromes(blockData, ecPerBlock);
-    blocks.push({ data: blockData, ec });
-  }
-  for (let b = 0; b < g2Blocks; b++) {
-    const blockData = dataCodewords.slice(cwOffset, cwOffset + g2Data);
-    cwOffset += g2Data;
-    const ec = rsComputeSyndromes(blockData, ecPerBlock);
-    blocks.push({ data: blockData, ec });
-  }
-
-  const finalCodewords = [];
-  const maxDataLen = Math.max(g1Data, g2Data);
-  for (let i = 0; i < maxDataLen; i++) {
-    for (let b = 0; b < totalBlocks; b++) {
-      if (i < blocks[b].data.length) {
-        finalCodewords.push(blocks[b].data[i]);
-      }
-    }
-  }
-  for (let i = 0; i < ecPerBlock; i++) {
-    for (let b = 0; b < totalBlocks; b++) {
-      finalCodewords.push(blocks[b].ec[i]);
-    }
-  }
-
-  const size = version * 4 + 17;
-  const modules = Array.from({ length: size }, () => new Uint8Array(size));
-  const isFunction = Array.from({ length: size }, () => new Uint8Array(size));
-
-  function placeFinder(r, c) {
-    for (let dr = -1; dr <= 7; dr++) {
-      for (let dc = -1; dc <= 7; dc++) {
-        const nr = r + dr;
-        const nc = c + dc;
-        if (nr >= 0 && nr < size && nc >= 0 && nc < size) {
-          isFunction[nr][nc] = 1;
-          if (dr >= 0 && dr <= 6 && dc >= 0 && dc <= 6) {
-            if (dr === 0 || dr === 6 || dc === 0 || dc === 6 || (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4)) {
-              modules[nr][nc] = 1;
-            } else {
-              modules[nr][nc] = 0;
-            }
-          } else {
-            modules[nr][nc] = 0;
-          }
-        }
-      }
-    }
-  }
-  placeFinder(0, 0);
-  placeFinder(0, size - 7);
-  placeFinder(size - 7, 0);
-
-  const alignCoords = ALIGNMENT_POS[version - 1];
-  for (let r of alignCoords) {
-    for (let c of alignCoords) {
-      if (isFunction[r][c]) continue;
-      for (let dr = -2; dr <= 2; dr++) {
-        for (let dc = -2; dc <= 2; dc++) {
-          const nr = r + dr;
-          const nc = c + dc;
-          isFunction[nr][nc] = 1;
-          if (Math.abs(dr) === 2 || Math.abs(dc) === 2 || (dr === 0 && dc === 0)) {
-            modules[nr][nc] = 1;
-          } else {
-            modules[nr][nc] = 0;
-          }
-        }
-      }
-    }
-  }
-
-  for (let i = 8; i < size - 8; i++) {
-    if (!isFunction[6][i]) {
-      isFunction[6][i] = 1;
-      modules[6][i] = (i % 2 === 0) ? 1 : 0;
-    }
-    if (!isFunction[i][6]) {
-      isFunction[i][6] = 1;
-      modules[i][6] = (i % 2 === 0) ? 1 : 0;
-    }
-  }
-
-  isFunction[size - 8][8] = 1;
-  modules[size - 8][8] = 1;
-
-  for (let i = 0; i < 9; i++) {
-    if (i !== 6) {
-      isFunction[8][i] = 1;
-      isFunction[i][8] = 1;
-    }
-  }
-  for (let i = 0; i < 8; i++) {
-    isFunction[8][size - 1 - i] = 1;
-    isFunction[size - 1 - i][8] = 1;
-  }
-
-  if (version >= 7) {
-    for (let r = 0; r < 6; r++) {
-      for (let c = 0; c < 3; c++) {
-        isFunction[r][size - 11 + c] = 1;
-        isFunction[size - 11 + c][r] = 1;
-      }
-    }
-  }
-
-  const flatBits = [];
-  for (let cw of finalCodewords) {
-    for (let i = 7; i >= 0; i--) {
-      flatBits.push((cw >> i) & 1);
-    }
-  }
-
-  let bitIdx = 0;
-  let up = true;
-  for (let right = size - 1; right > 0; right -= 2) {
-    if (right === 6) right--;
-    const rows = [];
-    if (up) {
-      for (let r = size - 1; r >= 0; r--) rows.push(r);
-    } else {
-      for (let r = 0; r < size; r++) rows.push(r);
-    }
-    for (let r of rows) {
-      for (let c of [right, right - 1]) {
-        if (!isFunction[r][c]) {
-          if (bitIdx < flatBits.length) {
-            modules[r][c] = flatBits[bitIdx++];
-          }
-        }
-      }
-    }
-    up = !up;
-  }
-
-  const mask = 0;
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      if (!isFunction[r][c]) {
-        if ((r + c) % 2 === 0) {
-          modules[r][c] ^= 1;
-        }
-      }
-    }
-  }
-
-  const formatInfo = getFormatInfo(1, mask);
-  const formatBits = [];
-  for (let i = 14; i >= 0; i--) {
-    formatBits.push((formatInfo >> i) & 1);
-  }
-
-  const formatCoordsTopLeft = [
-    [8, 0], [8, 1], [8, 2], [8, 3], [8, 4], [8, 5], [8, 7], [8, 8],
-    [7, 8], [5, 8], [4, 8], [3, 8], [2, 8], [1, 8], [0, 8]
-  ];
-  const formatCoordsSplit = [
-    [size - 1, 8], [size - 2, 8], [size - 3, 8], [size - 4, 8], [size - 5, 8], [size - 6, 8], [size - 7, 8],
-    [8, size - 8], [8, size - 7], [8, size - 6], [8, size - 5], [8, size - 4], [8, size - 3], [8, size - 2], [8, size - 1]
-  ];
-
-  for (let i = 0; i < 15; i++) {
-    const [r1, c1] = formatCoordsTopLeft[i];
-    modules[r1][c1] = formatBits[i];
-    const [r2, c2] = formatCoordsSplit[i];
-    modules[r2][c2] = formatBits[i];
-  }
-
-  if (version >= 7) {
-    const verInfo = getVersionInfo(version);
-    for (let i = 0; i < 18; i++) {
-      const bit = (verInfo >> i) & 1;
-      const r1 = Math.floor(i / 3);
-      const c1 = size - 11 + (i % 3);
-      modules[r1][c1] = bit;
-      modules[c1][r1] = bit;
-    }
-  }
-
-  const margin = 4;
-  const totalSize = size + margin * 2;
-  let pathD = "";
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      if (modules[r][c]) {
-        const x = c + margin;
-        const y = r + margin;
-        pathD += `M${x},${y}h1v1h-1z`;
-      }
-    }
-  }
-
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalSize} ${totalSize}" width="100%" height="100%"><rect width="${totalSize}" height="${totalSize}" fill="#ffffff"/><path d="${pathD}" fill="#000000"/></svg>`;
-  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
 }
 
 // ── Format helpers ────────────────────────────────────────────────────────────
@@ -4215,7 +3752,7 @@ async function startSenderSharing() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        offer: senderPeerConnection.localDescription.sdp,
+        offer: (senderPeerConnection.localDescription && senderPeerConnection.localDescription.sdp) || offer.sdp,
         candidates: localCandidates,
         meta: {
           name: senderFile.name,
@@ -4423,10 +3960,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (dc.bufferedAmount > 0) {
+  if (dc && dc.bufferedAmount > 0) {
     await waitForBufferedAmountLow(dc, 0);
   }
-  dc.send("EOF");
+  if (dc) dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
@@ -5033,6 +4570,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     uploadFileP2P,
