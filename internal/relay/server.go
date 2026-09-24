@@ -126,18 +126,14 @@ func (s *Session) closeUploadPipesLocked(err error) {
 }
 
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
-	prClosed := false
-	pwClosed := false
+	isFullClose := (pr == nil && pw == nil)
 
-	if pr == nil || (pr != nil && s.DataPipeR == pr) || (pw != nil && s.DataPipeW == pw) {
+	if isFullClose || (pr != nil && s.DataPipeR == pr) || (pw != nil && s.DataPipeW == pw) {
 		if s.DataPipeW != nil {
 			if err != nil {
 				s.DataPipeW.CloseWithError(err)
 			} else {
 				s.DataPipeW.Close()
-			}
-			if pw != nil && s.DataPipeW == pw {
-				pwClosed = true
 			}
 			s.DataPipeW = nil
 		}
@@ -147,22 +143,16 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			} else {
 				s.DataPipeR.Close()
 			}
-			if pr != nil && s.DataPipeR == pr {
-				prClosed = true
-			}
 			s.DataPipeR = nil
 		}
 	}
 
-	if pr == nil || (pr != nil && s.UploadPipeR == pr) || (pw != nil && s.UploadPipeW == pw) {
+	if isFullClose || (pr != nil && s.UploadPipeR == pr) || (pw != nil && s.UploadPipeW == pw) {
 		if s.UploadPipeW != nil {
 			if err != nil {
 				s.UploadPipeW.CloseWithError(err)
 			} else {
 				s.UploadPipeW.Close()
-			}
-			if pw != nil && s.UploadPipeW == pw {
-				pwClosed = true
 			}
 			s.UploadPipeW = nil
 		}
@@ -172,25 +162,24 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			} else {
 				s.UploadPipeR.Close()
 			}
-			if pr != nil && s.UploadPipeR == pr {
-				prClosed = true
-			}
 			s.UploadPipeR = nil
 		}
 	}
 
-	if pw != nil && !pwClosed {
-		if err != nil {
-			pw.CloseWithError(err)
-		} else {
-			pw.Close()
+	if !isFullClose {
+		if pw != nil && pw != s.DataPipeW && pw != s.UploadPipeW {
+			if err != nil {
+				pw.CloseWithError(err)
+			} else {
+				pw.Close()
+			}
 		}
-	}
-	if pr != nil && !prClosed {
-		if err != nil {
-			pr.CloseWithError(err)
-		} else {
-			pr.Close()
+		if pr != nil && pr != s.DataPipeR && pr != s.UploadPipeR {
+			if err != nil {
+				pr.CloseWithError(err)
+			} else {
+				pr.Close()
+			}
 		}
 	}
 }
@@ -1228,19 +1217,37 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if part.FormName() == "file" {
-			pr, pw := io.Pipe()
-
 			sess.mu.Lock()
 			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
-				sess.closePipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new upload request"))
+				sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
 			}
+			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
 			sess.mu.Unlock()
 
 			var uploadErr error
 			defer func() {
-				sess.ClosePipesIfMatch(pr, pw, uploadErr)
+				if uploadErr != nil {
+					sess.ClosePipesIfMatch(pr, pw, uploadErr)
+				}
+			}()
+
+			done := make(chan struct{})
+			defer close(done)
+
+			go func() {
+				select {
+				case <-done:
+					return
+				case <-r.Context().Done():
+					select {
+					case <-done:
+						return
+					default:
+						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("upload context cancelled: %w", r.Context().Err()))
+					}
+				}
 			}()
 
 			// Notify sender
@@ -1249,66 +1256,41 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 
-			copyDone := make(chan error, 1)
+			chunks := make(chan []byte, 1)
+
 			go func() {
-				type chunk struct {
-					data []byte
-					err  error
-				}
-				chunks := make(chan chunk, 16)
-
-				go func() {
-					defer close(chunks)
-					for {
-						buf := make([]byte, 32*1024)
-						n, readErr := part.Read(buf)
-						if n > 0 {
-							cData := make([]byte, n)
-							copy(cData, buf[:n])
-							chunks <- chunk{data: cData}
-						}
-						if readErr != nil {
-							if readErr != io.EOF {
-								chunks <- chunk{err: readErr}
-							}
-							break
-						}
-					}
-				}()
-
-				var writeErr error
-				for c := range chunks {
-					if c.err != nil {
-						writeErr = c.err
-						break
-					}
-					if len(c.data) > 0 {
-						_, err := pw.Write(c.data)
-						if err != nil {
-							writeErr = err
-							break
-						}
+				defer pw.Close()
+				for chunk := range chunks {
+					_, writeErr := pw.Write(chunk)
+					if writeErr != nil {
+						pw.CloseWithError(writeErr)
+						return
 					}
 				}
-
-				if writeErr != nil {
-					pw.CloseWithError(writeErr)
-				} else {
-					pw.Close()
-				}
-				part.Close()
-				copyDone <- writeErr
 			}()
 
-			select {
-			case uploadErr = <-copyDone:
-			case <-r.Context().Done():
-				uploadErr = fmt.Errorf("upload context cancelled: %w", r.Context().Err())
-				sess.ClosePipesIfMatch(pr, pw, uploadErr)
+			buf := make([]byte, 32*1024)
+			for {
+				n, errRead := part.Read(buf)
+				if n > 0 {
+					chunk := make([]byte, n)
+					copy(chunk, buf[:n])
+					select {
+					case chunks <- chunk:
+					default:
+					}
+				}
+				if errRead != nil {
+					close(chunks)
+					if errRead != io.EOF {
+						uploadErr = errRead
+						pw.CloseWithError(uploadErr)
+					}
+					break
+				}
 			}
 
-			if uploadErr != nil {
-				http.Error(w, uploadErr.Error(), http.StatusInternalServerError)
+			if uploadErr != nil || r.Context().Err() != nil {
 				return
 			}
 
@@ -1343,23 +1325,30 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var pullErr error
+	var copyErr error
 	defer func() {
-		sess.ClosePipesIfMatch(pr, pw, pullErr)
+		if copyErr != nil {
+			sess.ClosePipesIfMatch(pr, pw, copyErr)
+		}
+	}()
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-r.Context().Done():
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("pull context cancelled: %w", r.Context().Err()))
+			}
+		}
 	}()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-
-	copyDone := make(chan error, 1)
-	go func() {
-		_, cErr := io.Copy(w, pr)
-		copyDone <- cErr
-	}()
-
-	select {
-	case pullErr = <-copyDone:
-	case <-r.Context().Done():
-		pullErr = fmt.Errorf("pull context cancelled: %w", r.Context().Err())
-		sess.ClosePipesIfMatch(pr, pw, pullErr)
-	}
+	_, copyErr = io.Copy(w, pr)
 }
