@@ -3,6 +3,8 @@ package relay
 import (
 	"context"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -259,6 +261,161 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestSession_ClosePipesClosesUploadPipes(t *testing.T) {
+	pr, pw := io.Pipe()
+	sess := &Session{
+		ID:          "test-pipe-close",
+		UploadPipeR: pr,
+		UploadPipeW: pw,
+	}
+
+	testErr := fmt.Errorf("session expired")
+	sess.ClosePipes(testErr)
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR, "UploadPipeR should be reset to nil")
+	assert.Nil(t, sess.UploadPipeW, "UploadPipeW should be reset to nil")
+	sess.mu.Unlock()
+
+	buf := make([]byte, 10)
+	_, errRead := pr.Read(buf)
+	assert.Error(t, errRead, "Reading from closed UploadPipeR should return error")
+
+	_, errWrite := pw.Write([]byte("test"))
+	assert.Error(t, errWrite, "Writing to closed UploadPipeW should return error")
+}
+
+func TestServer_SessionExpirationUnblocksBlockedUpload(t *testing.T) {
+	srv := NewServerWithConfig(10*time.Second, 10*time.Millisecond)
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	reqR, reqW := io.Pipe()
+	mw := multipart.NewWriter(reqW)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		part, err := mw.CreateFormFile("file", "test.bin")
+		if err != nil {
+			reqW.CloseWithError(err)
+			return
+		}
+		part.Write([]byte("initial chunk"))
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, reqR)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	client := newTestHTTPClient()
+	respChan := make(chan *http.Response, 1)
+	errChan := make(chan error, 1)
+
+	go func() {
+		resp, errDo := client.Do(req)
+		if errDo != nil {
+			errChan <- errDo
+		} else {
+			respChan <- resp
+		}
+	}()
+
+	require.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil && sess.UploadPipeW != nil
+	}, 2*time.Second, 10*time.Millisecond, "handleUpload did not set upload pipes")
+
+	sess.mu.Lock()
+	sess.expiresAt = time.Now().Add(-1 * time.Second)
+	sess.mu.Unlock()
+
+	srv.SweepExpiredSessions()
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		reqW.CloseWithError(fmt.Errorf("client cleanup"))
+	}()
+
+	select {
+	case resp := <-respChan:
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	case errDo := <-errChan:
+		t.Logf("Client received error: %v", errDo)
+	case <-ctx.Done():
+		t.Fatal("Test timed out waiting for upload request to be unblocked by session expiration")
+	}
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+}
+
+func TestServer_ReassignUploadPipesClosesPreviousPipes(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	pr1, pw1 := io.Pipe()
+	sess.mu.Lock()
+	sess.UploadPipeR = pr1
+	sess.UploadPipeW = pw1
+	sess.mu.Unlock()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	go func() {
+		for {
+			sess.mu.Lock()
+			pr := sess.UploadPipeR
+			sess.mu.Unlock()
+			if pr != nil && pr != pr1 {
+				resp, err := http.Get(ts.URL + "/relay/pull?session=" + sess.ID)
+				if err == nil {
+					io.ReadAll(resp.Body)
+					resp.Body.Close()
+				}
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	reqR, reqW := io.Pipe()
+	mw := multipart.NewWriter(reqW)
+	go func() {
+		defer reqW.Close()
+		defer mw.Close()
+		part, _ := mw.CreateFormFile("file", "second.bin")
+		part.Write([]byte("hello"))
+	}()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, reqR)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	client := newTestHTTPClient()
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	_, errRead := pr1.Read(make([]byte, 10))
+	assert.Error(t, errRead, "Previous UploadPipeR should be closed")
+
+	_, errWrite := pw1.Write([]byte("data"))
+	assert.Error(t, errWrite, "Previous UploadPipeW should be closed")
 }
 
 
