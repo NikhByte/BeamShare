@@ -273,7 +273,10 @@
         <!-- Sharing container for uploads -->
         <div id="done-share-container" class="hidden" style="display: flex; flex-direction: column; gap: 0.75rem; align-items: center; width: 100%;">
           <p class="hint" style="color: var(--emerald-500); font-weight: 500;">Other devices can scan this QR to receive your file:</p>
-          <img id="done-qr-img" src="" alt="Share QR" style="border: 4px solid white; border-radius: 8px; width: 180px; height: 180px;" />
+          <div style="background: white; padding: 0.5rem; border-radius: 8px; display: flex; align-items: center; justify-content: center;">
+            <canvas id="done-qr-canvas" width="180" height="180" style="width: 180px; height: 180px; display: block;"></canvas>
+            <img id="done-qr-img" class="hidden" src="" alt="Share QR" style="width: 180px; height: 180px;" />
+          </div>
           <button class="btn-terminal-action" id="btn-copy-share-url" style="padding: 0.5rem 1rem;">Copy Share Link</button>
         </div>
 
@@ -323,7 +326,8 @@
       <div id="state-send-sharing" class="state hidden" aria-live="polite">
         <div id="send-link-section" style="display: flex; flex-direction: column; align-items: center; gap: 1rem; width: 100%;">
           <div style="background: white; padding: 0.75rem; border-radius: 12px; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 20px rgba(0,0,0,0.4);">
-            <img id="send-qr-img" src="" alt="Scan to receive" style="width: 160px; height: 160px;" />
+            <canvas id="send-qr-canvas" width="180" height="180" style="width: 160px; height: 160px; display: block;"></canvas>
+            <img id="send-qr-img" class="hidden" src="" alt="Scan to receive" style="width: 160px; height: 160px;" />
           </div>
           <p class="state-label" style="font-size: 0.95rem; color: var(--sky-400); margin-bottom: 0.25rem;">Sharing Link Ready</p>
           <div style="display: flex; gap: 0.5rem; width: 100%;">
@@ -399,6 +403,7 @@
   </div>
 
   <script src="/static/pako.min.js"></script>
+  <script src="/static/qrious.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
