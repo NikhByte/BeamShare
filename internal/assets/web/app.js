@@ -104,54 +104,60 @@ let currentFile      = null;
  * @param {number} timeoutMs - Timeout fallback in milliseconds (default: 250)
  * @returns {Promise<void>}
  */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 250) {
-  if (!dc) return Promise.resolve();
-  try {
-    dc.bufferedAmountLowThreshold = targetThreshold;
-  } catch (e) {}
-
-  if (dc.bufferedAmount <= targetThreshold) {
+function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark = 512 * 1024) {
+  if (!dc || dc.readyState !== 'open') {
+    return Promise.reject(new Error("Data channel is closed or closing"));
+  }
+  if (dc.bufferedAmount <= lowWatermark) {
+    dc.bufferedAmountLowThreshold = lowWatermark;
     return Promise.resolve();
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    dc.bufferedAmountLowThreshold = lowWatermark;
     let timer = null;
-    let resolved = false;
 
-    const cleanupAndResolve = () => {
-      if (resolved) return;
-      resolved = true;
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      try {
-        dc.removeEventListener('bufferedamountlow', listener);
-      } catch (e) {}
+    const cleanup = () => {
+      dc.removeEventListener('bufferedamountlow', onLow);
+      dc.removeEventListener('close', onClose);
+      dc.removeEventListener('error', onClose);
+      if (timer) clearInterval(timer);
+    };
+
+    const onLow = () => {
+      cleanup();
       resolve();
     };
 
-    const listener = () => {
-      cleanupAndResolve();
+    const onClose = () => {
+      cleanup();
+      reject(new Error("Data channel closed or closing"));
     };
 
-    try {
-      dc.addEventListener('bufferedamountlow', listener);
-    } catch (e) {
-      cleanupAndResolve();
+    dc.addEventListener('bufferedamountlow', onLow);
+    dc.addEventListener('close', onClose);
+    dc.addEventListener('error', onClose);
+
+    if (dc.bufferedAmount <= lowWatermark) {
+      cleanup();
+      resolve();
       return;
     }
 
-    // Immediate post-registration check in case threshold was crossed during callback setup
-    if (dc.bufferedAmount <= targetThreshold) {
-      cleanupAndResolve();
-      return;
-    }
-
-    timer = setTimeout(() => {
-      cleanupAndResolve();
-    }, timeoutMs);
+    timer = setInterval(() => {
+      if (dc.readyState !== 'open') {
+        cleanup();
+        reject(new Error("Data channel closed or closing"));
+      } else if (dc.bufferedAmount <= lowWatermark) {
+        cleanup();
+        resolve();
+      }
+    }, 200);
   });
+}
+
+function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 250) {
+  return waitForDataChannelBuffer(dc, targetThreshold, targetThreshold);
 }
 let transferMode     = 'http';   // 'webrtc' | 'http'
 let startTime        = 0;
@@ -1126,6 +1132,45 @@ function generateClientQRCodeDataURL(text) {
     return window.qrcode.generateQRCodeSVGDataURL(text);
   }
   return '';
+}
+
+// ── Local QR Code Generation ──────────────────────────────────────────────────
+function renderLocalQRCode(canvasId, imgId, text, size = 180, level = 'H') {
+  const canvas = document.getElementById(canvasId);
+  const img = imgId ? document.getElementById(imgId) : null;
+  const QRiousClass = (typeof QRious !== 'undefined') ? QRious : (typeof window !== 'undefined' ? window.QRious : null);
+
+  if (canvas && QRiousClass) {
+    try {
+      new QRiousClass({
+        element: canvas,
+        value: text,
+        size: size,
+        level: level
+      });
+      if (img && typeof canvas.toDataURL === 'function') {
+        try {
+          img.src = canvas.toDataURL('image/png');
+        } catch (_) {}
+      }
+      return;
+    } catch (e) {
+      console.warn("QRious rendering failed on canvas:", e);
+    }
+  }
+
+  if (img && QRiousClass) {
+    try {
+      const qr = new QRiousClass({
+        value: text,
+        size: size,
+        level: level
+      });
+      img.src = qr.toDataURL();
+    } catch (e) {
+      console.warn("QRious dataURL fallback failed:", e);
+    }
+  }
 }
 
 // ── QR Scanning ───────────────────────────────────────────────────────────────
@@ -2113,7 +2158,7 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
+      encBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -2122,43 +2167,8 @@ async function startWebRTC() {
             if (typeof e.data === 'string') {
               if (e.data === "EOF") {
                 chunkQueue.enqueueEOF();
-                await chunkQueue.drain();
-                if (diskWritableStream) {
-                  await diskWritableStream.close();
-                  if (useOPFS) {
-                    const file = await diskFileHandle.getFile();
-                    triggerSave(file, currentFile.name);
-                  }
-                  chunkQueue.enqueueEOF();
-                  try {
-                    await chunkQueue.drain();
-                    if (diskWritableStream) {
-                      await diskWritableStream.close();
-                      if (useOPFS) {
-                        const file = await diskFileHandle.getFile();
-                        triggerSave(file, currentFile.name);
-                      }
-                    } else if (swPipePort) {
-                      swPipePort.postMessage("EOF");
-                    } else {
-                      let finalBlob;
-                      if (useIndexedDB) {
-                        finalBlob = await getAllChunksIDB(currentFile.mime);
-                        await clearIDB();
-                      } else {
-                        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                      }
-                      triggerSave(finalBlob, currentFile.name);
-                    }
-                    resolve();
-                  } catch (err) {
-                    hasError = true;
-                    // Handled in chunkQueue onError callback
-                  }
-                });
-              } else {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
+                try {
+                  await chunkQueue.drain();
                   if (diskWritableStream) {
                     await diskWritableStream.close();
                     if (useOPFS) {
@@ -2177,9 +2187,10 @@ async function startWebRTC() {
                     }
                     triggerSave(finalBlob, currentFile.name);
                   }
-                  triggerSave(finalBlob, currentFile.name);
+                  resolve();
+                } catch (err) {
+                  // Handled in chunkQueue onError callback
                 }
-                resolve();
               }
               return;
             }
@@ -2488,9 +2499,10 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR SVG data URL locally without external network requests
+    // Render local QR code for share link
+    renderLocalQRCode('done-qr-canvas', 'done-qr-img', shareLink, 180, 'H');
     const qrImg = document.getElementById('done-qr-img');
-    if (qrImg) {
+    if (qrImg && !qrImg.src) {
       qrImg.src = generateClientQRCodeDataURL(shareLink);
     }
     
@@ -2669,7 +2681,11 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    renderLocalQRCode('send-qr-canvas', 'send-qr-img', shareURL.href, 180, 'H');
+    const sendQrImg = document.getElementById('send-qr-img');
+    if (sendQrImg && (!sendQrImg.src || sendQrImg.src === window.location.href)) {
+      sendQrImg.src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    }
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -2802,10 +2818,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(senderDataChannel, 512 * 1024);
+    while ((dc || senderDataChannel).bufferedAmount > 1024 * 1024 || senderPaused) {
+      if ((dc || senderDataChannel).readyState !== 'open') throw new Error("Data channel is no longer open");
+      if ((dc || senderDataChannel).bufferedAmount > 1024 * 1024) {
+        await waitForDataChannelBuffer(dc || senderDataChannel, 1024 * 1024, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -2845,10 +2861,13 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (senderDataChannel.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(senderDataChannel, 0);
+  const chan = dc || senderDataChannel;
+  if (chan && chan.bufferedAmount > 0) {
+    await waitForDataChannelBuffer(chan, 0, 0);
   }
-  senderDataChannel.send("EOF");
+  if (chan) {
+    chan.send("EOF");
+  }
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
@@ -3085,6 +3104,9 @@ if (typeof module !== 'undefined' && module.exports) {
     extractKeyFragment,
     parseDecryptionKeyFromHash,
     parseSessionInput,
-    getIceServers
+    getIceServers,
+    waitForDataChannelBuffer,
+    uploadFileP2P,
+    sendWebRTCFile
   };
 }
