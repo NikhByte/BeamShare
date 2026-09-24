@@ -182,3 +182,85 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 		t.Fatal("consecutive frames reused the same nonce")
 	}
 }
+
+func TestExceededFrameLength(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		length uint32
+	}{
+		{
+			name:   "4GB length header",
+			length: 0xFFFFFFFF,
+		},
+		{
+			name:   "One byte over MaxFrameSize (65565)",
+			length: MaxFrameSize + 1,
+		},
+		{
+			name:   "1MB length header",
+			length: 1024 * 1024,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tt.length)
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if err != ErrFrameTooLarge {
+				t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+			}
+		})
+	}
+}
+
+func TestBufferReuseAndAllocations(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	plainData := make([]byte, 64*1024*5) // 5 chunks of 64KB
+	if _, err := io.ReadFull(rand.Reader, plainData); err != nil {
+		t.Fatalf("failed to generate random data: %v", err)
+	}
+
+	encReader, err := NewEncryptingReader(bytes.NewReader(plainData), key)
+	if err != nil {
+		t.Fatalf("NewEncryptingReader failed: %v", err)
+	}
+	encryptedBytes, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("reading encrypted data failed: %v", err)
+	}
+
+	decReader, err := NewDecryptingReader(bytes.NewReader(encryptedBytes), key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	outBuf := make([]byte, 65536)
+
+	allocs := testing.AllocsPerRun(5, func() {
+		_, err := decReader.Read(outBuf)
+		if err != nil && err != io.EOF {
+			t.Fatalf("unexpected error during Read: %v", err)
+		}
+	})
+
+	if allocs > 0 {
+		t.Fatalf("expected 0 heap allocations per frame read, got %f", allocs)
+	}
+}
