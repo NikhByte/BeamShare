@@ -2199,23 +2199,21 @@ async function getSWPipe(fileMeta) {
     const reg = await Promise.race([swReady, timeout]);
 
     if (!navigator.serviceWorker.controller) {
+      if (reg && reg.active) {
+        try { reg.active.postMessage({ type: 'CLAIM_CLIENTS' }); } catch (e) {}
+      }
       await new Promise((resolve) => {
-        if (navigator.serviceWorker.controller) {
+        const timer = setTimeout(resolve, 10000);
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          clearTimeout(timer);
           resolve();
-          return;
-        }
-        const onControllerChange = () => {
-          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
-          resolve();
-        };
-        navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
-        setTimeout(resolve, 500);
+        }, { once: true });
       });
     }
 
-    const sw = navigator.serviceWorker.controller;
-    if (!sw) {
-      console.warn("Page is not controlled by a Service Worker, falling back to storage/RAM");
+    let sw = navigator.serviceWorker.controller || (reg && reg.active);
+    if (!sw || !navigator.serviceWorker.controller) {
+      console.warn("Service Worker active but not controlling page, falling back");
       return null;
     }
 
@@ -2230,7 +2228,7 @@ async function getSWPipe(fileMeta) {
       }, 10000);
 
       function onMessage(e) {
-        if (e.data && e.data.type === 'READY') {
+        if (e.data && (e.data.type === 'READY' || e.data.type === 'INIT_ACK')) {
           cleanup();
           resolve();
         }
