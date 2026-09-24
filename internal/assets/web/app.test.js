@@ -537,4 +537,60 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('waitForBufferedAmountLow handles pre-check, event dispatch, post-registration drain, and timeout fallback', async () => {
+    // 1. Immediate resolution when bufferedAmount <= targetThreshold
+    let listeners = new Set();
+    const mockDc1 = {
+      bufferedAmountLowThreshold: 0,
+      bufferedAmount: 100,
+      addEventListener: (type, fn) => listeners.add(fn),
+      removeEventListener: (type, fn) => listeners.delete(fn)
+    };
+    await app.waitForBufferedAmountLow(mockDc1, 200, 250);
+    assert.equal(mockDc1.bufferedAmountLowThreshold, 200);
+    assert.equal(listeners.size, 0);
+
+    // 2. Resolution on bufferedamountlow event
+    listeners = new Set();
+    const mockDc2 = {
+      bufferedAmountLowThreshold: 0,
+      bufferedAmount: 1000,
+      addEventListener: (type, fn) => {
+        listeners.add(fn);
+        setTimeout(() => fn(), 10);
+      },
+      removeEventListener: (type, fn) => listeners.delete(fn)
+    };
+    await app.waitForBufferedAmountLow(mockDc2, 500, 250);
+    assert.equal(listeners.size, 0);
+
+    // 3. Immediate post-registration resolution when buffer drains during addEventListener
+    listeners = new Set();
+    const mockDc3 = {
+      bufferedAmountLowThreshold: 0,
+      bufferedAmount: 1000,
+      addEventListener: (type, fn) => {
+        listeners.add(fn);
+        mockDc3.bufferedAmount = 100; // simulate buffer drain right during registration
+      },
+      removeEventListener: (type, fn) => listeners.delete(fn)
+    };
+    await app.waitForBufferedAmountLow(mockDc3, 500, 250);
+    assert.equal(listeners.size, 0);
+
+    // 4. Resolution via 50ms timeout fallback when event never fires
+    listeners = new Set();
+    const mockDc4 = {
+      bufferedAmountLowThreshold: 0,
+      bufferedAmount: 1000,
+      addEventListener: (type, fn) => listeners.add(fn),
+      removeEventListener: (type, fn) => listeners.delete(fn)
+    };
+    const start = Date.now();
+    await app.waitForBufferedAmountLow(mockDc4, 500, 50);
+    const elapsed = Date.now() - start;
+    assert.equal(listeners.size, 0);
+    assert.equal(elapsed >= 40, true);
+  });
 });
