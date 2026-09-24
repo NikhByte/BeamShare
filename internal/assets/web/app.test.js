@@ -82,6 +82,9 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
     global.pako = pako;
     window.pako = pako;
+    const { webcrypto } = require('node:crypto');
+    window.crypto = webcrypto;
+    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load app.js
@@ -340,6 +343,207 @@ describe('Gaze Web Receiver Test Suite', () => {
     await queue.drain();
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
+  });
+
+  test('WebRTCStreamDecrypter — Passthrough mode with null/falsy key', () => {
+    const outputChunks = [];
+    let caughtError = null;
+
+    const decrypter = new app.WebRTCStreamDecrypter({
+      key: null,
+      onChunk: (chunk) => outputChunks.push(chunk),
+      onError: (err) => { caughtError = err; }
+    });
+
+    const chunk1 = new Uint8Array([1, 2, 3]);
+    const chunk2 = new Uint8Array([4, 5, 6]);
+
+    decrypter.write(chunk1);
+    decrypter.write(chunk2);
+
+    assert.equal(caughtError, null);
+    assert.equal(outputChunks.length, 2);
+    assert.deepEqual(Array.from(outputChunks[0]), [1, 2, 3]);
+    assert.deepEqual(Array.from(outputChunks[1]), [4, 5, 6]);
+  });
+
+  test('WebRTCStreamDecrypter — Encrypted single frame decryption', async () => {
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+
+    const plaintext = new Uint8Array([72, 101, 108, 108, 111]); // "Hello"
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: nonce },
+      key,
+      plaintext
+    );
+
+    const frameLen = 12 + ciphertext.byteLength;
+    const framed = new Uint8Array(4 + frameLen);
+    const dv = new DataView(framed.buffer);
+    dv.setUint32(0, frameLen, false);
+    framed.set(nonce, 4);
+    framed.set(new Uint8Array(ciphertext), 16);
+
+    const outputChunks = [];
+    let caughtError = null;
+
+    const decrypter = new app.WebRTCStreamDecrypter(
+      key,
+      (chunk) => outputChunks.push(chunk),
+      (err) => { caughtError = err; }
+    );
+
+    decrypter.write(framed);
+
+    await new Promise(r => setTimeout(r, 20));
+
+    assert.equal(caughtError, null);
+    assert.equal(outputChunks.length, 1);
+    assert.deepEqual(Array.from(outputChunks[0]), [72, 101, 108, 108, 111]);
+  });
+
+  test('WebRTCStreamDecrypter — Fragmented frames split across multiple chunks', async () => {
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+
+    const plaintext = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: nonce },
+      key,
+      plaintext
+    );
+
+    const frameLen = 12 + ciphertext.byteLength;
+    const framed = new Uint8Array(4 + frameLen);
+    const dv = new DataView(framed.buffer);
+    dv.setUint32(0, frameLen, false);
+    framed.set(nonce, 4);
+    framed.set(new Uint8Array(ciphertext), 16);
+
+    const part1 = framed.subarray(0, 3);
+    const part2 = framed.subarray(3, 10);
+    const part3 = framed.subarray(10);
+
+    const outputChunks = [];
+    let caughtError = null;
+
+    const decrypter = new app.WebRTCStreamDecrypter({
+      key,
+      onChunk: (chunk) => outputChunks.push(chunk),
+      onError: (err) => { caughtError = err; }
+    });
+
+    decrypter.write(part1);
+    await new Promise(r => setTimeout(r, 10));
+    assert.equal(outputChunks.length, 0);
+
+    decrypter.write(part2);
+    await new Promise(r => setTimeout(r, 10));
+    assert.equal(outputChunks.length, 0);
+
+    decrypter.write(part3);
+    await new Promise(r => setTimeout(r, 20));
+
+    assert.equal(caughtError, null);
+    assert.equal(outputChunks.length, 1);
+    assert.deepEqual(Array.from(outputChunks[0]), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  test('WebRTCStreamDecrypter — Concatenated frames in a single chunk', async () => {
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+
+    // Frame 1
+    const p1 = new Uint8Array([10, 20]);
+    const n1 = crypto.getRandomValues(new Uint8Array(12));
+    const c1 = await crypto.subtle.encrypt({ name: "AES-GCM", iv: n1 }, key, p1);
+    const f1Len = 12 + c1.byteLength;
+    const f1 = new Uint8Array(4 + f1Len);
+    new DataView(f1.buffer).setUint32(0, f1Len, false);
+    f1.set(n1, 4);
+    f1.set(new Uint8Array(c1), 16);
+
+    // Frame 2
+    const p2 = new Uint8Array([30, 40, 50]);
+    const n2 = crypto.getRandomValues(new Uint8Array(12));
+    const c2 = await crypto.subtle.encrypt({ name: "AES-GCM", iv: n2 }, key, p2);
+    const f2Len = 12 + c2.byteLength;
+    const f2 = new Uint8Array(4 + f2Len);
+    new DataView(f2.buffer).setUint32(0, f2Len, false);
+    f2.set(n2, 4);
+    f2.set(new Uint8Array(c2), 16);
+
+    // Concatenate both frames
+    const merged = new Uint8Array(f1.length + f2.length);
+    merged.set(f1, 0);
+    merged.set(f2, f1.length);
+
+    const outputChunks = [];
+    let caughtError = null;
+
+    const decrypter = new app.WebRTCStreamDecrypter(
+      key,
+      (chunk) => outputChunks.push(chunk),
+      (err) => { caughtError = err; }
+    );
+
+    decrypter.write(merged);
+    await new Promise(r => setTimeout(r, 20));
+
+    assert.equal(caughtError, null);
+    assert.equal(outputChunks.length, 2);
+    assert.deepEqual(Array.from(outputChunks[0]), [10, 20]);
+    assert.deepEqual(Array.from(outputChunks[1]), [30, 40, 50]);
+  });
+
+  test('WebRTCStreamDecrypter — Error handling on corrupted ciphertext or invalid frame header', async () => {
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+
+    let error1 = null;
+    const decrypterBadHeader = new app.WebRTCStreamDecrypter(
+      key,
+      () => {},
+      (err) => { error1 = err; }
+    );
+
+    const badHeader = new Uint8Array(8);
+    new DataView(badHeader.buffer).setUint32(0, 5, false);
+    decrypterBadHeader.write(badHeader);
+    await new Promise(r => setTimeout(r, 10));
+
+    assert.notEqual(error1, null);
+    assert.match(error1.message, /minimum 12 bytes required/);
+
+    let error2 = null;
+    const decrypterCorrupted = new app.WebRTCStreamDecrypter(
+      key,
+      () => {},
+      (err) => { error2 = err; }
+    );
+
+    const fakeFrame = new Uint8Array(4 + 12 + 16);
+    new DataView(fakeFrame.buffer).setUint32(0, 28, false);
+    crypto.getRandomValues(fakeFrame.subarray(4));
+    decrypterCorrupted.write(fakeFrame);
+    await new Promise(r => setTimeout(r, 20));
+
+    assert.notEqual(error2, null);
   });
 });
 
