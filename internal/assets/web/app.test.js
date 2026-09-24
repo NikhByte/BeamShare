@@ -118,10 +118,6 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,mock';
     }
 
-    const QRious = require('qrious');
-    global.QRious = QRious;
-    window.QRious = QRious;
-
     // Set up global environment for app.js
     const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
@@ -139,9 +135,9 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.atob = global.atob;
     window.btoa = global.btoa;
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
-    const QRious = require('./qrious.min.js');
-    window.QRious = QRious;
-    global.QRious = QRious;
+    const qriousLocal = require('./qrious.min.js');
+    window.QRious = qriousLocal;
+    global.QRious = qriousLocal;
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
@@ -153,7 +149,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
     global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
@@ -1018,117 +1013,6 @@ describe('Gaze Web Sender Test Suite', () => {
   });
 });
 
-describe('WebRTC Buffer Backpressure Suite', () => {
-  let app;
-
-  beforeEach(() => {
-    delete require.cache[require.resolve('./app.js')];
-    app = require('./app.js');
-  });
-
-  class MockDataChannel {
-    constructor(bufferedAmount = 0, readyState = 'open') {
-      this.bufferedAmount = bufferedAmount;
-      this.bufferedAmountLowThreshold = 0;
-      this.readyState = readyState;
-      this.listeners = new Map();
-    }
-
-    addEventListener(event, fn) {
-      if (!this.listeners.has(event)) {
-        this.listeners.set(event, new Set());
-      }
-      this.listeners.get(event).add(fn);
-    }
-
-    removeEventListener(event, fn) {
-      if (this.listeners.has(event)) {
-        this.listeners.get(event).delete(fn);
-      }
-    }
-
-    emit(event) {
-      if (this.listeners.has(event)) {
-        for (const fn of this.listeners.get(event)) {
-          fn();
-        }
-      }
-    }
-
-    getListenerCount(event) {
-      return this.listeners.has(event) ? this.listeners.get(event).size : 0;
-    }
-  }
-
-  test('resolves immediately if bufferedAmount is already <= targetThreshold', async () => {
-    const dc = new MockDataChannel(256 * 1024, 'open');
-    let resolved = false;
-
-    await app.waitForBufferedAmountLow(dc, 512 * 1024);
-    resolved = true;
-
-    assert.equal(resolved, true);
-    assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
-  });
-
-  test('resolves via bufferedamountlow event when buffer drops', async () => {
-    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
-    
-    const waitPromise = app.waitForBufferedAmountLow(dc, 512 * 1024);
-    assert.equal(dc.getListenerCount('bufferedamountlow'), 1);
-
-    // Simulate buffer drop and event fire
-    dc.bufferedAmount = 256 * 1024;
-    dc.emit('bufferedamountlow');
-
-    await waitPromise;
-    assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
-  });
-
-  test('resolves on immediate recheck if buffer dropped during listener attachment', async () => {
-    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
-
-    // Intercept addEventListener to simulate buffer drop right before recheck
-    const origAddEventListener = dc.addEventListener.bind(dc);
-    dc.addEventListener = (event, fn) => {
-      origAddEventListener(event, fn);
-      dc.bufferedAmount = 100; // Drops buffer below threshold!
-    };
-
-    await app.waitForBufferedAmountLow(dc, 512 * 1024);
-    assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
-  });
-
-  test('resolves via polling fallback if event is lost/missed', async () => {
-    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
-
-    const waitPromise = app.waitForBufferedAmountLow(dc, 512 * 1024, 10);
-    assert.equal(dc.getListenerCount('bufferedamountlow'), 1);
-
-    // Simulate buffer drop WITHOUT emitting event
-    dc.bufferedAmount = 100 * 1024;
-
-    await waitPromise;
-    assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
-  });
-
-  test('rejects cleanly and cleans up listeners if data channel closes', async () => {
-    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
-
-    const waitPromise = app.waitForBufferedAmountLow(dc, 512 * 1024, 10);
-    assert.equal(dc.getListenerCount('bufferedamountlow'), 1);
-
-    // Simulate channel close
-    dc.readyState = 'closed';
-
-    await assert.rejects(
-      async () => await waitPromise,
-      { message: 'Data channel is no longer open' }
-    );
-
-    assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
-  });
-});
 
 describe('WebRTC Backpressure & Flow Control Suite', () => {
   let dom;
