@@ -415,7 +415,7 @@ func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing
 	})
 
 	receiverDC.SendText("OFFSET:0")
-	time.Sleep(5 * time.Millisecond)
+	time.Sleep(1 * time.Millisecond)
 	receiverDC.SendText("OFFSET:1024")
 
 	select {
