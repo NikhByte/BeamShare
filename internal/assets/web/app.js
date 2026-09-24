@@ -895,6 +895,45 @@ function checkRamWarning(size) {
   });
 }
 
+// ── Local QR Code Generation ──────────────────────────────────────────────────
+function renderLocalQRCode(canvasId, imgId, text, size = 180, level = 'H') {
+  const canvas = document.getElementById(canvasId);
+  const img = imgId ? document.getElementById(imgId) : null;
+  const QRiousClass = (typeof QRious !== 'undefined') ? QRious : (typeof window !== 'undefined' ? window.QRious : null);
+
+  if (canvas && QRiousClass) {
+    try {
+      new QRiousClass({
+        element: canvas,
+        value: text,
+        size: size,
+        level: level
+      });
+      if (img && typeof canvas.toDataURL === 'function') {
+        try {
+          img.src = canvas.toDataURL('image/png');
+        } catch (_) {}
+      }
+      return;
+    } catch (e) {
+      console.warn("QRious rendering failed on canvas:", e);
+    }
+  }
+
+  if (img && QRiousClass) {
+    try {
+      const qr = new QRiousClass({
+        value: text,
+        size: size,
+        level: level
+      });
+      img.src = qr.toDataURL();
+    } catch (e) {
+      console.warn("QRious dataURL fallback failed:", e);
+    }
+  }
+}
+
 // ── QR Scanning ───────────────────────────────────────────────────────────────
 let qrStream = null;
 let qrScanFrame = null;
@@ -1991,11 +2030,8 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR PNG dynamically from the server's newly added QR API
-    const qrImg = document.getElementById('done-qr-img');
-    if (qrImg) {
-      qrImg.src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareLink);
-    }
+    // Render local QR code for share link
+    renderLocalQRCode('done-qr-canvas', 'done-qr-img', shareLink, 180, 'H');
     
     if (doneShare) doneShare.classList.remove('hidden');
   } else {
@@ -2172,7 +2208,7 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
+    renderLocalQRCode('send-qr-canvas', 'send-qr-img', shareURL.href, 180, 'H');
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
