@@ -2157,6 +2157,8 @@ async function getSWPipe(fileMeta) {
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 10000));
     const reg = await Promise.race([swReady, timeout]);
 
+    if (!reg || !reg.active) return null;
+
     if (!navigator.serviceWorker.controller) {
       await new Promise((resolve) => {
         if (navigator.serviceWorker.controller) {
@@ -2168,11 +2170,14 @@ async function getSWPipe(fileMeta) {
           resolve();
         };
         navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
-        setTimeout(resolve, 500);
+        setTimeout(() => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          resolve();
+        }, 500);
       });
     }
 
-    const sw = navigator.serviceWorker.controller;
+    const sw = navigator.serviceWorker.controller || reg.active;
     if (!sw) {
       console.warn("Page is not controlled by a Service Worker, falling back to storage/RAM");
       return null;
