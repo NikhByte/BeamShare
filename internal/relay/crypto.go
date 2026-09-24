@@ -5,8 +5,15 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 )
+
+// MaxFrameSize defines the maximum allowed encrypted frame size (64KB payload + 12B nonce + 16B GCM tag).
+const MaxFrameSize = 65564
+
+// ErrFrameTooLarge is returned when an incoming encrypted frame exceeds MaxFrameSize.
+var ErrFrameTooLarge = errors.New("frame too large")
 
 type EncryptingReader struct {
 	r     io.Reader
@@ -101,14 +108,18 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 		return 0, err
 	}
 
-	frameData := make([]byte, length)
-	if _, err := io.ReadFull(dr.r, frameData); err != nil {
-		return 0, err
+	if length > MaxFrameSize {
+		return 0, ErrFrameTooLarge
 	}
 
 	nonceSize := dr.gcm.NonceSize()
-	if len(frameData) < nonceSize {
+	if int(length) < nonceSize {
 		return 0, io.ErrUnexpectedEOF
+	}
+
+	frameData := make([]byte, length)
+	if _, err := io.ReadFull(dr.r, frameData); err != nil {
+		return 0, err
 	}
 
 	nonce := frameData[:nonceSize]
