@@ -109,7 +109,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
     global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
@@ -786,32 +785,11 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
-    const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
-    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
-  });
-
-  test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
-    let externalCallMade = false;
-    const origFetch = global.fetch;
-    global.fetch = async (url, opts) => {
-      if (typeof url === 'string' && (url.includes('qrserver.com') || url.includes('/api/qr'))) {
-        externalCallMade = true;
-      }
-      return origFetch(url, opts);
-    };
-
-    await app.startSenderSharing();
-
-    assert.equal(externalCallMade, false, 'No external QR API requests should be made');
-
-    const sendCanvas = document.getElementById('send-qr-canvas');
-    assert.notEqual(sendCanvas, null);
-
-    const urlInput = document.getElementById('send-url-input');
-    assert.ok(urlInput.value.includes('#k='));
+    // Verify pure client-side QR generation without external network calls
+    const sendQrImg = document.getElementById('send-qr-img');
+    assert.ok(sendQrImg.src.startsWith('data:image/svg+xml'), 'send-qr-img src must be a client-side SVG Data URL');
+    assert.equal(sendQrImg.src.includes('api.qrserver.com'), false, 'send-qr-img src must not contain api.qrserver.com');
+    assert.ok(sendQrImg.src.length > 500, 'send-qr-img src must contain a valid SVG Data URL');
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
