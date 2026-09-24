@@ -1260,7 +1260,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
 				sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
 			}
-
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
@@ -1289,26 +1288,73 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}()
 
 			// Notify sender
+			sess.mu.Lock()
 			if !sess.closed && sess.UploadReq != nil {
 				select {
 				case sess.UploadReq <- part.FileName():
 				default:
 				}
 			}
+			sess.mu.Unlock()
 
-			// Stream data to pipe
-			_, uploadErr = io.Copy(pw, part)
-			if uploadErr != nil {
-				pw.CloseWithError(uploadErr)
-				part.Close()
-				http.Error(w, fmt.Sprintf("upload failed: %v", uploadErr), http.StatusInternalServerError)
-				return
+			// Stream data to pipe: read part in background goroutine to ensure TCP socket reads are not blocked by pipe write
+			type chunkResult struct {
+				data []byte
+				err  error
 			}
-			pw.Close()
+			chunkCh := make(chan chunkResult, 10)
+
+			readerDone := make(chan struct{})
+			go func() {
+				defer close(readerDone)
+				for {
+					buf := make([]byte, 32*1024)
+					n, err := part.Read(buf)
+					if n > 0 {
+						chunk := make([]byte, n)
+						copy(chunk, buf[:n])
+						select {
+						case chunkCh <- chunkResult{data: chunk}:
+						case <-done:
+							return
+						}
+					}
+					if err != nil {
+						select {
+						case chunkCh <- chunkResult{err: err}:
+						case <-done:
+						}
+						return
+					}
+				}
+			}()
+
+			for res := range chunkCh {
+				if res.err != nil {
+					if res.err != io.EOF {
+						uploadErr = res.err
+					}
+					break
+				}
+				_, werr := pw.Write(res.data)
+				if werr != nil {
+					uploadErr = werr
+					break
+				}
+			}
+
+			if uploadErr != nil {
+				r.Body.Close()
+			}
+			<-readerDone
+
+			if uploadErr == nil {
+				pw.Close()
+			}
 			part.Close()
 
 			if uploadErr != nil {
-				http.Error(w, fmt.Sprintf("upload error: %v", uploadErr), http.StatusInternalServerError)
+				http.Error(w, uploadErr.Error(), http.StatusInternalServerError)
 				return
 			}
 
@@ -1340,9 +1386,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	var pullErr error
 	defer func() {
-		if pullErr != nil {
-			sess.ClosePipesIfMatch(pr, pw, pullErr)
-		}
+		sess.ClosePipesIfMatch(pr, pw, pullErr)
 	}()
 
 	done := make(chan struct{})
