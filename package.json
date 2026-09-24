@@ -28,6 +28,7 @@
     "@types/node": "^20.11.0",
     "jsdom": "^30.0.1",
     "pako": "^3.0.1",
+    "qrcode-generator": "^2.0.4",
     "typescript": "^5.3.3"
   }
 }

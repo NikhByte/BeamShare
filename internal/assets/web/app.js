@@ -895,6 +895,16 @@ function checkRamWarning(size) {
   });
 }
 
+function generateClientQRCodeDataURL(text) {
+  if (typeof generateQRCodeSVGDataURL === 'function') {
+    return generateQRCodeSVGDataURL(text);
+  }
+  if (typeof window !== 'undefined' && window.qrcode && typeof window.qrcode.generateQRCodeSVGDataURL === 'function') {
+    return window.qrcode.generateQRCodeSVGDataURL(text);
+  }
+  return '';
+}
+
 // ── QR Scanning ───────────────────────────────────────────────────────────────
 let qrStream = null;
 let qrScanFrame = null;
@@ -1991,10 +2001,10 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR PNG dynamically from the server's newly added QR API
+    // Load QR SVG data URL locally without external network requests
     const qrImg = document.getElementById('done-qr-img');
     if (qrImg) {
-      qrImg.src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareLink);
+      qrImg.src = generateClientQRCodeDataURL(shareLink);
     }
     
     if (doneShare) doneShare.classList.remove('hidden');
@@ -2172,7 +2182,7 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
+    document.getElementById('send-qr-img').src = generateClientQRCodeDataURL(shareURL.href);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -2591,6 +2601,7 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    generateClientQRCodeDataURL
   };
 }
