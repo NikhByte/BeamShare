@@ -827,7 +827,27 @@ async function getSWPipe(fileMeta) {
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
     const reg = await Promise.race([swReady, timeout]);
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
+    if (!reg || !reg.active) return null;
+
+    if (!navigator.serviceWorker.controller) {
+      await new Promise(resolve => {
+        if (navigator.serviceWorker.controller) {
+          resolve();
+          return;
+        }
+        const handler = () => {
+          navigator.serviceWorker.removeEventListener('controllerchange', handler);
+          resolve();
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', handler);
+        setTimeout(() => {
+          navigator.serviceWorker.removeEventListener('controllerchange', handler);
+          resolve();
+        }, 500);
+      });
+    }
+
+    let sw = navigator.serviceWorker.controller || reg.active;
     if (!sw) return null;
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
