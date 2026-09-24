@@ -635,44 +635,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									return
 								}
 
-								bufferedAmountLowChan := make(chan struct{}, 1)
-								dc.OnBufferedAmountLow(func() {
-									select {
-									case bufferedAmountLowChan <- struct{}{}:
-									default:
-									}
-								})
-
-								waitForBufferLow := func(targetThreshold uint64) error {
-									dc.SetBufferedAmountLowThreshold(targetThreshold)
-									if uint64(dc.BufferedAmount()) <= targetThreshold {
-										return nil
-									}
-									ticker := time.NewTicker(20 * time.Millisecond)
-									defer ticker.Stop()
-
-									for {
-										if dc.ReadyState() != webrtc.DataChannelStateOpen {
-											return fmt.Errorf("data channel is no longer open")
-										}
-										if uint64(dc.BufferedAmount()) <= targetThreshold {
-											return nil
-										}
-										select {
-										case <-ctx.Done():
-											return ctx.Err()
-										case <-bufferedAmountLowChan:
-											if uint64(dc.BufferedAmount()) <= targetThreshold {
-												return nil
-											}
-										case <-ticker.C:
-											if uint64(dc.BufferedAmount()) <= targetThreshold {
-												return nil
-											}
-										}
-									}
-								}
-
 								buffer := make([]byte, 64*1024) // 64KB chunk size
 								totalSent := reqOffset
 								start := time.Now()
@@ -684,16 +646,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									default:
 									}
 
-									if !pauseCtrl.WaitIfPaused() {
-										return
-									}
-
 									// Backpressure check: wait if buffered amount > 1MB
 									if dc.BufferedAmount() > 1024*1024 {
-										if errWait := waitForBufferLow(512 * 1024); errWait != nil {
-											fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
-											return
-										}
+										waitForBufferedAmountLow(dc, 512*1024, 250*time.Millisecond)
 									}
 
 									if !pauseCtrl.WaitIfPaused() {
@@ -730,10 +685,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 								// Wait for buffer to clear before sending EOF
 								if dc.BufferedAmount() > 0 {
-									if errWait := waitForBufferLow(0); errWait != nil {
-										fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
-										return
-									}
+									waitForBufferedAmountLow(dc, 0, 250*time.Millisecond)
 								}
 
 								select {
@@ -1230,4 +1182,33 @@ func verifyPathInOutputDir(targetPath, outputDir string) bool {
 		return false
 	}
 	return true
+}
+
+func waitForBufferedAmountLow(dc *webrtc.DataChannel, threshold uint64, timeout time.Duration) {
+	if dc == nil {
+		return
+	}
+	dc.SetBufferedAmountLowThreshold(threshold)
+	if dc.BufferedAmount() <= threshold {
+		return
+	}
+
+	ch := make(chan struct{}, 1)
+	dc.OnBufferedAmountLow(func() {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	})
+	defer dc.OnBufferedAmountLow(nil)
+
+	// Immediate post-registration check in case threshold was crossed during callback setup
+	if dc.BufferedAmount() <= threshold {
+		return
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(timeout):
+	}
 }
