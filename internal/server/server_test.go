@@ -556,3 +556,81 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 }
 
+func TestConcurrentMetaAndDownloadDuringUpload(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "test.bin")
+	err := os.WriteFile(filePath, []byte("initial file content"), 0644)
+	require.NoError(t, err)
+
+	srv, err := New(filePath, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Goroutine 1: Rapidly update shared file metadata
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				i++
+				newFile := filepath.Join(tmpDir, fmt.Sprintf("file_%d.bin", i))
+				content := fmt.Sprintf("content_%d", i)
+				_ = os.WriteFile(newFile, []byte(content), 0644)
+				srv.UpdateSharedFile(newFile, fmt.Sprintf("file_%d.bin", i), int64(len(content)))
+				time.Sleep(1 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Goroutine 2: Query /api/meta concurrently
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		client := &http.Client{Timeout: 1 * time.Second}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				resp, err := client.Get(ts.URL + "/api/meta")
+				if err == nil {
+					_, _ = io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+				}
+			}
+		}
+	}()
+
+	// Goroutine 3: Query /api/download concurrently
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		client := &http.Client{Timeout: 1 * time.Second}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				resp, err := client.Get(ts.URL + "/api/download")
+				if err == nil {
+					_, _ = io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+				}
+			}
+		}
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
