@@ -947,6 +947,30 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.deepEqual(servers[0].urls, ['turn:turn.example.com:3478']);
     assert.equal(servers[0].username, 'alice');
     assert.equal(servers[0].credential, 'secret');
+  test('getSessionToken and apiPath automatically extract and include session token', () => {
+    // Set URL with token parameter
+    dom.reconfigure({ url: 'http://localhost:8080/?token=sec_tok_1234567890' });
+    global.window = dom.window;
+    global.location = dom.window.location;
+
+    assert.equal(app.getSessionToken(), 'sec_tok_1234567890');
+    assert.equal(app.apiPath('/api/meta').includes('token=sec_tok_1234567890'), true);
+  });
+
+  test('authFetch attaches X-Beam-Token header', async () => {
+    dom.reconfigure({ url: 'http://localhost:8080/?token=test_token_abc' });
+    global.window = dom.window;
+    global.location = dom.window.location;
+
+    let fetchCalledWith = null;
+    global.fetch = async (url, options) => {
+      fetchCalledWith = { url, options };
+      return { ok: true, json: async () => ({}) };
+    };
+
+    await app.authFetch('http://localhost:8080/api/meta');
+    assert.notEqual(fetchCalledWith, null);
+    assert.equal(fetchCalledWith.options.headers.get('X-Beam-Token'), 'test_token_abc');
   });
 });
 
