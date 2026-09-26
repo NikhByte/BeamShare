@@ -326,8 +326,12 @@ func TestServer_UploadContextCancellationUnblocksCopy(t *testing.T) {
 		// Keep pipe open without closing bodyPw to simulate active transfer
 	}()
 
-	// Wait briefly for upload handler to process multipart header and allocate pipe
-	time.Sleep(50 * time.Millisecond)
+	// Wait for upload handler to process multipart header and allocate pipe
+	require.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil
+	}, 2*time.Second, 5*time.Millisecond)
 
 	// Cancel upload context
 	cancel()
@@ -340,10 +344,11 @@ func TestServer_UploadContextCancellationUnblocksCopy(t *testing.T) {
 		t.Fatal("Upload goroutine did not terminate within 1 second of context cancellation")
 	}
 
-	sess.mu.Lock()
-	assert.Nil(t, sess.UploadPipeR)
-	assert.Nil(t, sess.UploadPipeW)
-	sess.mu.Unlock()
+	require.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR == nil && sess.UploadPipeW == nil
+	}, 2*time.Second, 5*time.Millisecond)
 }
 
 func TestServer_SessionExpirationClosesUploadPipes(t *testing.T) {
@@ -454,7 +459,11 @@ func TestServer_PullCompletionResetsUploadPipes(t *testing.T) {
 	}()
 
 	// Wait for upload handler to set up pipe
-	time.Sleep(50 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil
+	}, 2*time.Second, 5*time.Millisecond)
 
 	// Perform pull
 	pullReq, err := http.NewRequest(http.MethodGet, ts.URL+"/relay/pull?session="+sess.ID, nil)
