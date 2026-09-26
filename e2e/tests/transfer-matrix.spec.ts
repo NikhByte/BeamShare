@@ -183,7 +183,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       // Abort WebRTC signaling API requests to simulate WebRTC connection failure
       await page.route('**/api/signal/**', (route) => route.abort());
 
-      const fallbackURL = `${parsed.localURL}/?mode=webrtc`;
+      const fallbackURL = parsed.localURL.includes('?') ? `${parsed.localURL}&mode=webrtc` : `${parsed.localURL}/?mode=webrtc`;
 
       await page.goto(fallbackURL);
 
