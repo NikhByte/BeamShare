@@ -827,12 +827,41 @@ async function getSWPipe(fileMeta) {
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
     const reg = await Promise.race([swReady, timeout]);
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
-    if (!sw) return null;
+    if (!reg) return null;
+
+    if (!navigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        const onControllerChange = () => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          resolve();
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+        setTimeout(resolve, 1000);
+      });
+    }
+
+    const sw = navigator.serviceWorker.controller;
+    if (!sw) {
+      console.warn("Service Worker controller not active; falling back from SW pipe.");
+      return null;
+    }
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
     const channel = new MessageChannel();
     const port = channel.port1;
+
+    const readyPromise = new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 1000);
+      const handleMessage = (e) => {
+        if (e && e.data && e.data.type === 'READY') {
+          clearTimeout(timer);
+          port.removeEventListener('message', handleMessage);
+          resolve(true);
+        }
+      };
+      port.addEventListener('message', handleMessage);
+      port.start();
+    });
 
     sw.postMessage({
       type: 'INIT_PORT',
@@ -841,6 +870,12 @@ async function getSWPipe(fileMeta) {
       size: fileMeta.size,
       mime: fileMeta.mime
     }, [channel.port2]);
+
+    const isReady = await readyPromise;
+    if (!isReady) {
+      console.warn("Service Worker stream handshake timed out. Falling back from SW pipe.");
+      return null;
+    }
 
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
