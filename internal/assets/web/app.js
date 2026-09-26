@@ -821,14 +821,14 @@ function setMode(mode, label) {
 
 // ── Service Worker Pipe ───────────────────────────────────────────────────────
 async function getSWPipe(fileMeta) {
-  if (!('serviceWorker' in navigator)) return null;
+  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
 
   try {
     const swReady = navigator.serviceWorker.ready;
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 3000));
     const reg = await Promise.race([swReady, timeout]);
     let sw = reg && (reg.active || navigator.serviceWorker.controller);
-    if (!sw) return null;
+    if (!sw || !navigator.serviceWorker.controller) return null;
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
     const channel = new MessageChannel();
@@ -841,6 +841,16 @@ async function getSWPipe(fileMeta) {
       size: fileMeta.size,
       mime: fileMeta.mime
     }, [channel.port2]);
+
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 1000);
+      port.onmessage = (e) => {
+        if (e && e.data && e.data.type === 'READY') {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+    });
 
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
@@ -1826,7 +1836,7 @@ async function startWebRTC() {
       let processChain = Promise.resolve();
 
       dc.onmessage = (e) => {
-        processChain = processChain.then(async () => {
+        processChain = processChain.catch(() => {}).then(async () => {
           try {
             if (typeof e.data === 'string') {
               if (e.data === "EOF") {
