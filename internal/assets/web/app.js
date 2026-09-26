@@ -3558,7 +3558,7 @@ async function uploadFileP2P(file, dc = webrtcDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    await waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    await waitForBufferDrain(dc, 1024 * 1024, 512 * 1024);
     dc.send(chunkBuffer);
     offset += chunkBuffer.byteLength;
 
@@ -3567,9 +3567,101 @@ async function uploadFileP2P(file, dc = webrtcDataChannel) {
     updateSpeed(offset);
   }
 
-  await waitForDataChannelBuffer(dc, 0, 0);
+  await waitForBufferDrain(dc, 0, 0);
   dc.send("UPLOAD_EOF");
   showDone(file.name, file.size, "WebRTC P2P Upload");
+}
+
+async function waitForBufferDrain(dataChannel, highWatermark = 1024 * 1024, lowWatermark = 512 * 1024) {
+  if (!dataChannel) return;
+  const targetLowThreshold = Math.min(lowWatermark, highWatermark);
+  dataChannel.bufferedAmountLowThreshold = targetLowThreshold;
+
+  if (dataChannel.bufferedAmount <= highWatermark) {
+    return;
+  }
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    const cleanup = () => {
+      if (!resolved) {
+        resolved = true;
+        dataChannel.removeEventListener('bufferedamountlow', handler);
+        dataChannel.removeEventListener('close', handler);
+        resolve();
+      }
+    };
+    const handler = () => cleanup();
+
+    dataChannel.addEventListener('bufferedamountlow', handler);
+    dataChannel.addEventListener('close', handler);
+
+    if (dataChannel.bufferedAmount <= targetLowThreshold || dataChannel.readyState === 'closed') {
+      cleanup();
+    }
+  });
+}
+
+function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark = 512 * 1024, pollMs = 250) {
+  if (!dc || dc.readyState !== 'open') {
+    return Promise.reject(new Error("Data channel is closed or closing"));
+  }
+
+  return new Promise((resolve, reject) => {
+    const targetLowThreshold = Math.min(lowWatermark, highWatermark);
+    dc.bufferedAmountLowThreshold = targetLowThreshold;
+
+    if (dc.bufferedAmount <= highWatermark) {
+      return resolve();
+    }
+
+    let intervalId = null;
+    let resolved = false;
+
+    const cleanup = () => {
+      if (!resolved) {
+        resolved = true;
+        if (intervalId !== null) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+        if (dc && typeof dc.removeEventListener === 'function') {
+          dc.removeEventListener('bufferedamountlow', onLow);
+          dc.removeEventListener('close', onClose);
+          dc.removeEventListener('error', onClose);
+        }
+      }
+    };
+
+    const onLow = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error("Data channel is closed or closing"));
+    };
+
+    dc.addEventListener('bufferedamountlow', onLow);
+    dc.addEventListener('close', onClose);
+    dc.addEventListener('error', onClose);
+
+    if (dc.bufferedAmount <= targetLowThreshold) {
+      cleanup();
+      return resolve();
+    }
+
+    intervalId = setInterval(() => {
+      if (dc.readyState !== 'open') {
+        onClose();
+        return;
+      }
+      if (dc.bufferedAmount <= targetLowThreshold) {
+        onLow();
+      }
+    }, pollMs);
+  });
 }
 
 async function handleUploadFile(e) {
@@ -3600,9 +3692,7 @@ async function handleUploadFile(e) {
         reader.readAsArrayBuffer(chunkBlob);
       });
 
-      if (webrtcDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(webrtcDataChannel, 512 * 1024);
-      }
+      await waitForBufferDrain(webrtcDataChannel, 1024 * 1024, 512 * 1024);
       webrtcDataChannel.send(chunkBuffer);
       offset += chunkBuffer.byteLength;
 
@@ -3611,9 +3701,7 @@ async function handleUploadFile(e) {
       updateSpeed(offset);
     }
 
-    if (webrtcDataChannel.bufferedAmount > 0) {
-      await waitForBufferedAmountLow(webrtcDataChannel, 0);
-    }
+    await waitForBufferDrain(webrtcDataChannel, 0, 0);
     webrtcDataChannel.send("UPLOAD_EOF");
     showDone(file.name, file.size, "WebRTC P2P Upload");
   } else {
@@ -4383,7 +4471,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
     while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
       if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
       if (dc.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(dc, 512 * 1024);
+        await waitForBufferDrain(dc, 1024 * 1024, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -4423,9 +4511,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (dc.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(dc, 0);
-  }
+  await waitForBufferDrain(dc, 0, 0);
   dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
@@ -5065,6 +5151,10 @@ if (typeof module !== 'undefined' && module.exports) {
     extractKeyFragment,
     parseDecryptionKeyFromHash,
     parseSessionInput,
-    getIceServers
+    getIceServers,
+    waitForBufferDrain,
+    waitForDataChannelBuffer,
+    uploadFileP2P,
+    sendWebRTCFile
   };
 }
