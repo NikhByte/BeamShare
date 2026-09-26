@@ -5,8 +5,13 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 )
+
+const MaxFrameSize = 65564
+
+var ErrFrameTooLarge = errors.New("frame too large")
 
 type EncryptingReader struct {
 	r     io.Reader
@@ -101,14 +106,18 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 		return 0, err
 	}
 
+	nonceSize := dr.gcm.NonceSize()
+	if length < uint32(nonceSize) {
+		return 0, io.ErrUnexpectedEOF
+	}
+
+	if length > MaxFrameSize {
+		return 0, ErrFrameTooLarge
+	}
+
 	frameData := make([]byte, length)
 	if _, err := io.ReadFull(dr.r, frameData); err != nil {
 		return 0, err
-	}
-
-	nonceSize := dr.gcm.NonceSize()
-	if len(frameData) < nonceSize {
-		return 0, io.ErrUnexpectedEOF
 	}
 
 	nonce := frameData[:nonceSize]
