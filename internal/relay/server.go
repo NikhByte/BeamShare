@@ -107,38 +107,51 @@ func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err er
 }
 
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
-	if pr == nil || s.DataPipeR == pr {
-		if s.DataPipeW != nil {
+	closePipe := func(r *io.PipeReader, w *io.PipeWriter) {
+		if w != nil {
 			if err != nil {
-				s.DataPipeW.CloseWithError(err)
+				w.CloseWithError(err)
 			} else {
-				s.DataPipeW.Close()
+				w.Close()
 			}
-			s.DataPipeW = nil
-		}
-		if s.DataPipeR != nil {
+		} else if r != nil {
 			if err != nil {
-				s.DataPipeR.CloseWithError(err)
+				r.CloseWithError(err)
 			} else {
-				s.DataPipeR.Close()
-			}
-			s.DataPipeR = nil
-		}
-	} else {
-		if pw != nil {
-			if err != nil {
-				pw.CloseWithError(err)
-			} else {
-				pw.Close()
+				r.Close()
 			}
 		}
-		if pr != nil {
-			if err != nil {
-				pr.CloseWithError(err)
-			} else {
-				pr.Close()
-			}
-		}
+	}
+
+	if pr == nil && pw == nil {
+		closePipe(s.DataPipeR, s.DataPipeW)
+		s.DataPipeR = nil
+		s.DataPipeW = nil
+
+		closePipe(s.UploadPipeR, s.UploadPipeW)
+		s.UploadPipeR = nil
+		s.UploadPipeW = nil
+		return
+	}
+
+	matched := false
+
+	if (pr != nil && s.DataPipeR == pr) || (pw != nil && s.DataPipeW == pw) {
+		closePipe(s.DataPipeR, s.DataPipeW)
+		s.DataPipeR = nil
+		s.DataPipeW = nil
+		matched = true
+	}
+
+	if (pr != nil && s.UploadPipeR == pr) || (pw != nil && s.UploadPipeW == pw) {
+		closePipe(s.UploadPipeR, s.UploadPipeW)
+		s.UploadPipeR = nil
+		s.UploadPipeW = nil
+		matched = true
+	}
+
+	if !matched {
+		closePipe(pr, pw)
 	}
 }
 
@@ -1059,6 +1072,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		if part.FormName() == "file" {
 			sess.mu.Lock()
+			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
+				sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
+			}
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
@@ -1070,9 +1086,41 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 
+			var copyErr error
+			defer func() {
+				if copyErr != nil {
+					sess.ClosePipesIfMatch(pr, pw, copyErr)
+				}
+			}()
+
+			done := make(chan struct{})
+			defer close(done)
+
+			go func() {
+				select {
+				case <-done:
+					return
+				case <-r.Context().Done():
+					select {
+					case <-done:
+						return
+					default:
+						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("upload context cancelled: %w", r.Context().Err()))
+						part.Close()
+						r.Body.Close()
+					}
+				}
+			}()
+
 			// Stream data to pipe
-			_, err = io.Copy(pw, part)
-			pw.CloseWithError(err)
+			_, copyErr = io.Copy(pw, part)
+			if copyErr != nil {
+				pw.CloseWithError(copyErr)
+				part.Close()
+				http.Error(w, copyErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			pw.Close()
 			part.Close()
 
 			w.Header().Set("Content-Type", "application/json")
@@ -1087,12 +1135,16 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	sess := s.getSession(r.URL.Query().Get("session"))
 	if sess == nil {
-		http.Error(w, "not found", 404)
-		return
+		sess = s.getSession(r.URL.Query().Get("s"))
+		if sess == nil {
+			http.Error(w, "not found", 404)
+			return
+		}
 	}
 
 	sess.mu.Lock()
 	pr := sess.UploadPipeR
+	pw := sess.UploadPipeW
 	sess.mu.Unlock()
 
 	if pr == nil {
@@ -1100,6 +1152,28 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var pullErr error
+	defer func() {
+		sess.ClosePipesIfMatch(pr, pw, pullErr)
+	}()
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-r.Context().Done():
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("pull context cancelled: %w", r.Context().Err()))
+			}
+		}
+	}()
+
 	w.Header().Set("Content-Type", "application/octet-stream")
-	io.Copy(w, pr)
+	_, pullErr = io.Copy(w, pr)
 }

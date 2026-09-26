@@ -832,6 +832,8 @@ func runReceive(code string) {
 }
 
 func downloadFile(code string) error {
+	defer http.DefaultClient.CloseIdleConnections()
+
 	if !strings.HasPrefix(code, "http://") && !strings.HasPrefix(code, "https://") {
 		code = "http://" + code
 	}
@@ -862,13 +864,16 @@ func downloadFile(code string) error {
 	if err != nil {
 		return fmt.Errorf("failed to fetch metadata: %w", err)
 	}
-	defer respMeta.Body.Close()
 	if respMeta.StatusCode != http.StatusOK {
+		respMeta.Body.Close()
 		return fmt.Errorf("metadata request failed: HTTP %d", respMeta.StatusCode)
 	}
 
 	var meta server.FileMeta
-	if err := json.NewDecoder(respMeta.Body).Decode(&meta); err != nil {
+	err = json.NewDecoder(respMeta.Body).Decode(&meta)
+	io.Copy(io.Discard, respMeta.Body)
+	respMeta.Body.Close()
+	if err != nil {
 		return fmt.Errorf("failed to parse metadata: %w", err)
 	}
 
