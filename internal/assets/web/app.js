@@ -2190,10 +2190,9 @@ function setMode(mode, label) {
 
 // ── Service Worker Pipe ───────────────────────────────────────────────────────
 async function getSWPipe(fileMeta) {
-  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
+  if (!('serviceWorker' in navigator)) return null;
 
   try {
-    let cancelTimeout;
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 10000));
     const reg = await Promise.race([swReady, timeout]);
@@ -2209,7 +2208,7 @@ async function getSWPipe(fileMeta) {
           resolve();
         };
         navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
-        setTimeout(resolve, 500);
+        setTimeout(resolve, 1000);
       });
     }
 
