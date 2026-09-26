@@ -1078,6 +1078,15 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(servers[0].username, 'alice');
     assert.equal(servers[0].credential, 'secret');
   });
+
+  test('send-qr-img src uses local /api/qr endpoint instead of external qrserver', () => {
+    const shareURL = new URL('http://localhost:8080/?s=testsession#k=secretkey123');
+    const qrSrc = app.apiPath('/api/qr') + (app.apiPath('/api/qr').includes('?') ? '&' : '?') + 'url=' + encodeURIComponent(shareURL.href);
+
+    assert.ok(qrSrc.includes('/api/qr'));
+    assert.ok(qrSrc.includes('url=http%3A%2F%2Flocalhost%3A8080%2F%3Fs%3Dtestsession%23k%3Dsecretkey123'));
+    assert.equal(qrSrc.includes('api.qrserver.com'), false);
+  });
 });
 
 describe('WebRTC Buffer Backpressure Suite', () => {
