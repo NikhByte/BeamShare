@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -259,6 +260,221 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestServer_FailedIPAttemptsSweptOnInterval(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ip := "192.0.2.10"
+	// Record a failed attempt
+	srv.recordFailedAttempt(ip)
+
+	srv.failedAttemptsMu.Lock()
+	fa, exists := srv.failedAttempts[ip]
+	require.True(t, exists)
+	// Artificially backdate firstSeen to over 1 minute ago
+	fa.firstSeen = time.Now().Add(-61 * time.Second)
+	srv.failedAttemptsMu.Unlock()
+
+	// Sweep expired entries
+	srv.SweepFailedAttempts()
+
+	srv.failedAttemptsMu.Lock()
+	_, exists = srv.failedAttempts[ip]
+	srv.failedAttemptsMu.Unlock()
+
+	assert.False(t, exists, "Expired failed IP entry should be swept from memory")
+}
+
+func TestServer_UploadContextCancellationUnblocksCopy(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+
+	// Create multipart body backed by io.Pipe so it blocks on Write/Read
+	bodyPr, bodyPw := io.Pipe()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, bodyPr)
+	require.NoError(t, err)
+
+	contentType := "multipart/form-data; boundary=------------------------boundary123"
+	req.Header.Set("Content-Type", contentType)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client := newTestHTTPClient()
+		resp, errDo := client.Do(req)
+		if errDo == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	// Write multipart header to bodyPw
+	go func() {
+		header := "--------------------------boundary123\r\n" +
+			"Content-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\n" +
+			"Content-Type: text/plain\r\n\r\n"
+		bodyPw.Write([]byte(header))
+		// Keep pipe open without closing bodyPw to simulate active transfer
+	}()
+
+	// Wait briefly for upload handler to process multipart header and allocate pipe
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel upload context
+	cancel()
+	bodyPw.CloseWithError(context.Canceled)
+
+	select {
+	case <-done:
+		// Upload goroutine terminated cleanly
+	case <-time.After(1 * time.Second):
+		t.Fatal("Upload goroutine did not terminate within 1 second of context cancellation")
+	}
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+}
+
+func TestServer_SessionExpirationClosesUploadPipes(t *testing.T) {
+	srv := NewServerWithConfig(10*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	sess := srv.createSession()
+	pr, pw := io.Pipe()
+
+	sess.mu.Lock()
+	sess.UploadPipeR = pr
+	sess.UploadPipeW = pw
+	sess.mu.Unlock()
+
+	assert.Eventually(t, func() bool {
+		return srv.GetSession(sess.ID) == nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Verify pipe was closed due to session expiration
+	buf := make([]byte, 10)
+	_, err := pr.Read(buf)
+	assert.Error(t, err, "Pipe reader should return error after session expiration")
+}
+
+func TestServer_ReinitiateUploadClosesOldPipes(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	pr1, pw1 := io.Pipe()
+	sess.mu.Lock()
+	sess.UploadPipeR = pr1
+	sess.UploadPipeW = pw1
+	sess.mu.Unlock()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// Perform a second upload request on the same session
+	bodyPr, bodyPw := io.Pipe()
+	reqCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, bodyPr)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=------------------------boundary456")
+
+	go func() {
+		header := "--------------------------boundary456\r\n" +
+			"Content-Disposition: form-data; name=\"file\"; filename=\"second.txt\"\r\n" +
+			"Content-Type: text/plain\r\n\r\n"
+		bodyPw.Write([]byte(header))
+		bodyPw.Close()
+	}()
+
+	client := newTestHTTPClient()
+	resp, err := client.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+
+	// Verify old pipe pw1/pr1 was closed with error
+	buf := make([]byte, 10)
+	_, errRead := pr1.Read(buf)
+	assert.Error(t, errRead)
+	assert.Contains(t, errRead.Error(), "replaced by new upload request")
+}
+
+func TestServer_PullCompletionResetsUploadPipes(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+
+	// Start upload in goroutine
+	bodyPr, bodyPw := io.Pipe()
+	reqCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	uploadReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, bodyPr)
+	require.NoError(t, err)
+	uploadReq.Header.Set("Content-Type", "multipart/form-data; boundary=------------------------boundary789")
+
+	uploadDone := make(chan struct{})
+	go func() {
+		defer close(uploadDone)
+		client := newTestHTTPClient()
+		resp, errDo := client.Do(uploadReq)
+		if errDo == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	content := "Hello BeamShare Upload"
+	go func() {
+		header := "--------------------------boundary789\r\n" +
+			"Content-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\n" +
+			"Content-Type: text/plain\r\n\r\n"
+		footer := "\r\n--------------------------boundary789--\r\n"
+		bodyPw.Write([]byte(header))
+		bodyPw.Write([]byte(content))
+		bodyPw.Write([]byte(footer))
+		bodyPw.Close()
+	}()
+
+	// Wait for upload handler to set up pipe
+	time.Sleep(50 * time.Millisecond)
+
+	// Perform pull
+	pullReq, err := http.NewRequest(http.MethodGet, ts.URL+"/relay/pull?session="+sess.ID, nil)
+	require.NoError(t, err)
+
+	client := newTestHTTPClient()
+	pullResp, err := client.Do(pullReq)
+	require.NoError(t, err)
+	data, err := io.ReadAll(pullResp.Body)
+	pullResp.Body.Close()
+	require.NoError(t, err)
+	assert.Equal(t, content, string(data))
+
+	<-uploadDone
+
+	// Confirm session upload pipes were reset to nil
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
 }
 
 
