@@ -71,7 +71,7 @@ describe('Gaze Web Receiver Test Suite', () => {
     // Set up global environment for app.js
     global.window = window;
     global.document = document;
-    global.navigator = window.navigator;
+    Object.defineProperty(global, 'navigator', { value: window.navigator, configurable: true, writable: true });
     global.location = window.location;
     global.URLSearchParams = window.URLSearchParams;
     global.TextDecoder = require('util').TextDecoder;
@@ -340,6 +340,57 @@ describe('Gaze Web Receiver Test Suite', () => {
     await queue.drain();
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
+  });
+
+  test('getSWPipe waits for PORT_INITIALIZED before appending download iframe', async () => {
+    let iframeAppended = false;
+    let postedData = null;
+
+    const mockSW = {
+      postMessage: (data, ports) => {
+        postedData = data;
+        const swPort = ports && ports[0];
+        setTimeout(() => {
+          if (swPort) {
+            swPort.postMessage({ type: 'PORT_INITIALIZED' });
+          }
+        }, 10);
+      }
+    };
+
+    const swObj = {
+      ready: Promise.resolve({ active: mockSW })
+    };
+    Object.defineProperty(window.navigator, 'serviceWorker', {
+      value: swObj,
+      configurable: true,
+      writable: true
+    });
+    try {
+      Object.defineProperty(global.navigator, 'serviceWorker', {
+        value: swObj,
+        configurable: true,
+        writable: true
+      });
+    } catch (_) {}
+
+    const originalAppendChild = document.body.appendChild.bind(document.body);
+    document.body.appendChild = (node) => {
+      if (node && node.tagName === 'IFRAME') {
+        iframeAppended = true;
+      }
+      return originalAppendChild(node);
+    };
+
+    const pipePromise = app.getSWPipe({ name: 'test.bin', size: 1000, mime: 'application/octet-stream' });
+    
+    assert.equal(iframeAppended, false);
+
+    const port = await pipePromise;
+
+    assert.equal(iframeAppended, true);
+    assert.notEqual(port, null);
+    assert.equal(postedData.type, 'INIT_PORT');
   });
 });
 
