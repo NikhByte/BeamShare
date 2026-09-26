@@ -106,6 +106,25 @@ func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err er
 	s.closePipesIfMatchLocked(pr, pw, err)
 }
 
+func (s *Session) closeUploadPipesLocked(err error) {
+	if s.UploadPipeR != nil {
+		if err != nil {
+			s.UploadPipeR.CloseWithError(err)
+		} else {
+			s.UploadPipeR.Close()
+		}
+		s.UploadPipeR = nil
+	}
+	if s.UploadPipeW != nil {
+		if err != nil {
+			s.UploadPipeW.CloseWithError(err)
+		} else {
+			s.UploadPipeW.Close()
+		}
+		s.UploadPipeW = nil
+	}
+}
+
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
 	if pr == nil || s.DataPipeR == pr {
 		if s.DataPipeW != nil {
@@ -124,7 +143,11 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			}
 			s.DataPipeR = nil
 		}
-	} else {
+	}
+	if pr == nil || s.UploadPipeR == pr {
+		s.closeUploadPipesLocked(err)
+	}
+	if pr != nil && s.DataPipeR != pr && s.UploadPipeR != pr {
 		if pw != nil {
 			if err != nil {
 				pw.CloseWithError(err)
@@ -230,6 +253,19 @@ func (s *Server) Stop() {
 	s.wg.Wait()
 }
 
+const maxFailedAttemptsEntries = 10000
+
+func (s *Server) purgeFailedAttempts() {
+	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	now := time.Now()
+	for ip, fa := range s.failedAttempts {
+		if now.Sub(fa.firstSeen) > time.Minute {
+			delete(s.failedAttempts, ip)
+		}
+	}
+}
+
 func (s *Server) SweepExpiredSessions() {
 	s.mu.Lock()
 	now := time.Now()
@@ -249,6 +285,8 @@ func (s *Server) SweepExpiredSessions() {
 		sess.ClosePipes(fmt.Errorf("session expired"))
 		sess.ClearDownloadQueue()
 	}
+
+	s.purgeFailedAttempts()
 }
 
 func (s *Server) GetSession(id string) *Session {
@@ -290,6 +328,9 @@ func (s *Server) recordFailedAttempt(ip string) {
 	}
 	fa, ok := s.failedAttempts[ip]
 	if !ok || time.Since(fa.firstSeen) > time.Minute {
+		if !ok && len(s.failedAttempts) >= maxFailedAttemptsEntries {
+			return
+		}
 		s.failedAttempts[ip] = &failedAttempt{count: 1, firstSeen: time.Now()}
 		return
 	}
@@ -1059,10 +1100,25 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		if part.FormName() == "file" {
 			sess.mu.Lock()
+			sess.closeUploadPipesLocked(fmt.Errorf("replaced by new upload request"))
+
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
 			sess.mu.Unlock()
+
+			done := make(chan struct{})
+
+			go func() {
+				<-r.Context().Done()
+				select {
+				case <-done:
+					return
+				default:
+					errCtx := fmt.Errorf("upload context cancelled: %w", r.Context().Err())
+					sess.ClosePipesIfMatch(pr, pw, errCtx)
+				}
+			}()
 
 			// Notify sender
 			select {
@@ -1072,8 +1128,22 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 			// Stream data to pipe
 			_, err = io.Copy(pw, part)
-			pw.CloseWithError(err)
+			if err != nil {
+				pw.CloseWithError(err)
+			} else {
+				pw.Close()
+			}
 			part.Close()
+			close(done)
+
+			if r.Context().Err() != nil {
+				return
+			}
+
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})
@@ -1093,12 +1163,30 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	sess.mu.Lock()
 	pr := sess.UploadPipeR
+	pw := sess.UploadPipeW
 	sess.mu.Unlock()
 
 	if pr == nil {
 		http.Error(w, "no active upload", 404)
 		return
 	}
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-r.Context().Done():
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("pull context cancelled: %w", r.Context().Err()))
+			}
+		}
+	}()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	io.Copy(w, pr)

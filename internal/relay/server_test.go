@@ -1,10 +1,15 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -259,6 +264,197 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestServer_RateLimiterSweeperPurge(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	// Record failed attempt for IP
+	srv.recordFailedAttempt("10.0.0.1")
+
+	// Verify attempt recorded
+	srv.failedAttemptsMu.Lock()
+	fa, ok := srv.failedAttempts["10.0.0.1"]
+	require.True(t, ok)
+	// Backdate firstSeen > 1 minute
+	fa.firstSeen = time.Now().Add(-2 * time.Minute)
+	srv.failedAttemptsMu.Unlock()
+
+	// Run sweeper purge
+	srv.SweepExpiredSessions()
+
+	// Verify IP record was purged
+	srv.failedAttemptsMu.Lock()
+	_, okAfter := srv.failedAttempts["10.0.0.1"]
+	srv.failedAttemptsMu.Unlock()
+	assert.False(t, okAfter, "Failed attempt record > 1 min old should be purged by sweeper")
+}
+
+func TestServer_RateLimiterBoundedMemory(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	// Simulate 100,000 unique failed IP lookups
+	for i := 0; i < 100000; i++ {
+		srv.recordFailedAttempt(fmt.Sprintf("10.%d.%d.%d", (i>>16)&0xFF, (i>>8)&0xFF, i&0xFF))
+	}
+
+	srv.failedAttemptsMu.Lock()
+	count := len(srv.failedAttempts)
+	srv.failedAttemptsMu.Unlock()
+
+	assert.LessOrEqual(t, count, maxFailedAttemptsEntries, "Rate limiter map size must be bounded by maxFailedAttemptsEntries")
+	assert.Equal(t, maxFailedAttemptsEntries, count, "Rate limiter map size should reach maxFailedAttemptsEntries capacity")
+}
+
+func TestServer_ClosePipesClosesUploadPipes(t *testing.T) {
+	sess := &Session{
+		ID: "test-close-upload-pipes",
+	}
+
+	pr, pw := io.Pipe()
+	sess.UploadPipeR = pr
+	sess.UploadPipeW = pw
+
+	sess.ClosePipes(fmt.Errorf("session error"))
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+
+	// Verify pipes are closed
+	buf := make([]byte, 10)
+	_, errRead := pr.Read(buf)
+	assert.Error(t, errRead)
+	_, errWrite := pw.Write([]byte("test"))
+	assert.Error(t, errWrite)
+}
+
+func TestServer_UploadContextCancellationGoroutineLeak(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+
+	initialGoroutines := runtime.NumGoroutine()
+
+	// Perform multiple abandoned upload requests
+	for i := 0; i < 10; i++ {
+		pipeR, pipeW := io.Pipe()
+		body := bytes.NewBuffer(nil)
+		mw := multipart.NewWriter(body)
+		_, err := mw.CreateFormFile("file", "test.bin")
+		require.NoError(t, err)
+
+		reqCtx, reqCancel := context.WithCancel(context.Background())
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, pipeR)
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+
+		errCh := make(chan error, 1)
+		go func() {
+			resp, errDo := http.DefaultClient.Do(req)
+			if errDo == nil {
+				resp.Body.Close()
+			}
+			errCh <- errDo
+		}()
+
+		// Write initial header bytes into pipe then cancel request context
+		go func() {
+			_, _ = pipeW.Write([]byte("--" + mw.Boundary() + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"))
+			time.Sleep(20 * time.Millisecond)
+			reqCancel()
+			pipeW.Close()
+		}()
+
+		<-errCh
+	}
+
+	// Verify goroutine count returns to baseline
+	assert.Eventually(t, func() bool {
+		currentGoroutines := runtime.NumGoroutine()
+		return currentGoroutines-initialGoroutines <= 2
+	}, 2*time.Second, 10*time.Millisecond, "Goroutines leaked after abandoned uploads")
+}
+
+func TestServer_ReinitiateUploadClosesExistingPipe(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+
+	// Upload 1 (started asynchronously as an unconsumed upload stream)
+	body1 := &bytes.Buffer{}
+	mw1 := multipart.NewWriter(body1)
+	part1, err := mw1.CreateFormFile("file", "file1.bin")
+	require.NoError(t, err)
+	part1.Write([]byte("data1"))
+	mw1.Close()
+
+	req1, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, body1)
+	require.NoError(t, err)
+	req1.Header.Set("Content-Type", mw1.FormDataContentType())
+	req1.Close = true
+
+	go func() {
+		resp1, errDo := http.DefaultClient.Do(req1)
+		if errDo == nil {
+			resp1.Body.Close()
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	oldPipeR := sess.UploadPipeR
+	require.NotNil(t, oldPipeR)
+
+	// Upload 2 (re-initiate upload on active session)
+	body2 := &bytes.Buffer{}
+	mw2 := multipart.NewWriter(body2)
+	part2, err := mw2.CreateFormFile("file", "file2.bin")
+	require.NoError(t, err)
+	part2.Write([]byte("data2"))
+	mw2.Close()
+
+	req2, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, body2)
+	require.NoError(t, err)
+	req2.Header.Set("Content-Type", mw2.FormDataContentType())
+	req2.Close = true
+
+	go func() {
+		resp2, err2 := http.DefaultClient.Do(req2)
+		if err2 == nil {
+			resp2.Body.Close()
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	reqPull, err := http.NewRequest(http.MethodGet, ts.URL+"/relay/pull?session="+sess.ID, nil)
+	require.NoError(t, err)
+	reqPull.Close = true
+
+	respPull, errPull := http.DefaultClient.Do(reqPull)
+	require.NoError(t, errPull)
+	data, errRead := io.ReadAll(respPull.Body)
+	respPull.Body.Close()
+	require.NoError(t, errRead)
+	assert.Equal(t, "data2", string(data))
+
+	// Verify old pipe was closed
+	buf := make([]byte, 10)
+	_, errReadOld := oldPipeR.Read(buf)
+	assert.Error(t, errReadOld, "Old upload pipe should be closed when re-initiating an upload")
+	assert.True(t, strings.Contains(errReadOld.Error(), "replaced by new upload request") || strings.Contains(errReadOld.Error(), "closed pipe"), "Error should indicate pipe closed")
 }
 
 
