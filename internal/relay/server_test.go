@@ -307,6 +307,9 @@ func TestServer_UploadHandlerContextCancellation(t *testing.T) {
 
 	sess := srv.createSession()
 
+	httpClient := newTestHTTPClient()
+	defer httpClient.CloseIdleConnections()
+
 	// Create pipe for multipart request body to simulate an unfinished upload stream
 	bodyR, bodyW := io.Pipe()
 
@@ -332,7 +335,7 @@ func TestServer_UploadHandlerContextCancellation(t *testing.T) {
 
 	uploadErrCh := make(chan error, 1)
 	go func() {
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err == nil {
 			resp.Body.Close()
 		}
@@ -347,6 +350,7 @@ func TestServer_UploadHandlerContextCancellation(t *testing.T) {
 
 	cancel()
 	bodyW.Close()
+	bodyR.CloseWithError(context.Canceled)
 
 	select {
 	case <-uploadErrCh:
@@ -379,6 +383,9 @@ func TestServer_PullHandlerContextCancellation(t *testing.T) {
 	sess.UploadPipeW = pw
 	sess.mu.Unlock()
 
+	httpClient := newTestHTTPClient()
+	defer httpClient.CloseIdleConnections()
+
 	pullCtx, pullCancel := context.WithCancel(context.Background())
 
 	req, err := http.NewRequestWithContext(pullCtx, http.MethodGet, ts.URL+"/relay/pull?session="+sess.ID, nil)
@@ -386,7 +393,7 @@ func TestServer_PullHandlerContextCancellation(t *testing.T) {
 
 	pullErrCh := make(chan error, 1)
 	go func() {
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err == nil {
 			resp.Body.Close()
 		}
