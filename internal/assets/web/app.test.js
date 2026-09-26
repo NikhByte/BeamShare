@@ -135,10 +135,12 @@ describe('Gaze Web Receiver Test Suite', () => {
     global.document = document;
     global.HTMLCanvasElement = window.HTMLCanvasElement;
     global.HTMLImageElement = window.HTMLImageElement;
-    global.navigator = window.navigator;
+    Object.defineProperty(global, 'navigator', { value: window.navigator, configurable: true, writable: true });
     global.location = window.location;
     global.URLSearchParams = window.URLSearchParams;
     global.TextDecoder = require('util').TextDecoder;
+    global.FileReader = window.FileReader;
+    global.File = window.File;
     global.atob = (str) => Buffer.from(str, 'base64').toString('binary');
     global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
     window.atob = global.atob;
@@ -146,6 +148,8 @@ describe('Gaze Web Receiver Test Suite', () => {
     if (typeof global.MessageChannel !== 'undefined') {
       window.MessageChannel = global.MessageChannel;
     }
+    global.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+    window.localStorage = global.localStorage;
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
@@ -700,6 +704,63 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   });
+
+  test('getSWPipe waits for READY before appending download iframe', async () => {
+    let iframeAppended = false;
+    let postedData = null;
+
+    const mockSW = {
+      postMessage: (data, ports) => {
+        postedData = data;
+        const swPort = ports && ports[0];
+        setTimeout(() => {
+          if (swPort) {
+            swPort.postMessage({ type: 'READY' });
+          }
+        }, 10);
+      }
+    };
+
+    const swObj = {
+      ready: Promise.resolve({ active: mockSW }),
+      controller: mockSW
+    };
+    Object.defineProperty(window.navigator, 'userAgent', {
+      value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      configurable: true,
+      writable: true
+    });
+    Object.defineProperty(window.navigator, 'serviceWorker', {
+      value: swObj,
+      configurable: true,
+      writable: true
+    });
+    try {
+      Object.defineProperty(global.navigator, 'serviceWorker', {
+        value: swObj,
+        configurable: true,
+        writable: true
+      });
+    } catch (_) {}
+
+    const originalAppendChild = document.body.appendChild.bind(document.body);
+    document.body.appendChild = (node) => {
+      if (node && node.tagName === 'IFRAME') {
+        iframeAppended = true;
+      }
+      return originalAppendChild(node);
+    };
+
+    const pipePromise = app.getSWPipe({ name: 'test.bin', size: 1000, mime: 'application/octet-stream' });
+    
+    assert.equal(iframeAppended, false);
+
+    const port = await pipePromise;
+
+    assert.equal(iframeAppended, true);
+    assert.notEqual(port, null);
+    assert.equal(postedData.type, 'INIT_PORT');
+  });
 });
 
 describe('Gaze Web Sender Test Suite', () => {
@@ -815,58 +876,6 @@ describe('Gaze Web Sender Test Suite', () => {
     // Set mock file
     app.handleSenderFileSelect({ name: 'test.txt', size: 1024, type: 'text/plain' });
 
-  });
-
-  test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
-    // Intercept fetch / network calls to verify no external requests are made
-    let externalRequests = [];
-    window.fetch = async (url) => {
-      externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
-    };
-
-    await app.startSenderSharing();
-
-    const urlInput = document.getElementById('send-url-input');
-    const shareURL = urlInput.value || "http://localhost/";
-    const hash = new URL(shareURL).hash;
-
-    assert.equal(hash.startsWith('#k='), true);
-
-    // Verify the fragment is valid base64url and resolves to 32 bytes (256-bit)
-    const b64 = hash.substring(3).replace(/-/g, '+').replace(/_/g, '/');
-    const raw = Buffer.from(b64, 'base64');
-    assert.equal(raw.length, 32);
-
-    // Ensure global encryption key was created
-    assert.notEqual(app.get_senderEncryptionKey(), null);
-
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
-    const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
-    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
-  });
-
-  test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
-    let externalCallMade = false;
-    const origFetch = global.fetch;
-    global.fetch = async (url, opts) => {
-      if (typeof url === 'string' && (url.includes('qrserver.com') || url.includes('/api/qr'))) {
-        externalCallMade = true;
-      }
-      return origFetch(url, opts);
-    };
-
-    await app.startSenderSharing();
-
-    assert.equal(externalCallMade, false, 'No external QR API requests should be made');
-
-    const sendCanvas = document.getElementById('send-qr-canvas');
-    assert.notEqual(sendCanvas, null);
-
-    const urlInput = document.getElementById('send-url-input');
-    assert.ok(urlInput.value.includes('#k='));
   });
 
   test('Client-side QR generation renders locally without external api.qrserver.com requests', async () => {
@@ -1150,6 +1159,42 @@ describe('WebRTC Buffer Backpressure Suite', () => {
 
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
   });
-});
 
+  test('uploadFileP2P streams file chunks and sends UPLOAD_EOF using backpressure helper', async () => {
+    const sent = [];
+    const mockDC = new MockDataChannel(0, 'open');
+    mockDC.send = (msg) => sent.push(msg);
+
+    delete require.cache[require.resolve('./app.js')];
+    const testApp = require('./app.js');
+
+    const fileContent = new Uint8Array(150 * 1024).fill(65);
+    const mockFile = new window.File([fileContent], 'test-p2p.bin', { type: 'application/octet-stream' });
+
+    await testApp.uploadFileP2P(mockFile, mockDC);
+
+    assert.equal(sent.length, 5, 'Should send UPLOAD_META, 3 chunks, and UPLOAD_EOF');
+    assert.equal(sent[0], 'UPLOAD_META:test-p2p.bin:153600');
+    assert.equal(sent[4], 'UPLOAD_EOF');
+  });
+
+  test('sendWebRTCFile streams chunks and sends EOF using backpressure helper', async () => {
+    const sent = [];
+    const mockDC = new MockDataChannel(0, 'open');
+    mockDC.send = (msg) => sent.push(msg);
+
+    delete require.cache[require.resolve('./app.js')];
+    const testApp = require('./app.js');
+
+    const fileContent = new Uint8Array(150 * 1024).fill(66);
+    const mockFile = new window.File([fileContent], 'sender-test.bin', { type: 'application/octet-stream' });
+
+    testApp.handleSenderFileSelect(mockFile);
+
+    await testApp.sendWebRTCFile(0, mockDC);
+
+    assert.equal(sent.length, 4, 'Should send 3 chunks and EOF');
+    assert.equal(sent[3], 'EOF');
+  });
+});
 

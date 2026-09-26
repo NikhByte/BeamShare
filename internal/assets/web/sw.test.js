@@ -315,19 +315,15 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
   });
 
   test('INIT_PORT message handler posts READY message over message port', () => {
-    require('./sw.js');
+    const { streamMap } = require('./sw.js');
     const url = '/sw-download-pipe/test-ready';
-    let readyPosted = false;
+    let postedMessage = null;
 
     const mockPort = {
       onmessage: null,
       onmessageerror: null,
       close: () => {},
-      postMessage: (msg) => {
-        if (msg && msg.type === 'READY') {
-          readyPosted = true;
-        }
-      }
+      postMessage: (msg) => { postedMessage = msg; }
     };
 
     listeners['message']({
@@ -341,6 +337,7 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
       ports: [mockPort]
     });
 
-    assert.equal(readyPosted, true);
+    assert.equal(streamMap.has(url), true);
+    assert.deepEqual(postedMessage, { type: 'READY' });
   });
 });
