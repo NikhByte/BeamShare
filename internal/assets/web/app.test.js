@@ -537,4 +537,16 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('getSessionToken and apiPath propagate session token', () => {
+    // Test with URL search params containing token
+    dom.reconfigure({ url: 'http://localhost:8080/?b=http://localhost:8080&token=sec_tok_12345' });
+    global.window = dom.window;
+    global.location = dom.window.location;
+    global.URLSearchParams = dom.window.URLSearchParams;
+
+    assert.equal(app.getSessionToken(), 'sec_tok_12345');
+    assert.equal(app.apiPath('/api/meta'), 'http://localhost:8080/api/meta?token=sec_tok_12345');
+    assert.equal(app.apiPath('/api/qr?url=abc'), 'http://localhost:8080/api/qr?url=abc&token=sec_tok_12345');
+  });
 });
