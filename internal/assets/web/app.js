@@ -1,3 +1,18 @@
+function getSessionToken() {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get('token') || window.GAZE_SESSION_TOKEN || '';
+  if (!token && window.location.search) {
+    const backend = params.get('backend') || params.get('b') || params.get('local');
+    if (backend && backend.includes('token=')) {
+      try {
+        const u = new URL(backend.startsWith('http') ? backend : 'http://dummy' + (backend.startsWith('/') ? '' : '/') + backend);
+        token = u.searchParams.get('token') || '';
+      } catch (e) {}
+    }
+  }
+  return token;
+}
+
 function getBackendURL() {
   const params = new URLSearchParams(window.location.search);
   let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
@@ -17,14 +32,27 @@ function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  const token = getSessionToken();
   let fullPath = path;
-  if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+  if (s && !fullPath.includes('s=')) {
+    fullPath = fullPath.includes('?') ? fullPath + '&s=' + s : fullPath + '?s=' + s;
+  }
+  if (token && !fullPath.includes('token=')) {
+    fullPath = fullPath.includes('?') ? fullPath + '&token=' + token : fullPath + '?token=' + token;
   }
   if (backend) {
     return backend + fullPath;
   }
   return fullPath;
+}
+
+async function authFetch(url, options = {}) {
+  const token = getSessionToken();
+  const headers = new Headers(options.headers || {});
+  if (token && !headers.has('X-Beam-Token')) {
+    headers.set('X-Beam-Token', token);
+  }
+  return fetch(url, { ...options, headers });
 }
 /**
  * app.js — Gaze Receiver (Phase 4 & 5: Direct-to-Disk + Live Pipe)
@@ -1203,7 +1231,7 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      const res = await authFetch(`${localURL}/api/meta`, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
@@ -1234,7 +1262,7 @@ async function bootstrap() {
 // ── HTTP mode ─────────────────────────────────────────────────────────────────
 async function fetchMetaAndShowReady() {
   try {
-    const res = await fetch(apiPath('/api/meta'));
+    const res = await authFetch(apiPath('/api/meta'));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     currentFile = await res.json();
 
@@ -1378,7 +1406,7 @@ async function startHTTPDownload() {
     if (initialOffset > 0) {
       headers['Range'] = `bytes=${initialOffset}-`;
     }
-    const res = await fetch(apiPath('/api/download'), { headers });
+    const res = await authFetch(apiPath('/api/download'), { headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
     const reader = res.body.getReader();
@@ -1580,7 +1608,7 @@ async function startWebRTC() {
 
   if (!offer) {
     setWebRTCSub('Fetching SDP offer…');
-    const offerRes = await fetch(apiPath('/api/signal/offer'));
+    const offerRes = await authFetch(apiPath('/api/signal/offer'));
     if (!offerRes.ok) throw new Error(`offer fetch: HTTP ${offerRes.status}`);
     offer = await offerRes.json();
   }
@@ -1591,7 +1619,7 @@ async function startWebRTC() {
   const pc = new RTCPeerConnection({ iceServers });
 
   // Also fetch file meta in parallel.
-  const metaPromise = fetch(apiPath('/api/meta')).then(r => r.json());
+  const metaPromise = authFetch(apiPath('/api/meta')).then(r => r.json());
 
   await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
@@ -1622,7 +1650,7 @@ async function startWebRTC() {
 
   // 4. POST answer to sender.
   setWebRTCSub('Sending answer to sender…');
-  const answerRes = await fetch(apiPath('/api/signal/answer'), {
+  const answerRes = await authFetch(apiPath('/api/signal/answer'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(pc.localDescription),
@@ -1633,7 +1661,7 @@ async function startWebRTC() {
   // 5. Fetch and add ICE candidates from sender.
   setWebRTCSub('Exchanging ICE candidates…');
   try {
-    const candRes  = await fetch(apiPath('/api/signal/candidates'));
+    const candRes  = await authFetch(apiPath('/api/signal/candidates'));
     const cands    = await candRes.json();
     for (const c of cands) {
       await pc.addIceCandidate(new RTCIceCandidate(c));
@@ -1944,6 +1972,10 @@ async function handleUploadFile(e) {
     };
 
     xhr.open('POST', apiPath('/api/upload'), true);
+    const token = getSessionToken();
+    if (token) {
+      xhr.setRequestHeader('X-Beam-Token', token);
+    }
     xhr.send(formData);
   }
 }
@@ -2577,6 +2609,8 @@ if (typeof module !== 'undefined' && module.exports) {
     VirtualLogViewer,
     startHTTPSSE,
     getBackendURL,
+    getSessionToken,
+    authFetch,
     apiPath,
     formatBytes,
     mimeLabel,
