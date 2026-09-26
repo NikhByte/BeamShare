@@ -537,4 +537,121 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  describe('WebRTC Backpressure Helper (waitForBufferDrain) Tests', () => {
+    function createMockDataChannel(initialBufferedAmount = 0, readyState = 'open') {
+      const listeners = new Map();
+      return {
+        bufferedAmount: initialBufferedAmount,
+        bufferedAmountLowThreshold: 0,
+        readyState,
+        listeners,
+        addEventListener(event, listener) {
+          if (!listeners.has(event)) listeners.set(event, new Set());
+          listeners.get(event).add(listener);
+        },
+        removeEventListener(event, listener) {
+          if (listeners.has(event)) {
+            listeners.get(event).delete(listener);
+          }
+        },
+        emit(event) {
+          if (listeners.has(event)) {
+            for (const listener of Array.from(listeners.get(event))) {
+              listener();
+            }
+          }
+        },
+        getListenerCount(event) {
+          return listeners.has(event) ? listeners.get(event).size : 0;
+        }
+      };
+    }
+
+    test('waitForBufferDrain resolves immediately if bufferedAmount <= highWatermark', async () => {
+      const dc = createMockDataChannel(500 * 1024);
+      await app.waitForBufferDrain(dc, 1024 * 1024, 512 * 1024);
+      assert.equal(dc.bufferedAmountLowThreshold, 512 * 1024);
+      assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
+    });
+
+    test('waitForBufferDrain waits for bufferedamountlow event and detaches listener upon resolution', async () => {
+      const dc = createMockDataChannel(2 * 1024 * 1024);
+      let resolved = false;
+
+      const promise = app.waitForBufferDrain(dc, 1024 * 1024, 512 * 1024).then(() => {
+        resolved = true;
+      });
+
+      assert.equal(dc.bufferedAmountLowThreshold, 512 * 1024);
+      assert.equal(dc.getListenerCount('bufferedamountlow'), 1);
+      assert.equal(resolved, false);
+
+      dc.bufferedAmount = 400 * 1024;
+      dc.emit('bufferedamountlow');
+
+      await promise;
+      assert.equal(resolved, true);
+      assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
+    });
+
+    test('waitForBufferDrain resolves immediately when buffer drains during listener registration (race condition fix)', async () => {
+      const dc = createMockDataChannel(2 * 1024 * 1024);
+      const originalAddEventListener = dc.addEventListener.bind(dc);
+
+      // Simulate background thread draining buffer right during listener setup
+      dc.addEventListener = (event, listener) => {
+        originalAddEventListener(event, listener);
+        if (event === 'bufferedamountlow') {
+          dc.bufferedAmount = 100 * 1024; // Drained below 512KB threshold during registration
+        }
+      };
+
+      await app.waitForBufferDrain(dc, 1024 * 1024, 512 * 1024);
+
+      // Listener must be cleaned up and promise resolved without blocking
+      assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
+      assert.equal(dc.getListenerCount('close'), 0);
+    });
+
+    test('waitForBufferDrain clears buffer before EOF (0 threshold)', async () => {
+      const dc = createMockDataChannel(64 * 1024);
+      let resolved = false;
+
+      const promise = app.waitForBufferDrain(dc, 0, 0).then(() => {
+        resolved = true;
+      });
+
+      assert.equal(dc.bufferedAmountLowThreshold, 0);
+      assert.equal(dc.getListenerCount('bufferedamountlow'), 1);
+      assert.equal(resolved, false);
+
+      dc.bufferedAmount = 0;
+      dc.emit('bufferedamountlow');
+
+      await promise;
+      assert.equal(resolved, true);
+      assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
+    });
+
+    test('waitForBufferDrain resolves and cleans up if data channel closes while waiting', async () => {
+      const dc = createMockDataChannel(2 * 1024 * 1024);
+      let resolved = false;
+
+      const promise = app.waitForBufferDrain(dc, 1024 * 1024, 512 * 1024).then(() => {
+        resolved = true;
+      });
+
+      assert.equal(dc.getListenerCount('bufferedamountlow'), 1);
+      assert.equal(dc.getListenerCount('close'), 1);
+
+      dc.readyState = 'closed';
+      dc.emit('close');
+
+      await promise;
+      assert.equal(resolved, true);
+      assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
+      assert.equal(dc.getListenerCount('close'), 0);
+    });
+  });
 });
