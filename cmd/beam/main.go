@@ -453,12 +453,23 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 			session.OnOpen = func(dc *webrtc.DataChannel) {
 				// Upload state variables for incoming files from receiver
 				var (
-					uploadFile *os.File
-					uploadName string
-					uploadSize int64
-					uploaded   int64
-					uploadStat time.Time
+					uploadFile   *os.File
+					uploadName   string
+					uploadSize   int64
+					uploaded     int64
+					uploadStat   time.Time
+					senderCancel context.CancelFunc
+					senderMu     sync.Mutex
 				)
+
+				dc.OnClose(func() {
+					senderMu.Lock()
+					if senderCancel != nil {
+						senderCancel()
+						senderCancel = nil
+					}
+					senderMu.Unlock()
+				})
 
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
@@ -510,8 +521,17 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if len(parts) == 2 {
 								offset, _ = strconv.ParseInt(parts[1], 10, 64)
 							}
+
+							senderMu.Lock()
+							if senderCancel != nil {
+								senderCancel()
+							}
+							var senderCtx context.Context
+							senderCtx, senderCancel = context.WithCancel(mainCtx)
+							senderMu.Unlock()
+
 							// File sender goroutine (Direct-to-Disk + Backpressure)
-							go func() {
+							go func(ctx context.Context) {
 								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
 								file, err := os.Open(filePath)
 								if err != nil {
@@ -529,6 +549,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								}
 
 								// Send META header
+								select {
+								case <-ctx.Done():
+									return
+								default:
+								}
 								metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
 								if errSend := dc.SendText(metaHeader); errSend != nil {
 									fmt.Printf("  Error sending meta header: %v\n", errSend)
@@ -544,19 +569,43 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									}
 								})
 
-								buffer := make([]byte, 64*1024) // 64KB chunk size
+								buffer := make([]byte, 32*1024) // 32KB chunk size
 								totalSent := offset
 								start := time.Now()
 
 								for {
+									select {
+									case <-ctx.Done():
+										return
+									default:
+									}
+
 									// Backpressure check: wait if buffered amount > 1MB
 									if dc.BufferedAmount() > 1024*1024 {
-										<-bufferedAmountLowChan
+										ticker := time.NewTicker(10 * time.Millisecond)
+										for dc.BufferedAmount() > 512*1024 {
+											select {
+											case <-ctx.Done():
+												ticker.Stop()
+												return
+											case <-bufferedAmountLowChan:
+											case <-ticker.C:
+											}
+										}
+										ticker.Stop()
+									}
+
+									select {
+									case <-ctx.Done():
+										return
+									default:
 									}
 
 									n, err := file.Read(buffer)
 									if n > 0 {
-										errSend := dc.Send(buffer[:n])
+										chunk := make([]byte, n)
+										copy(chunk, buffer[:n])
+										errSend := dc.Send(chunk)
 										if errSend != nil {
 											fmt.Printf("\n  Error sending chunk: %v\n", errSend)
 											return
@@ -576,8 +625,25 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								// Wait for buffer to clear before sending EOF
 								dc.SetBufferedAmountLowThreshold(0)
 								if dc.BufferedAmount() > 0 {
-									<-bufferedAmountLowChan
+									ticker := time.NewTicker(10 * time.Millisecond)
+									for dc.BufferedAmount() > 0 {
+										select {
+										case <-ctx.Done():
+											ticker.Stop()
+											return
+										case <-bufferedAmountLowChan:
+										case <-ticker.C:
+										}
+									}
+									ticker.Stop()
 								}
+
+								select {
+								case <-ctx.Done():
+									return
+								default:
+								}
+
 								dc.SendText("EOF")
 
 								elapsed := time.Since(start)
@@ -587,7 +653,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									elapsed.Seconds(),
 									ui.FormatSpeed(sentInSession, elapsed),
 								)
-							}()
+							}(senderCtx)
 						}
 					} else {
 						if uploadFile != nil {
