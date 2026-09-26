@@ -52,6 +52,7 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 
 	ts := httptest.NewServer(srv.Mux())
 	defer ts.Close()
+	defer http.DefaultClient.CloseIdleConnections()
 
 	t.Run("Upload large file", func(t *testing.T) {
 		bodyReader, bodyWriter := io.Pipe()

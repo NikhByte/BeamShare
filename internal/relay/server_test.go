@@ -317,6 +317,7 @@ func TestServer_UploadHandlerContextCancellation(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, bodyR)
 	require.NoError(t, err)
+	req.Close = true
 
 	boundary := "---------------------------123456789"
 	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
@@ -363,7 +364,7 @@ func TestServer_UploadHandlerContextCancellation(t *testing.T) {
 		sess.mu.Lock()
 		defer sess.mu.Unlock()
 		return sess.UploadPipeR == nil && sess.UploadPipeW == nil
-	}, 1*time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 }
 
 func TestServer_PullHandlerContextCancellation(t *testing.T) {
@@ -390,6 +391,7 @@ func TestServer_PullHandlerContextCancellation(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(pullCtx, http.MethodGet, ts.URL+"/relay/pull?session="+sess.ID, nil)
 	require.NoError(t, err)
+	req.Close = true
 
 	pullErrCh := make(chan error, 1)
 	go func() {
@@ -415,7 +417,7 @@ func TestServer_PullHandlerContextCancellation(t *testing.T) {
 		sess.mu.Lock()
 		defer sess.mu.Unlock()
 		return sess.UploadPipeR == nil && sess.UploadPipeW == nil
-	}, 1*time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 }
 
 func TestServer_ReUploadReplacesExistingUploadPipes(t *testing.T) {

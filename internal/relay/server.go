@@ -1106,6 +1106,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 						return
 					default:
 						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("upload context cancelled: %w", r.Context().Err()))
+						part.Close()
+						r.Body.Close()
 					}
 				}
 			}()

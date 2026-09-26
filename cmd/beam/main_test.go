@@ -72,6 +72,7 @@ func TestDownloadFile_PlainHTTP(t *testing.T) {
 
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
+	defer http.DefaultClient.CloseIdleConnections()
 
 	defer os.Remove("received_test_download.txt")
 
@@ -102,6 +103,7 @@ func TestDownloadFile_Relay(t *testing.T) {
 
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
+	defer http.DefaultClient.CloseIdleConnections()
 
 	defer os.Remove("received_test_download_relay.txt")
 
