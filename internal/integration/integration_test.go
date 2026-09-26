@@ -34,6 +34,7 @@ func TestEndToEndDirectHTTP(t *testing.T) {
 
 	ts := httptest.NewServer(srv.Mux())
 	defer ts.Close()
+	defer http.DefaultClient.CloseIdleConnections()
 
 	// Prepare test file
 	fileSize := 1024 * 1024 // 1MB

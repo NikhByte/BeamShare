@@ -38,6 +38,7 @@ func TestLocalHTTPSignaling(t *testing.T) {
 	session.RegisterHandlers(mux)
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
+	defer http.DefaultClient.CloseIdleConnections()
 
 	t.Run("GET /api/signal/offer", func(t *testing.T) {
 		resp, err := http.Get(ts.URL + "/api/signal/offer")
@@ -214,6 +215,7 @@ func TestSignalingHandlers(t *testing.T) {
 
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
+	defer http.DefaultClient.CloseIdleConnections()
 
 	// Test GET /api/signal/offer
 	res, err := http.Get(ts.URL + "/api/signal/offer")
