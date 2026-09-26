@@ -177,6 +177,13 @@ func (c *Client) Poll(ctx context.Context) (*PollCommand, error) {
 	return &cmd, nil
 }
 
+func (c *Client) validateKey() error {
+	if len(c.Key) > 0 && len(c.Key) != 32 {
+		return fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d", len(c.Key))
+	}
+	return nil
+}
+
 // UploadData streams file data starting at the beginning of the file.
 func (c *Client) UploadData(ctx context.Context, filePath string) error {
 	return c.UploadDataAtOffset(ctx, filePath, 0)
@@ -184,6 +191,10 @@ func (c *Client) UploadData(ctx context.Context, filePath string) error {
 
 // UploadDataAtOffset streams file data starting at a specified byte offset (for resumable transfers).
 func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset int64) error {
+	if err := c.validateKey(); err != nil {
+		return err
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -201,6 +212,10 @@ func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset
 
 // UploadReaderAtOffset streams data from an io.Reader starting at a specified byte offset.
 func (c *Client) UploadReaderAtOffset(ctx context.Context, reader io.Reader, offset int64) error {
+	if err := c.validateKey(); err != nil {
+		return err
+	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}

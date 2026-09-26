@@ -225,4 +225,67 @@ func TestUploadReaderAtOffset(t *testing.T) {
 			t.Fatalf("expected offset uploaded data '%s', got '%s'", string(offsetData), string(receivedOffset))
 		}
 	})
+
+	t.Run("InvalidKeyLength", func(t *testing.T) {
+		client, _ := createIsolatedSession(t)
+		client.Key = []byte("short-key-16bytes") // 17 bytes, not 32
+
+		err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+		if err == nil {
+			t.Fatalf("expected error for invalid key length, got nil")
+		}
+	})
 }
+
+type mockHTTPClient struct {
+	called bool
+}
+
+func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	m.called = true
+	return nil, nil
+}
+
+func (m *mockHTTPClient) Get(url string) (*http.Response, error) {
+	m.called = true
+	return nil, nil
+}
+
+func (m *mockHTTPClient) Post(url, contentType string, body io.Reader) (*http.Response, error) {
+	m.called = true
+	return nil, nil
+}
+
+func TestClient_InvalidKeyLength_NoHTTPRequestDispatched(t *testing.T) {
+	invalidKeyLengths := []int{1, 10, 16, 31, 33, 64}
+
+	for _, length := range invalidKeyLengths {
+		mockHTTP := &mockHTTPClient{}
+		client := NewClient("http://localhost:8080")
+		client.HTTP = mockHTTP
+		client.Key = make([]byte, length)
+
+		err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader([]byte("test data")), 0)
+		if err == nil {
+			t.Fatalf("expected error for key length %d, got nil", length)
+		}
+		if mockHTTP.called {
+			t.Fatalf("expected no HTTP request dispatched for invalid key length %d", length)
+		}
+
+		tmpDir := t.TempDir()
+		filePath := filepath.Join(tmpDir, "nonexistent_or_dummy.txt")
+		// Note: filePath doesn't even need to exist if key validation happens before os.Open
+		_ = os.WriteFile(filePath, []byte("test data"), 0644)
+
+		mockHTTP.called = false
+		err = client.UploadDataAtOffset(context.Background(), filePath, 0)
+		if err == nil {
+			t.Fatalf("expected error for key length %d in UploadDataAtOffset, got nil", length)
+		}
+		if mockHTTP.called {
+			t.Fatalf("expected no HTTP request dispatched for invalid key length %d in UploadDataAtOffset", length)
+		}
+	}
+}
+
