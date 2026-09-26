@@ -537,4 +537,139 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('getSWPipe waits for INIT_ACK before appending iframe and returns port', async () => {
+    let iframeAppendedBeforeAck = false;
+    let ackSent = false;
+
+    class MockPort {
+      constructor() {
+        this.onmessage = null;
+      }
+      postMessage(data) {}
+    }
+    class MockChannel {
+      constructor() {
+        this.port1 = new MockPort();
+        this.port2 = new MockPort();
+        this.port1.otherPort = this.port2;
+        this.port2.otherPort = this.port1;
+      }
+    }
+    global.MessageChannel = MockChannel;
+    window.MessageChannel = MockChannel;
+
+    const mockSW = {
+      postMessage: (data, ports) => {
+        setTimeout(() => {
+          ackSent = true;
+          const iframes = document.querySelectorAll('iframe');
+          if (iframes.length > 0) {
+            iframeAppendedBeforeAck = true;
+          }
+          if (ports[0].otherPort && ports[0].otherPort.onmessage) {
+            ports[0].otherPort.onmessage({ data: { type: 'INIT_ACK' } });
+          }
+        }, 10);
+      }
+    };
+
+    navigator.serviceWorker = {
+      ready: Promise.resolve({ active: mockSW }),
+      controller: mockSW
+    };
+
+    const fileMeta = { name: 'test.txt', size: 1234, mime: 'text/plain' };
+    const port = await app.getSWPipe(fileMeta);
+
+    assert.notEqual(port, null);
+    assert.equal(ackSent, true);
+    assert.equal(iframeAppendedBeforeAck, false);
+
+    const iframes = document.querySelectorAll('iframe');
+    assert.equal(iframes.length, 1);
+    assert.equal(iframes[0].hidden, true);
+    assert.equal(iframes[0].src.includes('/sw-download-pipe/'), true);
+  });
+
+  test('getSWPipe returns null when INIT_ACK times out (5000ms)', async () => {
+    const originalSetTimeout = global.setTimeout;
+    let ackTimeoutCb = null;
+
+    class MockPort {
+      constructor() { this.onmessage = null; }
+      postMessage() {}
+    }
+    class MockChannel {
+      constructor() {
+        this.port1 = new MockPort();
+        this.port2 = new MockPort();
+      }
+    }
+    global.MessageChannel = MockChannel;
+    window.MessageChannel = MockChannel;
+
+    const mockSW = {
+      postMessage: () => {}
+    };
+
+    navigator.serviceWorker = {
+      ready: Promise.resolve({ active: mockSW }),
+      controller: mockSW
+    };
+
+    const fileMeta = { name: 'timeout.txt', size: 100, mime: 'text/plain' };
+
+    global.setTimeout = (cb, delay) => {
+      if (delay === 5000) {
+        ackTimeoutCb = cb;
+        return 999;
+      }
+      return originalSetTimeout(cb, delay);
+    };
+
+    try {
+      const pipePromise = app.getSWPipe(fileMeta);
+      setImmediate(() => {
+        if (ackTimeoutCb) ackTimeoutCb();
+      });
+      const result = await pipePromise;
+      assert.equal(result, null);
+    } finally {
+      global.setTimeout = originalSetTimeout;
+    }
+  });
+
+  test('getSWPipe uses 10000ms ready timeout and returns null on ready timeout', async () => {
+    const originalSetTimeout = global.setTimeout;
+    let readyTimeoutDelay = 0;
+    let readyTimeoutCb = null;
+
+    global.setTimeout = (cb, delay) => {
+      if (delay === 10000) {
+        readyTimeoutDelay = delay;
+        readyTimeoutCb = cb;
+        return 888;
+      }
+      return originalSetTimeout(cb, delay);
+    };
+
+    navigator.serviceWorker = {
+      ready: new Promise(() => {})
+    };
+
+    const fileMeta = { name: 'never_ready.txt', size: 100, mime: 'text/plain' };
+
+    try {
+      const pipePromise = app.getSWPipe(fileMeta);
+      setImmediate(() => {
+        if (readyTimeoutCb) readyTimeoutCb();
+      });
+      const result = await pipePromise;
+      assert.equal(readyTimeoutDelay, 10000);
+      assert.equal(result, null);
+    } finally {
+      global.setTimeout = originalSetTimeout;
+    }
+  });
 });
