@@ -32,7 +32,7 @@ func TestEndToEndDirectHTTP(t *testing.T) {
 	srv, err := server.New("", 0)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
 	// Prepare test file
@@ -56,7 +56,7 @@ func TestEndToEndDirectHTTP(t *testing.T) {
 	err = writer.Close()
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload", body)
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?token="+srv.Token(), body)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -73,7 +73,7 @@ func TestEndToEndDirectHTTP(t *testing.T) {
 	assert.Equal(t, "ok", uploadResp["status"])
 
 	// Download file
-	downloadReq, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download", nil)
+	downloadReq, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?token="+srv.Token(), nil)
 	require.NoError(t, err)
 
 	downloadResp, err := http.DefaultClient.Do(downloadReq)
@@ -355,14 +355,14 @@ func TestEndToEndLiveStdinPipeStreaming(t *testing.T) {
 	srv, err := server.New("", 10*1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
 	// Initial backlog
 	srv.WriteLive([]byte("line 1\nline 2\n"))
 
 	// Connect SSE client
-	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/live/stream", nil)
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/live/stream?token="+srv.Token(), nil)
 	require.NoError(t, err)
 
 	resp, err := http.DefaultClient.Do(req)
