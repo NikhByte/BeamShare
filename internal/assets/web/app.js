@@ -1770,6 +1770,17 @@ async function startWebRTC() {
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
 
+    let decryptionKey = null;
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch (err) {
+      console.error("Failed to import decryption key from URL hash:", err);
+      showError("Decryption key error: " + err.message);
+      if (webrtcDataChannel) webrtcDataChannel.close();
+      pc.close();
+      return;
+    }
+
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
       if (dc.readyState === 'open') {
@@ -1812,12 +1823,17 @@ async function startWebRTC() {
         }
       });
 
+      let encBuffer = new Uint8Array(0);
+      let incomingChunks = [];
+      let decryptionChain = Promise.resolve();
+
       dc.onmessage = (e) => {
         try {
           if (typeof e.data === 'string') {
             if (e.data === "EOF") {
-              chunkQueue.enqueueEOF();
-              chunkQueue.drain().then(async () => {
+              decryptionChain = decryptionChain.then(async () => {
+                chunkQueue.enqueueEOF();
+                await chunkQueue.drain();
                 if (diskWritableStream) {
                   await diskWritableStream.close();
                   if (useOPFS) {
@@ -1838,14 +1854,71 @@ async function startWebRTC() {
                 }
                 resolve();
               }).catch((err) => {
-                // Handled in chunkQueue onError callback
+                showError(`Transfer failed: ${err.message}`);
+                dc.close();
+                reject(err);
               });
             }
             return;
           }
 
-          const chunk = new Uint8Array(e.data);
-          chunkQueue.enqueue(chunk);
+          const rawChunk = new Uint8Array(e.data);
+          if (!decryptionKey) {
+            chunkQueue.enqueue(rawChunk);
+            return;
+          }
+
+          incomingChunks.push(rawChunk);
+
+          decryptionChain = decryptionChain.then(async () => {
+            if (incomingChunks.length > 0) {
+              let addLen = 0;
+              for (let i = 0; i < incomingChunks.length; i++) {
+                addLen += incomingChunks[i].length;
+              }
+              let merged = new Uint8Array(encBuffer.length + addLen);
+              merged.set(encBuffer, 0);
+              let offset = encBuffer.length;
+              for (let i = 0; i < incomingChunks.length; i++) {
+                merged.set(incomingChunks[i], offset);
+                offset += incomingChunks[i].length;
+              }
+              encBuffer = merged;
+              incomingChunks = [];
+            }
+
+            while (encBuffer.length >= 4) {
+              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+              const frameLen = dv.getUint32(0, false);
+              if (encBuffer.length >= 4 + frameLen) {
+                const frame = encBuffer.slice(4, 4 + frameLen);
+                encBuffer = encBuffer.slice(4 + frameLen);
+
+                const nonce = new Uint8Array(frame.subarray(0, 12));
+                const ciphertext = new Uint8Array(frame.subarray(12));
+
+                let decryptedBuffer;
+                try {
+                  decryptedBuffer = await crypto.subtle.decrypt(
+                    { name: "AES-GCM", iv: nonce },
+                    decryptionKey,
+                    ciphertext
+                  );
+                } catch (decryptErr) {
+                  showError("Decryption failed: " + (decryptErr.message || "Invalid authentication tag or key"));
+                  dc.close();
+                  throw decryptErr;
+                }
+
+                chunkQueue.enqueue(new Uint8Array(decryptedBuffer));
+              } else {
+                break;
+              }
+            }
+          }).catch((err) => {
+            dc.close();
+            reject(err);
+          });
         } catch (err) {
           showError(`Transfer failed: ${err.message}`);
           dc.close();
