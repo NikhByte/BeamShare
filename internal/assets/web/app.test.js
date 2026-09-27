@@ -405,7 +405,8 @@ describe('Gaze Web Sender Test Suite', () => {
     await app.startSenderSharing();
 
     const urlInput = document.getElementById('send-url-input');
-    const hash = new URL(urlInput.value || "http://localhost/").hash;
+    const shareUrlStr = urlInput.value || "http://localhost/";
+    const hash = new URL(shareUrlStr).hash;
 
     assert.equal(hash.startsWith('#k='), true);
 
@@ -416,6 +417,39 @@ describe('Gaze Web Sender Test Suite', () => {
 
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
+
+    // Verify QR image src is a local SVG Data URL and encodes the full URL with #k= fragment
+    const qrImg = document.getElementById('send-qr-img');
+    assert.notEqual(qrImg, null);
+    assert.equal(qrImg.src.startsWith('data:image/svg+xml'), true);
+    assert.equal(qrImg.src.includes('qrserver.com'), false);
+    assert.equal(qrImg.src.includes('/api/qr'), false);
+
+    // Decoded SVG Data URL should encode the share URL with decryption key
+    const decodedSvg = decodeURIComponent(qrImg.src.replace('data:image/svg+xml;charset=utf-8,', ''));
+    assert.equal(decodedSvg.includes('<svg'), true);
+  });
+
+  test('generateQRCodeSVG generates local SVG Data URL within 50ms', () => {
+    const testURL = 'http://localhost:8080/?s=0123456789abcdef&backend=http%3A%2F%2Flocalhost%3A8080&mode=webrtc#k=dGVzdC1rZXktMTIzNDU2Nzg5MA==';
+    const start = performance.now();
+    const dataUrl = app.generateQRCodeSVG(testURL);
+    const duration = performance.now() - start;
+
+    assert.notEqual(dataUrl, null);
+    assert.equal(dataUrl.startsWith('data:image/svg+xml'), true);
+    assert.equal(duration < 50, true, `QR code generation took ${duration}ms, exceeding 50ms limit`);
+
+    // Verify SVG structure
+    const svgStr = decodeURIComponent(dataUrl.replace('data:image/svg+xml;charset=utf-8,', ''));
+    assert.equal(svgStr.includes('<svg'), true);
+    assert.equal(svgStr.includes('<path'), true);
+  });
+
+  test('generateQRCodeSVG handles invalid or empty inputs gracefully', () => {
+    assert.equal(app.generateQRCodeSVG(''), null);
+    assert.equal(app.generateQRCodeSVG(null), null);
+    assert.equal(app.generateQRCodeSVG(undefined), null);
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
