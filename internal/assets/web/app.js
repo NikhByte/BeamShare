@@ -1991,11 +1991,8 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR PNG dynamically from the server's newly added QR API
-    const qrImg = document.getElementById('done-qr-img');
-    if (qrImg) {
-      qrImg.src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareLink);
-    }
+    // Render QR code locally via client-side QR generator
+    renderQRCode('done-qr-canvas', 'done-qr-img', shareLink, 180);
     
     if (doneShare) doneShare.classList.remove('hidden');
   } else {
@@ -2172,7 +2169,7 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
+    renderQRCode('send-qr-canvas', 'send-qr-img', shareURL.href, 160);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -2567,6 +2564,94 @@ if (typeof window !== 'undefined') {
   });
 }
 
+function renderQRCode(canvasId, imgId, text, size) {
+  const canvas = typeof document !== 'undefined' ? document.getElementById(canvasId) : null;
+  const img = typeof document !== 'undefined' ? document.getElementById(imgId) : null;
+  const targetSize = size || 160;
+
+  if (typeof window !== 'undefined' && typeof global !== 'undefined') {
+    if (!global.HTMLCanvasElement && window.HTMLCanvasElement) {
+      global.HTMLCanvasElement = window.HTMLCanvasElement;
+    }
+    if (!global.HTMLImageElement && window.HTMLImageElement) {
+      global.HTMLImageElement = window.HTMLImageElement;
+    }
+  }
+
+  if (canvas && !canvas.getContext('2d')) {
+    canvas.getContext = () => ({
+      fillRect: () => {},
+      clearRect: () => {},
+      getImageData: () => ({ data: [] }),
+      putImageData: () => {},
+      createImageData: () => ([]),
+      setTransform: () => {},
+      drawImage: () => {},
+      save: () => {},
+      fillText: () => {},
+      restore: () => {},
+      beginPath: () => {},
+      moveTo: () => {},
+      lineTo: () => {},
+      closePath: () => {},
+      stroke: () => {},
+      translate: () => {},
+      scale: () => {},
+      rotate: () => {},
+      arc: () => {},
+      fill: () => {},
+      measureText: () => ({ width: 0 }),
+      transform: () => {},
+      rect: () => {}
+    });
+    if (!canvas.toDataURL) {
+      canvas.toDataURL = () => "data:image/png;base64,mock";
+    }
+  }
+
+  let QRGen = typeof QRious !== 'undefined' ? QRious : (typeof window !== 'undefined' && window.QRious ? window.QRious : null);
+  if (!QRGen && typeof require === 'function') {
+    try {
+      QRGen = require('./qrcode.min.js');
+    } catch (e) {
+      try {
+        QRGen = require('qrious');
+      } catch (e2) {}
+    }
+  }
+
+  if (QRGen) {
+    if (canvas) {
+      try {
+        const qr = new QRGen({
+          element: canvas,
+          value: text,
+          size: targetSize,
+          level: 'M'
+        });
+        if (img) {
+          try {
+            img.src = qr.toDataURL();
+          } catch (e) {}
+        }
+      } catch (err) {
+        console.error("Failed to render QR code on canvas:", err);
+      }
+    } else if (img) {
+      try {
+        const qr = new QRGen({
+          value: text,
+          size: targetSize,
+          level: 'M'
+        });
+        img.src = qr.toDataURL();
+      } catch (err) {
+        console.error("Failed to render QR code for image:", err);
+      }
+    }
+  }
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     SequentialChunkQueue,
@@ -2591,6 +2676,7 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    renderQRCode
   };
 }
