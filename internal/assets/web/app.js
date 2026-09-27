@@ -2201,7 +2201,7 @@ async function getSWPipe(fileMeta) {
       });
     }
 
-    const sw = navigator.serviceWorker.controller;
+    let sw = (navigator.serviceWorker && navigator.serviceWorker.controller) || (reg && reg.active);
     if (!sw) {
       console.warn("Page is not controlled by a Service Worker, falling back to storage/RAM");
       return null;
