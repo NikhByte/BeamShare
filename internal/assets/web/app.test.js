@@ -1069,6 +1069,16 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.deepEqual(servers[0].urls, ['turn:turn.example.com:3478']);
     assert.equal(servers[0].username, 'alice');
     assert.equal(servers[0].credential, 'secret');
+
+  test('getSWPipe returns null when serviceWorker controller is missing', async () => {
+    window.navigator.serviceWorker = {
+      controller: null,
+      ready: Promise.resolve({ active: {} }),
+      addEventListener: () => {}
+    };
+
+    const pipe = await app.getSWPipe({ name: 'test.bin', size: 100, mime: 'application/octet-stream' });
+    assert.equal(pipe, null);
   });
 });
 
