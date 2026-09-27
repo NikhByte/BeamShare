@@ -363,6 +363,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	fmt.Printf("  %s\n", dimStr("Setting up WebRTC session…"))
 	streamSender := p2p.NewStreamSender()
 	session, err := signaling.NewSession(iceServers, discoveryTimeout)
+	if err == nil {
+		session.SetToken(srv.Token())
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  warn: WebRTC unavailable (%v) — HTTP-only mode\n", err)
 	} else {
@@ -847,6 +850,8 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	}
 
 	localURL := srv.LocalURL()
+	token := srv.Token()
+	localURLWithToken := fmt.Sprintf("%s/?token=%s", localURL, token)
 
 	// ── Phase 2: mDNS ────────────────────────────────────────────────────────
 	broadcaster := mdns.New("", srv.Port())
@@ -859,7 +864,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	}
 
 	// ── Print URLs ────────────────────────────────────────────────────────────
-	ui.PrintDiscovery(localURL, mdnsName)
+	ui.PrintDiscovery(localURLWithToken, mdnsName)
 
 	if relClient != nil {
 		baseHost := relayURL
@@ -868,7 +873,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
 
-		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s&token=%s", baseHost, relSessionID, url.QueryEscape(localURL), token)
 		if receiverURL != "" {
 			relayDisplayURL += "&backend=" + url.QueryEscape(relayURL)
 		}
@@ -876,7 +881,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		fmt.Printf("    %s    (global relay)\n", relayDisplayURL)
 	} else if receiverURL != "" {
 		baseHost := strings.TrimRight(receiverURL, "/")
-		localDisplayURL := fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+		localDisplayURL := fmt.Sprintf("%s/?backend=%s&token=%s", baseHost, url.QueryEscape(localURL), token)
 		fmt.Printf("    %s    (custom receiver)\n", localDisplayURL)
 	}
 
@@ -889,7 +894,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
 
-		qrURL = fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		qrURL = fmt.Sprintf("%s/?s=%s&local=%s&token=%s", baseHost, relSessionID, url.QueryEscape(localURL), token)
 		if receiverURL != "" {
 			qrURL += "&backend=" + url.QueryEscape(relayURL)
 		}
@@ -909,7 +914,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	} else {
 		if receiverURL != "" {
 			baseHost := strings.TrimRight(receiverURL, "/")
-			qrURL = fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+			qrURL = fmt.Sprintf("%s/?backend=%s&token=%s", baseHost, url.QueryEscape(localURL), token)
 			if session != nil {
 				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
 				if len(parsedTurnServers) > 0 {
@@ -923,9 +928,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 				}
 			}
 		} else {
-			qrURL = localURL
+			qrURL = fmt.Sprintf("%s/?token=%s", localURL, token)
 			if session != nil {
-				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
 				if len(parsedTurnServers) > 0 {
 					qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
 					if parsedTurnUsername != "" {
@@ -1084,23 +1089,22 @@ func downloadFile(code string) error {
 	backend = strings.TrimRight(backend, "/")
 
 	s := u.Query().Get("s")
+	token := u.Query().Get("token")
+	if token == "" {
+		token = u.Query().Get("t")
+	}
 	k := extractKeyFromURL(u)
 
-	var keyBytes []byte
-	if k != "" {
-		var err error
-		keyBytes, err = decodeBase64Key(k)
-		if err != nil {
-			return fmt.Errorf("invalid key: %w", err)
-		}
-		if len(keyBytes) != 32 {
-			return fmt.Errorf("invalid key length: key must be exactly 32 bytes, got %d bytes", len(keyBytes))
-		}
-	}
-
 	metaURL := backend + "/api/meta"
+	var metaQueryParams []string
 	if s != "" {
-		metaURL += "?s=" + s
+		metaQueryParams = append(metaQueryParams, "s="+url.QueryEscape(s))
+	}
+	if token != "" {
+		metaQueryParams = append(metaQueryParams, "token="+url.QueryEscape(token))
+	}
+	if len(metaQueryParams) > 0 {
+		metaURL += "?" + strings.Join(metaQueryParams, "&")
 	}
 
 	fmt.Printf("  %s\n", dimStr("Fetching metadata..."))
@@ -1121,8 +1125,15 @@ func downloadFile(code string) error {
 	ui.PrintFileMeta(meta.Name, meta.Size)
 
 	downloadURL := backend + "/api/download"
+	var dlQueryParams []string
 	if s != "" {
-		downloadURL += "?s=" + s
+		dlQueryParams = append(dlQueryParams, "s="+url.QueryEscape(s))
+	}
+	if token != "" {
+		dlQueryParams = append(dlQueryParams, "token="+url.QueryEscape(token))
+	}
+	if len(dlQueryParams) > 0 {
+		downloadURL += "?" + strings.Join(dlQueryParams, "&")
 	}
 
 	fmt.Printf("  %s\n", dimStr("Starting download..."))

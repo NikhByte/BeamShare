@@ -489,13 +489,27 @@ function getBackendURL() {
   return backend;
 }
 
+function getSessionToken() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('token') || params.get('t') || window.GAZE_SESSION_TOKEN || window.SESSION_TOKEN || '';
+}
+
 function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  const token = getSessionToken();
   let fullPath = path;
+  let queryParts = [];
   if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+    queryParts.push('s=' + encodeURIComponent(s));
+  }
+  if (token) {
+    queryParts.push('token=' + encodeURIComponent(token));
+  }
+  if (queryParts.length > 0) {
+    const sep = fullPath.includes('?') ? '&' : '?';
+    fullPath += sep + queryParts.join('&');
   }
   if (backend) {
     return backend + fullPath;
@@ -2630,7 +2644,12 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      const token = getSessionToken();
+      let probeURL = `${localURL}/api/meta`;
+      if (token) {
+        probeURL += `?token=${encodeURIComponent(token)}`;
+      }
+      const res = await fetch(probeURL, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
@@ -4372,6 +4391,7 @@ if (typeof module !== 'undefined' && module.exports) {
     VirtualLogViewer,
     startHTTPSSE,
     getBackendURL,
+    getSessionToken,
     apiPath,
     formatBytes,
     mimeLabel,
