@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 )
@@ -180,5 +181,78 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 
 	if bytes.Equal(nonce1, nonce2) {
 		t.Fatal("consecutive frames reused the same nonce")
+	}
+}
+
+func TestOversizedFrameHeader(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name   string
+		length uint32
+	}{
+		{
+			name:   "MaxFrameSize plus one",
+			length: MaxFrameSize + 1,
+		},
+		{
+			name:   "10MB frame length",
+			length: 10 * 1024 * 1024,
+		},
+		{
+			name:   "Max uint32 (4GB) frame length",
+			length: 0xFFFFFFFF,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tc.length)
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			p := make([]byte, 64)
+			_, err = decReader.Read(p)
+			if err == nil {
+				t.Fatalf("expected error for frame length %d, got nil", tc.length)
+			}
+
+			if !errors.Is(err, ErrFrameTooLarge) {
+				t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+			}
+		})
+	}
+}
+
+func TestMaxFrameSizeBoundary(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// Create a frame claiming length equal to MaxFrameSize
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, uint32(MaxFrameSize))
+	// Provide MaxFrameSize bytes of dummy data
+	buf.Write(make([]byte, MaxFrameSize))
+
+	decReader, err := NewDecryptingReader(buf, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	p := make([]byte, 64)
+	_, err = decReader.Read(p)
+	// It should proceed past length validation (not return ErrFrameTooLarge)
+	// and fail later on GCM decryption/tag check.
+	if errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("frame of MaxFrameSize should not trigger ErrFrameTooLarge, got %v", err)
 	}
 }
