@@ -1,5 +1,5 @@
 // ── Client-side QR Code Generator Engine (Zero Network Dependencies) ──────
-const qrcodegen = (function() {
+var qrcodegen = (function() {
 	function QrCode(version, errorCorrectionLevel, dataCodewords, msk) {
 		if (version < QrCode.MIN_VERSION || version > QrCode.MAX_VERSION)
 			throw new RangeError("Version value out of range");
@@ -393,75 +393,6 @@ const qrcodegen = (function() {
 	
 	return { QrCode };
 })();
-
-function renderQRCode(text, targetElement, options = {}) {
-  if (!text || !targetElement) return;
-  const cellSize = options.cellSize || 4;
-  const margin = options.margin !== undefined ? options.margin : 4;
-  const qr = qrcodegen.QrCode.encodeText(text, qrcodegen.QrCode.Ecc.MEDIUM);
-  const count = qr.size;
-  const size = (count + margin * 2) * cellSize;
-
-  const tag = targetElement.tagName ? targetElement.tagName.toLowerCase() : '';
-
-  if (tag === 'canvas') {
-    targetElement.width = size;
-    targetElement.height = size;
-    const ctx = targetElement.getContext ? targetElement.getContext('2d') : null;
-    if (ctx) {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, size, size);
-      ctx.fillStyle = '#000000';
-      for (let y = 0; y < count; y++) {
-        for (let x = 0; x < count; x++) {
-          if (qr.getModule(x, y)) {
-            ctx.fillRect((x + margin) * cellSize, (y + margin) * cellSize, cellSize, cellSize);
-          }
-        }
-      }
-    }
-  } else if (tag === 'svg') {
-    targetElement.setAttribute('viewBox', `0 0 ${size} ${size}`);
-    targetElement.setAttribute('width', size);
-    targetElement.setAttribute('height', size);
-    const pathParts = [];
-    for (let y = 0; y < count; y++) {
-      for (let x = 0; x < count; x++) {
-        if (qr.getModule(x, y)) {
-          const px = (x + margin) * cellSize;
-          const py = (y + margin) * cellSize;
-          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
-        }
-      }
-    }
-    targetElement.innerHTML = `<rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/>`;
-  } else if (tag === 'img') {
-    const pathParts = [];
-    for (let y = 0; y < count; y++) {
-      for (let x = 0; x < count; x++) {
-        if (qr.getModule(x, y)) {
-          const px = (x + margin) * cellSize;
-          const py = (y + margin) * cellSize;
-          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
-        }
-      }
-    }
-    const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/></svg>`;
-    targetElement.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
-  } else {
-    const pathParts = [];
-    for (let y = 0; y < count; y++) {
-      for (let x = 0; x < count; x++) {
-        if (qr.getModule(x, y)) {
-          const px = (x + margin) * cellSize;
-          const py = (y + margin) * cellSize;
-          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
-        }
-      }
-    }
-    targetElement.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/></svg>`;
-  }
-}
 
 function renderQRElements(url, canvasId, imgId) {
   const canvasEl = document.getElementById(canvasId);
@@ -1146,7 +1077,18 @@ function qrToSvgDataUrl(qr, border = 4) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
-function renderQRCode(element, text, options = {}) {
+function renderQRCode(first, second, options = {}) {
+  let element = first;
+  let text = second;
+
+  if (typeof first === 'string' && typeof second === 'object' && second !== null) {
+    text = first;
+    element = second;
+  } else if (typeof first === 'string' && typeof second === 'string') {
+    element = document.getElementById(first);
+    text = second;
+  }
+
   if (!element) return;
   try {
     if (!text) {
@@ -1175,6 +1117,25 @@ function renderQRCode(element, text, options = {}) {
         renderQRToCanvas(qr, element, options.border !== undefined ? options.border : 4);
       } catch (canvasErr) {
         showQRError(element, "Canvas QR rendering failed");
+      }
+    } else if (tagName === 'svg') {
+      try {
+        const border = options.border !== undefined ? options.border : 4;
+        const totalSize = qr.size + border * 2;
+        element.setAttribute('viewBox', '0 0 ' + totalSize + ' ' + totalSize);
+        let svg = '<rect width="' + totalSize + '" height="' + totalSize + '" fill="#ffffff"/>';
+        svg += '<path d="';
+        for (let y = 0; y < qr.size; y++) {
+          for (let x = 0; x < qr.size; x++) {
+            if (qr.getModule(x, y)) {
+              svg += 'M' + (x + border) + ',' + (y + border) + 'h1v1h-1z ';
+            }
+          }
+        }
+        svg += '" fill="#000000"/>';
+        element.innerHTML = svg;
+      } catch (err) {
+        showQRError(element, "Failed to render QR SVG");
       }
     } else {
       try {
@@ -2230,7 +2191,7 @@ async function getSWPipe(fileMeta) {
       }, 10000);
 
       function onMessage(e) {
-        if (e.data && e.data.type === 'READY') {
+        if (e.data && (e.data.type === 'READY' || e.data.type === 'PORT_READY')) {
           cleanup();
           resolve();
         }
@@ -3226,16 +3187,6 @@ async function startWebRTC() {
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
 
-    let decryptionKey = null;
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch (e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      pc.close();
-      return;
-    }
-
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
       if (dc.readyState === 'open') {
@@ -3336,147 +3287,44 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
-      let decryptChain = Promise.resolve();
-
       dc.onmessage = (e) => {
-        if (decryptionKey) {
-          decryptChain = decryptChain.then(async () => {
-            if (typeof e.data === 'string') {
-              if (e.data === "EOF") {
-                chunkQueue.enqueueEOF();
-                await chunkQueue.drain();
+        try {
+          if (typeof e.data === 'string') {
+            if (e.data === "EOF") {
+              chunkQueue.enqueueEOF();
+              chunkQueue.drain().then(async () => {
                 if (diskWritableStream) {
                   await diskWritableStream.close();
                   if (useOPFS) {
                     const file = await diskFileHandle.getFile();
                     triggerSave(file, currentFile.name);
                   }
-                  chunkQueue.enqueueEOF();
-                  try {
-                    await chunkQueue.drain();
-                    if (diskWritableStream) {
-                      await diskWritableStream.close();
-                      if (useOPFS) {
-                        const file = await diskFileHandle.getFile();
-                        triggerSave(file, currentFile.name);
-                      }
-                    } else if (swPipePort) {
-                      swPipePort.postMessage("EOF");
-                    } else {
-                      let finalBlob;
-                      if (useIndexedDB) {
-                        finalBlob = await getAllChunksIDB(currentFile.mime);
-                        await clearIDB();
-                      } else {
-                        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                      }
-                      triggerSave(finalBlob, currentFile.name);
-                    }
-                    resolve();
-                  } catch (err) {
-                    hasError = true;
-                    // Handled in chunkQueue onError callback
-                  }
-                });
-              } else {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
-                  if (diskWritableStream) {
-                    await diskWritableStream.close();
-                    if (useOPFS) {
-                      const file = await diskFileHandle.getFile();
-                      triggerSave(file, currentFile.name);
-                    }
-                  } else if (swPipePort) {
-                    swPipePort.postMessage("EOF");
+                } else if (swPipePort) {
+                  swPipePort.postMessage("EOF");
+                } else {
+                  let finalBlob;
+                  if (useIndexedDB) {
+                    finalBlob = await getAllChunksIDB(currentFile.mime);
+                    await clearIDB();
                   } else {
-                    let finalBlob;
-                    if (useIndexedDB) {
-                      finalBlob = await getAllChunksIDB(currentFile.mime);
-                      await clearIDB();
-                    } else {
-                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                    }
-                    triggerSave(finalBlob, currentFile.name);
+                    finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
                   }
                   triggerSave(finalBlob, currentFile.name);
                 }
                 resolve();
-              }
-              return;
+              }).catch((err) => {
+                // Handled in chunkQueue onError callback
+              });
             }
-
-            const value = new Uint8Array(e.data);
-            let newBuffer = new Uint8Array(encBuffer.length + value.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(value, encBuffer.length);
-            encBuffer = newBuffer;
-
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-              const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
-
-                const nonce = new Uint8Array(frame.subarray(0, 12));
-                const ciphertext = new Uint8Array(frame.subarray(12));
-                const decrypted = await crypto.subtle.decrypt(
-                  { name: "AES-GCM", iv: nonce },
-                  decryptionKey,
-                  ciphertext
-                );
-                const decValue = new Uint8Array(decrypted);
-                chunkQueue.enqueue(decValue);
-              } else {
-                break;
-              }
-            }
-          }).catch((err) => {
-            showError(`Transfer failed: ${err.message}`);
-            dc.close();
-            reject(err);
-          });
-        } else {
-          try {
-            if (typeof e.data === 'string') {
-              if (e.data === "EOF") {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
-                  if (diskWritableStream) {
-                    await diskWritableStream.close();
-                    if (useOPFS) {
-                      const file = await diskFileHandle.getFile();
-                      triggerSave(file, currentFile.name);
-                    }
-                  } else if (swPipePort) {
-                    swPipePort.postMessage("EOF");
-                  } else {
-                    let finalBlob;
-                    if (useIndexedDB) {
-                      finalBlob = await getAllChunksIDB(currentFile.mime);
-                      await clearIDB();
-                    } else {
-                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                    }
-                    triggerSave(finalBlob, currentFile.name);
-                  }
-                  resolve();
-                }).catch((err) => {
-                  // Handled in chunkQueue onError callback
-                });
-              }
-              return;
-            }
-
-            const chunk = new Uint8Array(e.data);
-            chunkQueue.enqueue(chunk);
-          } catch (err) {
-            showError(`Transfer failed: ${err.message}`);
-            dc.close();
-            reject(err);
+            return;
           }
+
+          const chunk = new Uint8Array(e.data);
+          chunkQueue.enqueue(chunk);
+        } catch (err) {
+          showError(`Transfer failed: ${err.message}`);
+          dc.close();
+          reject(err);
         }
 
         const chunk = new Uint8Array(e.data);
@@ -3604,6 +3452,67 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
 }
 
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
+function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark = 512 * 1024) {
+  if (!dc || dc.readyState === 'closed' || dc.readyState === 'closing') {
+    return Promise.reject(new Error("DataChannel is closed or closing"));
+  }
+
+  if (dc.bufferedAmount <= highWatermark) {
+    dc.bufferedAmountLowThreshold = lowWatermark;
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    let resolved = false;
+    let timer = null;
+
+    dc.bufferedAmountLowThreshold = lowWatermark;
+
+    const cleanup = () => {
+      resolved = true;
+      if (timer) clearInterval(timer);
+      dc.removeEventListener('bufferedamountlow', onLow);
+      dc.removeEventListener('close', onClose);
+      dc.removeEventListener('error', onClose);
+    };
+
+    const onLow = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error("DataChannel is closed or closing"));
+    };
+
+    dc.addEventListener('bufferedamountlow', onLow);
+    dc.addEventListener('close', onClose);
+    dc.addEventListener('error', onClose);
+
+    if (dc.readyState === 'closed' || dc.readyState === 'closing') {
+      onClose();
+      return;
+    }
+
+    if (dc.bufferedAmount <= lowWatermark) {
+      cleanup();
+      resolve();
+      return;
+    }
+
+    timer = setInterval(() => {
+      if (resolved) return;
+      if (!dc || dc.readyState === 'closed' || dc.readyState === 'closing') {
+        onClose();
+      } else if (dc.bufferedAmount <= lowWatermark) {
+        cleanup();
+        resolve();
+      }
+    }, 250);
+  });
+}
+
 async function uploadFileP2P(file, dc = webrtcDataChannel) {
   if (!dc || dc.readyState !== 'open') {
     throw new Error("Data channel is not open");
@@ -3763,11 +3672,8 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR SVG data URL locally without external network requests
-    const qrImg = document.getElementById('done-qr-img');
-    if (qrImg) {
-      qrImg.src = generateClientQRCodeDataURL(shareLink);
-    }
+    // Render QR matrix locally using bundled QR library
+    renderQRElements(shareLink, 'done-qr-canvas', 'done-qr-img');
     
     if (doneShare) doneShare.classList.remove('hidden');
   } else {
@@ -3944,7 +3850,7 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    renderQRElements(shareURL.href, 'send-qr-canvas', 'send-qr-img');
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -4077,10 +3983,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(senderDataChannel, 512 * 1024);
+    while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
+      if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+      if (dc.bufferedAmount > 1024 * 1024) {
+        await waitForBufferedAmountLow(dc, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -4120,10 +4026,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (senderDataChannel.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(senderDataChannel, 0);
+  if (dc.bufferedAmount > 0) {
+    await waitForBufferedAmountLow(dc, 0);
   }
-  senderDataChannel.send("EOF");
+  dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
@@ -4349,20 +4255,12 @@ function generateQRCodeDataURL(text, options) {
   throw new Error("Client-side QR generator unavailable");
 }
 
-function renderQRCode(elementOrId, url) {
-  const img = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
-  if (!img) return;
-  try {
-    const dataUrl = generateQRCodeDataURL(url);
-    img.src = dataUrl;
-  } catch (err) {
-    console.error("Failed to generate QR code client-side");
-  }
-}
-
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     waitForBufferedAmountLow,
+    waitForDataChannelBuffer,
+    uploadFileP2P,
+    sendWebRTCFile,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
