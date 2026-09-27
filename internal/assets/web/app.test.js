@@ -538,3 +538,112 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput(null), null);
   });
 });
+
+describe('State-Aware Buffer Guard Test Suite', () => {
+  let app;
+
+  beforeEach(() => {
+    delete require.cache[require.resolve('./app.js')];
+    app = require('./app.js');
+  });
+
+  test('waitForBufferedAmountLow resolves immediately if bufferedAmount is already low', async () => {
+    const mockDC = {
+      readyState: 'open',
+      bufferedAmount: 100,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    };
+
+    const start = Date.now();
+    await app.waitForBufferedAmountLow(mockDC, 1024 * 1024, 512 * 1024);
+    const elapsed = Date.now() - start;
+    assert.ok(elapsed < 50, 'Should resolve immediately without waiting');
+  });
+
+  test('waitForBufferedAmountLow attaches listener prior to double check and resolves if buffer dropped', async () => {
+    let listenerAttached = false;
+    let checkedAfterAttach = false;
+
+    const mockDC = {
+      readyState: 'open',
+      _bufferedAmount: 2 * 1024 * 1024,
+      get bufferedAmount() {
+        if (listenerAttached) {
+          checkedAfterAttach = true;
+          return 500 * 1024;
+        }
+        return this._bufferedAmount;
+      },
+      bufferedAmountLowThreshold: 0,
+      addEventListener: (event, fn) => {
+        if (event === 'bufferedamountlow') {
+          listenerAttached = true;
+        }
+      },
+      removeEventListener: () => {}
+    };
+
+    await app.waitForBufferedAmountLow(mockDC, 1024 * 1024, 512 * 1024);
+    assert.equal(listenerAttached, true, 'Event listener must be attached first');
+    assert.equal(checkedAfterAttach, true, 'Buffer level must be re-checked after listener attachment');
+    assert.equal(mockDC.bufferedAmountLowThreshold, 512 * 1024);
+  });
+
+  test('waitForBufferedAmountLow resolves via fallback polling timer when event is dropped', async () => {
+    let listenerRemoved = false;
+    const mockDC = {
+      readyState: 'open',
+      bufferedAmount: 2 * 1024 * 1024,
+      bufferedAmountLowThreshold: 0,
+      listeners: {},
+      addEventListener: function(event, fn) {
+        this.listeners[event] = fn;
+      },
+      removeEventListener: function(event, fn) {
+        if (this.listeners[event] === fn) {
+          delete this.listeners[event];
+          listenerRemoved = true;
+        }
+      }
+    };
+
+    // Simulate buffer dropping 40ms later WITHOUT firing the event
+    setTimeout(() => {
+      mockDC.bufferedAmount = 100 * 1024;
+    }, 40);
+
+    const start = Date.now();
+    await app.waitForBufferedAmountLow(mockDC, 1024 * 1024, 512 * 1024);
+    const elapsed = Date.now() - start;
+
+    assert.ok(elapsed >= 30 && elapsed < 300, 'Should resolve via fallback timer');
+    assert.equal(listenerRemoved, true, 'Listener must be detached after resolution');
+  });
+
+  test('waitForBufferedAmountLow EOF flush (targetThreshold = 0)', async () => {
+    const mockDC = {
+      readyState: 'open',
+      bufferedAmount: 1000,
+      bufferedAmountLowThreshold: 0,
+      listeners: {},
+      addEventListener: function(event, fn) {
+        this.listeners[event] = fn;
+      },
+      removeEventListener: function(event, fn) {
+        delete this.listeners[event];
+      }
+    };
+
+    setTimeout(() => {
+      mockDC.bufferedAmount = 0;
+      if (mockDC.listeners['bufferedamountlow']) {
+        mockDC.listeners['bufferedamountlow']();
+      }
+    }, 20);
+
+    await app.waitForBufferedAmountLow(mockDC, 0, 0);
+    assert.equal(mockDC.bufferedAmount, 0);
+  });
+});
