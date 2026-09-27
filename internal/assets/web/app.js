@@ -15,7 +15,17 @@ function getBackendURL() {
 
 function getSessionToken() {
   const params = new URLSearchParams(window.location.search);
-  return params.get('token') || params.get('t') || window.GAZE_SESSION_TOKEN || window.SESSION_TOKEN || '';
+  let tok = params.get('token') || params.get('t') || window.GAZE_SESSION_TOKEN || window.SESSION_TOKEN || '';
+  if (tok && tok.includes('/')) {
+    tok = tok.split('/')[0];
+  }
+  if (tok && tok.includes('?')) {
+    tok = tok.split('?')[0];
+  }
+  if (tok && tok.includes('&')) {
+    tok = tok.split('&')[0];
+  }
+  return tok;
 }
 
 function apiPath(path) {
@@ -1182,7 +1192,7 @@ function resetState() {
 
 async function bootstrap() {
   const params = new URLSearchParams(window.location.search);
-  const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
+  const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer') || window.location.search.includes('mode=webrtc');
   let localURL = params.get('local');
   const sessionID = params.get('s');
 
