@@ -113,6 +113,14 @@ self.addEventListener('fetch', (event) => {
   
   // Intercept synthetic download URLs used by the service worker pipe
   if (url.pathname.startsWith('/sw-download-pipe/')) {
+    if (url.pathname === '/sw-download-pipe/iframe-ping') {
+      event.respondWith(new Response(
+        '<!DOCTYPE html><html><body><script>parent.postMessage("sw-iframe-ok", "*");</script></body></html>',
+        { headers: { 'Content-Type': 'text/html' } }
+      ));
+      return;
+    }
+
     if (streamMap.has(url.pathname)) {
       const entry = streamMap.get(url.pathname);
       const { stream, filename, size, mime, ttlTimer } = entry;
