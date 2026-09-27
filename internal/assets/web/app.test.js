@@ -538,3 +538,102 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput(null), null);
   });
 });
+
+describe('WebRTC Backpressure Flow Control (waitForBufferedAmountLow)', () => {
+  let app;
+
+  beforeEach(() => {
+    delete require.cache[require.resolve('./app.js')];
+    app = require('./app.js');
+  });
+
+  test('resolves immediately if bufferedAmount is already <= targetThreshold', async () => {
+    const listeners = new Map();
+    const dc = {
+      bufferedAmount: 100,
+      bufferedAmountLowThreshold: 0,
+      readyState: 'open',
+      addEventListener: (type, fn) => listeners.set(type, fn),
+      removeEventListener: (type, fn) => listeners.delete(type)
+    };
+
+    await app.waitForBufferedAmountLow(dc, 500);
+    assert.equal(listeners.size, 0);
+  });
+
+  test('resolves when bufferedamountlow event fires', async () => {
+    const listeners = new Map();
+    const dc = {
+      bufferedAmount: 1000,
+      bufferedAmountLowThreshold: 0,
+      readyState: 'open',
+      addEventListener: (type, fn) => listeners.set(type, fn),
+      removeEventListener: (type, fn) => listeners.delete(type)
+    };
+
+    const promise = app.waitForBufferedAmountLow(dc, 500);
+    assert.equal(listeners.has('bufferedamountlow'), true);
+
+    // Simulate event firing
+    dc.bufferedAmount = 200;
+    listeners.get('bufferedamountlow')();
+
+    await promise;
+    assert.equal(listeners.size, 0, 'Listener must be removed after resolution');
+  });
+
+  test('resolves on immediate recheck if buffer drains during listener registration', async () => {
+    const listeners = new Map();
+    const dc = {
+      bufferedAmount: 1000,
+      bufferedAmountLowThreshold: 0,
+      readyState: 'open',
+      addEventListener: (type, fn) => {
+        listeners.set(type, fn);
+        // Simulate buffer draining synchronously inside addEventListener
+        dc.bufferedAmount = 100;
+      },
+      removeEventListener: (type, fn) => listeners.delete(type)
+    };
+
+    await app.waitForBufferedAmountLow(dc, 500);
+    assert.equal(listeners.size, 0, 'Listener must be removed after immediate recheck resolution');
+  });
+
+  test('resolves via polling fallback if event is missed', async () => {
+    const listeners = new Map();
+    const dc = {
+      bufferedAmount: 1000,
+      bufferedAmountLowThreshold: 0,
+      readyState: 'open',
+      addEventListener: (type, fn) => listeners.set(type, fn),
+      removeEventListener: (type, fn) => listeners.delete(type)
+    };
+
+    const promise = app.waitForBufferedAmountLow(dc, 500);
+    assert.equal(listeners.has('bufferedamountlow'), true);
+
+    // Simulate buffer draining without firing event
+    dc.bufferedAmount = 300;
+
+    await promise; // Should resolve within 50ms polling cycle
+    assert.equal(listeners.size, 0, 'Listener must be cleaned up after polling fallback resolves');
+  });
+
+  test('rejects if data channel is not open or closes during wait', async () => {
+    const listeners = new Map();
+    const dc = {
+      bufferedAmount: 1000,
+      bufferedAmountLowThreshold: 0,
+      readyState: 'closed',
+      addEventListener: (type, fn) => listeners.set(type, fn),
+      removeEventListener: (type, fn) => listeners.delete(type)
+    };
+
+    await assert.rejects(
+      async () => await app.waitForBufferedAmountLow(dc, 500),
+      { message: 'Data channel is no longer open' }
+    );
+    assert.equal(listeners.size, 0);
+  });
+});
