@@ -182,3 +182,80 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 		t.Fatal("consecutive frames reused the same nonce")
 	}
 }
+
+func TestFrameTooLarge(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name   string
+		length uint32
+	}{
+		{"OneByteOverMax", MaxFrameSize + 1},
+		{"100KBFrame", 100000},
+		{"4GBFrame", 4000000000},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tc.length)
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if err != ErrFrameTooLarge {
+				t.Fatalf("expected ErrFrameTooLarge for length %d, got %v", tc.length, err)
+			}
+		})
+	}
+}
+
+func TestFrameLengthBoundaries(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// Length smaller than nonce size (11 bytes) -> expect io.ErrUnexpectedEOF
+	t.Run("LengthSmallerThanNonce", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		binary.Write(buf, binary.BigEndian, uint32(11))
+
+		decReader, err := NewDecryptingReader(buf, key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		out := make([]byte, 64)
+		_, err = decReader.Read(out)
+		if err != io.ErrUnexpectedEOF {
+			t.Fatalf("expected io.ErrUnexpectedEOF for length smaller than nonce, got %v", err)
+		}
+	})
+
+	// Exactly MaxFrameSize (65,564 bytes) -> frame length validation passes (fails on ReadFull with partial data)
+	t.Run("LengthExactMaxFrameSize", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		binary.Write(buf, binary.BigEndian, uint32(MaxFrameSize))
+		buf.Write(make([]byte, 10))
+
+		decReader, err := NewDecryptingReader(buf, key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		out := make([]byte, 64)
+		_, err = decReader.Read(out)
+		// Should pass length check and attempt ReadFull, which returns UnexpectedEOF because buffer has fewer bytes than length
+		if err != io.ErrUnexpectedEOF {
+			t.Fatalf("expected io.ErrUnexpectedEOF during ReadFull for truncated body, got %v", err)
+		}
+	})
+}
