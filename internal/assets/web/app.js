@@ -2156,6 +2156,7 @@ async function getSWPipe(fileMeta) {
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 10000));
     const reg = await Promise.race([swReady, timeout]);
+    if (!reg || !reg.active) return null;
 
     if (!navigator.serviceWorker.controller) {
       await new Promise((resolve) => {
@@ -5065,6 +5066,8 @@ if (typeof module !== 'undefined' && module.exports) {
     extractKeyFragment,
     parseDecryptionKeyFromHash,
     parseSessionInput,
-    getIceServers
+    getIceServers,
+    renderQRCode,
+    getSWPipe
   };
 }
