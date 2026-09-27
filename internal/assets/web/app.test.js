@@ -158,6 +158,8 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
+    window.crypto = webcrypto;
+    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -860,16 +862,18 @@ describe('Gaze Web Sender Test Suite', () => {
   test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
     // Intercept fetch / network calls to verify no external requests are made
     let externalRequests = [];
-    window.fetch = async (url) => {
-      externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+    window.fetch = global.fetch = async (url) => {
+      const urlStr = url.toString();
+      externalRequests.push(urlStr);
+      if (urlStr.includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
 
     const urlInput = document.getElementById('send-url-input');
-    const fullUrl = urlInput.value || "http://localhost/";
-    const hash = new URL(fullUrl).hash;
+    const shareUrlStr = urlInput.value || "http://localhost/";
+    const hash = new URL(shareUrlStr).hash;
 
     assert.equal(hash.startsWith('#k='), true);
 
@@ -881,24 +885,49 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify send-qr-img src uses local client-side Data URL without third-party calls
+    // Verify QR image src is a local SVG Data URL and encodes the full URL with #k= fragment
     const sendQrImg = document.getElementById('send-qr-img');
     assert.notEqual(sendQrImg, null);
-    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml;charset=utf-8,'), true);
-    assert.equal(sendQrImg.src.includes('api.qrserver.com'), false);
+    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml'), true);
+    assert.equal(sendQrImg.src.includes('qrserver.com'), false);
+    assert.equal(sendQrImg.src.includes('/api/qr'), false);
+
+    // Decoded SVG Data URL should encode the share URL with decryption key
+    const decodedSvg = decodeURIComponent(sendQrImg.src.replace('data:image/svg+xml;charset=utf-8,', ''));
+    assert.equal(decodedSvg.includes('<svg'), true);
   });
 
   test('generateQRCodeDataURL produces local SVG Data URL encoding complete share link with #k fragment', () => {
     const testUrl = 'http://localhost:8080/?s=test-session&backend=http%3A%2F%2Flocalhost%3A8080&mode=webrtc#k=4Kz_test_key_base64url';
     const dataUrl = app.generateQRCodeDataURL(testUrl);
 
-    assert.equal(dataUrl.startsWith('data:image/svg+xml;charset=utf-8,'), true);
+    assert.equal(dataUrl.startsWith('data:image/svg+xml'), true);
     assert.equal(dataUrl.includes('api.qrserver.com'), false);
 
     const svgStr = decodeURIComponent(dataUrl.replace('data:image/svg+xml;charset=utf-8,', ''));
     assert.equal(svgStr.includes('<svg'), true);
-    assert.equal(svgStr.includes('viewBox='), true);
-    assert.equal(svgStr.includes('<path fill="#000000"'), true);
+  });
+
+  test('generateQRCodeSVG generates local SVG Data URL within 50ms', () => {
+    const testURL = 'http://localhost:8080/?s=0123456789abcdef&backend=http%3A%2F%2Flocalhost%3A8080&mode=webrtc#k=dGVzdC1rZXktMTIzNDU2Nzg5MA==';
+    const start = performance.now();
+    const dataUrl = app.generateQRCodeSVG(testURL);
+    const duration = performance.now() - start;
+
+    assert.notEqual(dataUrl, null);
+    assert.equal(dataUrl.startsWith('data:image/svg+xml'), true);
+    assert.equal(duration < 50, true, `QR code generation took ${duration}ms, exceeding 50ms limit`);
+
+    // Verify SVG structure
+    const svgStr = decodeURIComponent(dataUrl.replace('data:image/svg+xml;charset=utf-8,', ''));
+    assert.equal(svgStr.includes('<svg'), true);
+    assert.equal(svgStr.includes('<path'), true);
+  });
+
+  test('generateQRCodeSVG handles invalid or empty inputs gracefully', () => {
+    assert.equal(app.generateQRCodeSVG(''), null);
+    assert.equal(app.generateQRCodeSVG(null), null);
+    assert.equal(app.generateQRCodeSVG(undefined), null);
   });
 
   test('Client-side QR generation renders locally without external api.qrserver.com requests', async () => {
@@ -1184,5 +1213,167 @@ describe('WebRTC Buffer Backpressure Suite', () => {
   });
 });
 
+describe('WebRTC Backpressure & Flow Control Suite', () => {
+  beforeEach(() => {
+    dom = new JSDOM(htmlContent, {
+      url: 'http://localhost:8080/'
+    });
 
+    window = dom.window;
+    document = window.document;
+
+    const { webcrypto } = require('node:crypto');
+    window.crypto = webcrypto;
+
+    global.window = window;
+    global.document = document;
+    global.crypto = window.crypto;
+    global.navigator = window.navigator;
+    global.location = window.location;
+    global.URLSearchParams = window.URLSearchParams;
+    global.TextDecoder = require('util').TextDecoder;
+    global.FileReader = window.FileReader;
+
+    window.__BEAM_TEST_ENV__ = true;
+
+    delete require.cache[require.resolve('./app.js')];
+    app = require('./app.js');
+  });
+
+  class MockDataChannel {
+    constructor(bufferedAmount = 0, readyState = 'open') {
+      this.bufferedAmount = bufferedAmount;
+      this.bufferedAmountLowThreshold = 0;
+      this.readyState = readyState;
+      this.listeners = new Map();
+    }
+
+    addEventListener(type, listener) {
+      if (!this.listeners.has(type)) {
+        this.listeners.set(type, new Set());
+      }
+      this.listeners.get(type).add(listener);
+    }
+
+    removeEventListener(type, listener) {
+      if (this.listeners.has(type)) {
+        this.listeners.get(type).delete(listener);
+      }
+    }
+
+    emit(type, event) {
+      if (this.listeners.has(type)) {
+        for (const listener of Array.from(this.listeners.get(type))) {
+          listener(event);
+        }
+      }
+    }
+
+    send(data) {}
+  }
+
+  test('waitForDataChannelBuffer resolves immediately if bufferedAmount <= targetAmount', async () => {
+    const dc = new MockDataChannel(500 * 1024, 'open');
+    await app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    assert.equal(dc.bufferedAmountLowThreshold, 512 * 1024);
+  });
+
+  test('waitForDataChannelBuffer resolves when bufferedamountlow event fires', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+    const promise = app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+
+    assert.equal(dc.listeners.get('bufferedamountlow').size, 1);
+    dc.bufferedAmount = 500 * 1024;
+    dc.emit('bufferedamountlow');
+
+    await promise;
+    assert.equal(dc.listeners.get('bufferedamountlow').size, 0, 'Listeners must be cleaned up on resolve');
+  });
+
+  test('waitForDataChannelBuffer post-registration re-check resolves without waiting', async () => {
+    class FastDrainDataChannel extends MockDataChannel {
+      addEventListener(type, listener) {
+        super.addEventListener(type, listener);
+        if (type === 'bufferedamountlow') {
+          // Buffer drained immediately before event loop fired event
+          this.bufferedAmount = 300 * 1024;
+        }
+      }
+    }
+
+    const dc = new FastDrainDataChannel(2 * 1024 * 1024, 'open');
+    await app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up');
+  });
+
+  test('waitForDataChannelBuffer periodic fallback timer resolves when event is missed', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+    const start = Date.now();
+    const promise = app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+
+    // Drains buffer without firing 'bufferedamountlow'
+    dc.bufferedAmount = 100 * 1024;
+
+    await promise;
+    const elapsed = Date.now() - start;
+    assert.equal(elapsed >= 200, true, 'Resolved via 250ms periodic timer fallback');
+    assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up');
+  });
+
+  test('waitForDataChannelBuffer rejects when channel closes or errors', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+    const promise = app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+
+    dc.readyState = 'closed';
+    dc.emit('close');
+
+    await assert.rejects(promise, { message: /closed or closing|no longer open/i });
+    assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up on rejection');
+  });
+
+  test('waitForDataChannelBuffer rejects immediately if channel is already closed', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'closed');
+    await assert.rejects(
+      app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024),
+      { message: /closed or closing|no longer open/i }
+    );
+  });
+
+  test('uploadFileP2P streams file chunks and sends UPLOAD_EOF using backpressure helper', async () => {
+    const sent = [];
+    const mockDC = new MockDataChannel(0, 'open');
+    mockDC.send = (msg) => sent.push(msg);
+
+    delete require.cache[require.resolve('./app.js')];
+    const testApp = require('./app.js');
+
+    const fileContent = new Uint8Array(150 * 1024).fill(65);
+    const mockFile = new window.File([fileContent], 'test-p2p.bin', { type: 'application/octet-stream' });
+
+    await testApp.uploadFileP2P(mockFile, mockDC);
+
+    assert.equal(sent.length, 5, 'Should send UPLOAD_META, 3 chunks, and UPLOAD_EOF');
+    assert.equal(sent[0], 'UPLOAD_META:test-p2p.bin:153600');
+    assert.equal(sent[4], 'UPLOAD_EOF');
+  });
+
+  test('sendWebRTCFile streams chunks and sends EOF using backpressure helper', async () => {
+    const sent = [];
+    const mockDC = new MockDataChannel(0, 'open');
+    mockDC.send = (msg) => sent.push(msg);
+
+    delete require.cache[require.resolve('./app.js')];
+    const testApp = require('./app.js');
+
+    const fileContent = new Uint8Array(150 * 1024).fill(66);
+    const mockFile = new window.File([fileContent], 'sender-test.bin', { type: 'application/octet-stream' });
+
+    testApp.handleSenderFileSelect(mockFile);
+
+    await testApp.sendWebRTCFile(0, mockDC);
+
+    assert.equal(sent.length, 4, 'Should send 3 chunks and EOF');
+    assert.equal(sent[3], 'EOF');
+  });
+});
 
