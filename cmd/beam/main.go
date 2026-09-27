@@ -892,13 +892,26 @@ func downloadFile(code string) error {
 	var r io.Reader = respDL.Body
 	if k != "" {
 		keyBytes, err := base64.URLEncoding.DecodeString(k)
-		if err == nil && len(keyBytes) == 32 {
-			r, err = relay.NewDecryptingReader(respDL.Body, keyBytes)
-			if err != nil {
-				return fmt.Errorf("failed to initialize decryptor: %w", err)
-			}
-			fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
+		if err != nil {
+			keyBytes, err = base64.StdEncoding.DecodeString(k)
 		}
+		if err != nil {
+			keyBytes, err = base64.RawURLEncoding.DecodeString(k)
+		}
+		if err != nil {
+			keyBytes, err = base64.RawStdEncoding.DecodeString(k)
+		}
+		if err != nil {
+			return fmt.Errorf("invalid decryption key encoding: %w", err)
+		}
+		if len(keyBytes) != 32 {
+			return fmt.Errorf("invalid decryption key length: expected 32 bytes, got %d", len(keyBytes))
+		}
+		r, err = relay.NewDecryptingReader(respDL.Body, keyBytes)
+		if err != nil {
+			return fmt.Errorf("failed to initialize decryptor: %w", err)
+		}
+		fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
 	}
 
 	cleanBase := filepath.Base(filepath.Clean(meta.Name))
