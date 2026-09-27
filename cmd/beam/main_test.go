@@ -92,7 +92,7 @@ func TestDownloadFile_PlainHTTP(t *testing.T) {
 
 	defer os.Remove("received_test_download.txt")
 
-	err := downloadFile(ts.URL)
+	err := downloadFile(ts.URL + "/?s=testtoken")
 	if err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
 	}

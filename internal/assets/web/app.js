@@ -7,14 +7,27 @@ function getBackendURL() {
       backend = 'https://beamshare.onrender.com';
     }
   }
-  if (backend && backend.endsWith('/')) {
-    backend = backend.slice(0, -1);
+  if (backend) {
+    const qIdx = backend.indexOf('?');
+    if (qIdx !== -1) backend = backend.substring(0, qIdx);
+    const hIdx = backend.indexOf('#');
+    if (hIdx !== -1) backend = backend.substring(0, hIdx);
+    if (backend.endsWith('/')) {
+      backend = backend.slice(0, -1);
+    }
   }
   return backend;
 }
 
-function apiPath(path) {
-  const backend = getBackendURL();
+function apiPath(path, customBackend) {
+  let backend = customBackend || getBackendURL();
+  if (backend) {
+    const qIdx = backend.indexOf('?');
+    if (qIdx !== -1) backend = backend.substring(0, qIdx);
+    const hIdx = backend.indexOf('#');
+    if (hIdx !== -1) backend = backend.substring(0, hIdx);
+    if (backend.endsWith('/')) backend = backend.slice(0, -1);
+  }
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
   let fullPath = path;
@@ -1440,7 +1453,7 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      const res = await fetch(apiPath('/api/meta', localURL), { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
