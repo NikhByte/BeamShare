@@ -156,9 +156,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -1206,8 +1203,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     window = dom.window;
     document = window.document;
 
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
+    window.crypto = require('node:crypto').webcrypto;
 
     global.window = window;
     global.document = document;
@@ -1360,4 +1356,3 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     assert.equal(sent[3], 'EOF');
   });
 });
-
