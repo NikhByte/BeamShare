@@ -121,7 +121,10 @@ func (s *Session) DownloadQueueLen() int {
 }
 
 func (s *Session) ClosePipes(err error) {
-	s.ClosePipesIfMatch(nil, nil, err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closePipesIfMatchLocked(nil, nil, err)
+	s.closeUploadPipesIfMatchLocked(nil, nil, err)
 }
 
 func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err error) {
@@ -130,22 +133,49 @@ func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err er
 	s.closePipesIfMatchLocked(pr, pw, err)
 }
 
-func (s *Session) closeUploadPipesLocked(err error) {
-	if s.UploadPipeR != nil {
-		if err != nil {
-			s.UploadPipeR.CloseWithError(err)
-		} else {
-			s.UploadPipeR.Close()
+func (s *Session) CloseUploadPipes(err error) {
+	s.CloseUploadPipesIfMatch(nil, nil, err)
+}
+
+func (s *Session) CloseUploadPipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeUploadPipesIfMatchLocked(pr, pw, err)
+}
+
+func (s *Session) closeUploadPipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
+	if pr == nil || s.UploadPipeR == pr {
+		if s.UploadPipeW != nil {
+			if err != nil {
+				s.UploadPipeW.CloseWithError(err)
+			} else {
+				s.UploadPipeW.Close()
+			}
+			s.UploadPipeW = nil
 		}
-		s.UploadPipeR = nil
-	}
-	if s.UploadPipeW != nil {
-		if err != nil {
-			s.UploadPipeW.CloseWithError(err)
-		} else {
-			s.UploadPipeW.Close()
+		if s.UploadPipeR != nil {
+			if err != nil {
+				s.UploadPipeR.CloseWithError(err)
+			} else {
+				s.UploadPipeR.Close()
+			}
+			s.UploadPipeR = nil
 		}
-		s.UploadPipeW = nil
+	} else {
+		if pw != nil {
+			if err != nil {
+				pw.CloseWithError(err)
+			} else {
+				pw.Close()
+			}
+		}
+		if pr != nil {
+			if err != nil {
+				pr.CloseWithError(err)
+			} else {
+				pr.Close()
+			}
+		}
 	}
 }
 
@@ -1258,9 +1288,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		if part.FormName() == "file" {
 			sess.mu.Lock()
 			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
-				sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
+				sess.closeUploadPipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new upload request"))
 			}
-
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
@@ -1268,7 +1297,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 			var uploadErr error
 			defer func() {
-				sess.ClosePipesIfMatch(pr, pw, uploadErr)
+				if uploadErr != nil {
+					sess.CloseUploadPipesIfMatch(pr, pw, uploadErr)
+				}
 			}()
 
 			done := make(chan struct{})
@@ -1283,7 +1314,10 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 					case <-done:
 						return
 					default:
-						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("upload context cancelled: %w", r.Context().Err()))
+						if r.Body != nil {
+							r.Body.Close()
+						}
+						sess.CloseUploadPipesIfMatch(pr, pw, fmt.Errorf("upload context cancelled: %w", r.Context().Err()))
 					}
 				}
 			}()
@@ -1297,20 +1331,16 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Stream data to pipe
-			_, uploadErr = io.Copy(pw, part)
-			if uploadErr != nil {
-				pw.CloseWithError(uploadErr)
-				part.Close()
-				http.Error(w, fmt.Sprintf("upload failed: %v", uploadErr), http.StatusInternalServerError)
+			_, copyErr := io.Copy(pw, part)
+			part.Close()
+
+			if copyErr != nil {
+				uploadErr = copyErr
+				pw.CloseWithError(copyErr)
+				http.Error(w, copyErr.Error(), http.StatusInternalServerError)
 				return
 			}
 			pw.Close()
-			part.Close()
-
-			if uploadErr != nil {
-				http.Error(w, fmt.Sprintf("upload error: %v", uploadErr), http.StatusInternalServerError)
-				return
-			}
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})
@@ -1340,9 +1370,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	var pullErr error
 	defer func() {
-		if pullErr != nil {
-			sess.ClosePipesIfMatch(pr, pw, pullErr)
-		}
+		sess.CloseUploadPipesIfMatch(pr, pw, pullErr)
 	}()
 
 	done := make(chan struct{})
@@ -1357,7 +1385,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 			case <-done:
 				return
 			default:
-				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("pull context cancelled: %w", r.Context().Err()))
+				sess.CloseUploadPipesIfMatch(pr, pw, fmt.Errorf("pull context cancelled: %w", r.Context().Err()))
 			}
 		}
 	}()
