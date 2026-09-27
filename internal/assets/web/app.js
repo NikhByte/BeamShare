@@ -824,10 +824,27 @@ async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator)) return null;
 
   try {
+    if (!navigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        const timeout = setTimeout(resolve, 1500);
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          clearTimeout(timeout);
+          resolve();
+        }, { once: true });
+      });
+    }
+
+    if (!navigator.serviceWorker.controller) {
+      console.warn("Service worker is not controlling the page, skipping SW pipe.");
+      return null;
+    }
+
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
     const reg = await Promise.race([swReady, timeout]);
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
+    if (!reg || !reg.active) return null;
+
+    const sw = navigator.serviceWorker.controller;
     if (!sw) return null;
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
@@ -2677,6 +2694,7 @@ if (typeof module !== 'undefined' && module.exports) {
     extractKeyFragment,
     parseDecryptionKeyFromHash,
     parseSessionInput,
-    renderQRCode
+    renderQRCode,
+    getSWPipe
   };
 }

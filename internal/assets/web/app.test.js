@@ -562,4 +562,15 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('getSWPipe returns null when serviceWorker controller is missing', async () => {
+    window.navigator.serviceWorker = {
+      controller: null,
+      ready: Promise.resolve({ active: {} }),
+      addEventListener: () => {}
+    };
+
+    const pipe = await app.getSWPipe({ name: 'test.bin', size: 100, mime: 'application/octet-stream' });
+    assert.equal(pipe, null);
+  });
 });
