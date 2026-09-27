@@ -5,9 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-
 	"reflect"
 	"testing"
+	"time"
+
 	"github.com/beamshare/beam/internal/server"
 )
 
@@ -110,5 +111,84 @@ func TestDownloadFile_Relay(t *testing.T) {
 	err := downloadFile(urlWithSession)
 	if err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
+	}
+}
+
+func TestBackpressureSelectLoop(t *testing.T) {
+	bufferedAmountLowChan := make(chan struct{}, 1)
+
+	var currentBuffer uint64 = 1500 * 1024 // 1.5MB > 1MB threshold
+
+	getBufferedAmount := func() uint64 {
+		return currentBuffer
+	}
+
+	waitBackpressure := func(target uint64) {
+		for getBufferedAmount() > target {
+			select {
+			case <-bufferedAmountLowChan:
+			case <-time.After(30 * time.Millisecond):
+			}
+		}
+	}
+
+	// Case 1: Timeout fallback resolves when buffer drops without explicit signal
+	doneChan := make(chan struct{})
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		currentBuffer = 400 * 1024
+	}()
+
+	go func() {
+		waitBackpressure(1024 * 1024)
+		close(doneChan)
+	}()
+
+	select {
+	case <-doneChan:
+		// Success
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("waitBackpressure deadlocked on timeout fallback")
+	}
+
+	// Case 2: Signal unblocks loop
+	currentBuffer = 1500 * 1024
+	doneChan2 := make(chan struct{})
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		currentBuffer = 200 * 1024
+		bufferedAmountLowChan <- struct{}{}
+	}()
+
+	go func() {
+		waitBackpressure(1024 * 1024)
+		close(doneChan2)
+	}()
+
+	select {
+	case <-doneChan2:
+		// Success
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("waitBackpressure deadlocked on signal unblock")
+	}
+
+	// Case 3: EOF flush with target threshold 0
+	currentBuffer = 100 * 1024
+	doneChan3 := make(chan struct{})
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		currentBuffer = 0
+	}()
+
+	go func() {
+		waitBackpressure(0)
+		close(doneChan3)
+	}()
+
+	select {
+	case <-doneChan3:
+		// Success
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("waitBackpressure deadlocked on EOF flush")
 	}
 }
