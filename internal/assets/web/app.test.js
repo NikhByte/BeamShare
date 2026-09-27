@@ -1080,6 +1080,17 @@ describe('Gaze Web Sender Test Suite', () => {
     const pipe = await app.getSWPipe({ name: 'test.bin', size: 100, mime: 'application/octet-stream' });
     assert.equal(pipe, null);
   });
+
+  test('getSWPipe returns null when serviceWorker subframe iframe ping fails', async () => {
+    window.navigator.serviceWorker = {
+      controller: { postMessage: () => {} },
+      ready: Promise.resolve({ active: {} }),
+      addEventListener: () => {}
+    };
+
+    const pipe = await app.getSWPipe({ name: 'test.bin', size: 100, mime: 'application/octet-stream' });
+    assert.equal(pipe, null);
+  });
 });
 
 describe('WebRTC Buffer Backpressure Suite', () => {

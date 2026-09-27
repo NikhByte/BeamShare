@@ -2153,6 +2153,40 @@ async function getSWPipe(fileMeta) {
 
   try {
     let cancelTimeout;
+    const iframeSupported = await new Promise((resolve) => {
+      let timer = setTimeout(() => {
+        cleanup();
+        resolve(false);
+      }, 300);
+
+      function onMsg(e) {
+        if (e.data === 'sw-iframe-ok') {
+          cleanup();
+          resolve(true);
+        }
+      }
+
+      const testIframe = document.createElement('iframe');
+      testIframe.style.display = 'none';
+
+      function cleanup() {
+        clearTimeout(timer);
+        window.removeEventListener('message', onMsg);
+        if (testIframe.parentNode) {
+          testIframe.parentNode.removeChild(testIframe);
+        }
+      }
+
+      window.addEventListener('message', onMsg);
+      testIframe.src = '/sw-download-pipe/iframe-ping';
+      document.body.appendChild(testIframe);
+    });
+
+    if (!iframeSupported) {
+      console.warn("Service worker does not intercept subframe navigations in this document context, skipping SW pipe.");
+      return null;
+    }
+
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 10000));
     const reg = await Promise.race([swReady, timeout]);
@@ -3313,7 +3347,10 @@ async function startWebRTC() {
                     await diskWritableStream.close();
                     if (useOPFS) {
                       const file = await diskFileHandle.getFile();
-                      triggerSave(file, currentFile.name);
+                      const buffer = await file.arrayBuffer();
+                      const blob = new Blob([buffer], { type: currentFile ? currentFile.mime : file.type });
+                      try { const root = await navigator.storage.getDirectory(); await root.removeEntry(diskFileHandle.name); } catch(e){}
+                      triggerSave(blob, currentFile.name);
                     }
                   } else if (swPipePort) {
                     swPipePort.postMessage("EOF");
