@@ -2113,7 +2113,7 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
+      let msgEncBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -2147,17 +2147,17 @@ async function startWebRTC() {
             }
 
             const value = new Uint8Array(e.data);
-            let newBuffer = new Uint8Array(encBuffer.length + value.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(value, encBuffer.length);
-            encBuffer = newBuffer;
+            let newBuffer = new Uint8Array(msgEncBuffer.length + value.length);
+            newBuffer.set(msgEncBuffer, 0);
+            newBuffer.set(value, msgEncBuffer.length);
+            msgEncBuffer = newBuffer;
 
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+            while (msgEncBuffer.length >= 4) {
+              const dv = new DataView(msgEncBuffer.buffer, msgEncBuffer.byteOffset, msgEncBuffer.byteLength);
               const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
+              if (msgEncBuffer.length >= 4 + frameLen) {
+                const frame = msgEncBuffer.slice(4, 4 + frameLen);
+                msgEncBuffer = msgEncBuffer.slice(4 + frameLen);
 
                 const nonce = new Uint8Array(frame.subarray(0, 12));
                 const ciphertext = new Uint8Array(frame.subarray(12));
@@ -2287,6 +2287,77 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
         resolve();
       }
     }, pollMs);
+  });
+}
+
+function waitForDataChannelBuffer(dc, targetThreshold = 1024 * 1024, lowThreshold = 512 * 1024) {
+  return new Promise((resolve, reject) => {
+    if (!dc || dc.readyState !== 'open') {
+      return reject(new Error("Data channel is closed or closing"));
+    }
+
+    try {
+      dc.bufferedAmountLowThreshold = lowThreshold;
+    } catch (e) {}
+
+    if (dc.bufferedAmount <= targetThreshold) {
+      return resolve();
+    }
+
+    let intervalId = null;
+    let resolved = false;
+
+    const cleanup = () => {
+      if (resolved) return;
+      resolved = true;
+      if (intervalId !== null) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+      try {
+        if (dc && typeof dc.removeEventListener === 'function') {
+          dc.removeEventListener('bufferedamountlow', onBufferedAmountLow);
+          dc.removeEventListener('close', onCloseOrError);
+          dc.removeEventListener('error', onCloseOrError);
+        }
+      } catch (e) {}
+    };
+
+    const onBufferedAmountLow = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onCloseOrError = () => {
+      cleanup();
+      reject(new Error("Data channel is closed or closing"));
+    };
+
+    try {
+      dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
+      dc.addEventListener('close', onCloseOrError);
+      dc.addEventListener('error', onCloseOrError);
+    } catch (e) {
+      cleanup();
+      return reject(new Error("Data channel is closed or closing"));
+    }
+
+    if (dc.bufferedAmount <= targetThreshold) {
+      cleanup();
+      return resolve();
+    }
+
+    intervalId = setInterval(() => {
+      if (!dc || dc.readyState !== 'open') {
+        cleanup();
+        reject(new Error("Data channel is closed or closing"));
+        return;
+      }
+      if (dc.bufferedAmount <= targetThreshold) {
+        cleanup();
+        resolve();
+      }
+    }, 250);
   });
 }
 
@@ -2764,10 +2835,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(senderDataChannel, 512 * 1024);
+    while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
+      if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+      if (dc.bufferedAmount > 1024 * 1024) {
+        await waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -2807,10 +2878,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (senderDataChannel.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(senderDataChannel, 0);
+  if (dc.bufferedAmount > 0) {
+    await waitForDataChannelBuffer(dc, 0, 0);
   }
-  senderDataChannel.send("EOF");
+  dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
@@ -3023,6 +3094,9 @@ if (typeof window !== 'undefined') {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     waitForBufferedAmountLow,
+    waitForDataChannelBuffer,
+    uploadFileP2P,
+    sendWebRTCFile,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
