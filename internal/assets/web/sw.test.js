@@ -342,5 +342,21 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     });
 
     assert.equal(readyPosted, true);
+
+  test('Fetch interceptor responds to /sw-download-pipe/iframe-ping with postMessage script', async () => {
+    require('./sw.js');
+    let responseResult = null;
+    listeners['fetch']({
+      request: { url: 'http://localhost/sw-download-pipe/iframe-ping' },
+      respondWith: (resp) => {
+        responseResult = resp;
+      }
+    });
+
+    assert.notEqual(responseResult, null);
+    assert.equal(responseResult.status, 200);
+    assert.equal(responseResult.headers.get('Content-Type'), 'text/html');
+    const body = await responseResult.text();
+    assert.match(body, /sw-iframe-ok/);
   });
 });
