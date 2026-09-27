@@ -29,5 +29,8 @@
     "jsdom": "^30.0.1",
     "pako": "^3.0.1",
     "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "qrious": "^4.0.2"
   }
 }
