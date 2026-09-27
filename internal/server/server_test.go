@@ -556,3 +556,80 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 }
 
+func TestConcurrentMetaDownloadAndUpload(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "testfile.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("hello world"), 0644))
+
+	srv, err := New(filePath, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	var wg sync.WaitGroup
+	stopCh := make(chan struct{})
+
+	// Routine 1: call UpdateSharedFile repeatedly
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+				i++
+				newName := fmt.Sprintf("file_%d.txt", i)
+				srv.UpdateSharedFile(filePath, newName, int64(100+i))
+				time.Sleep(1 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Routine 2: query /api/meta concurrently
+	for k := 0; k < 5; k++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					resp, err := http.Get(ts.URL + "/api/meta")
+					if err == nil {
+						io.Copy(io.Discard, resp.Body)
+						resp.Body.Close()
+					}
+				}
+			}
+		}()
+	}
+
+	// Routine 3: query /api/download concurrently
+	for k := 0; k < 5; k++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					resp, err := http.Get(ts.URL + "/api/download")
+					if err == nil {
+						io.Copy(io.Discard, resp.Body)
+						resp.Body.Close()
+					}
+				}
+			}
+		}()
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	close(stopCh)
+	wg.Wait()
+}
+
