@@ -35,6 +35,7 @@ type Session struct {
 	UploadReq   chan string
 	UploadPipeR *io.PipeReader
 	UploadPipeW *io.PipeWriter
+	uploadCancel func()
 
 	DataPipeR *io.PipeReader
 	DataPipeW *io.PipeWriter
@@ -169,6 +170,11 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			}
 			*r = nil
 		}
+	}
+
+	if s.uploadCancel != nil {
+		s.uploadCancel()
+		s.uploadCancel = nil
 	}
 
 	if pr == nil && pw == nil {
@@ -1256,6 +1262,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if part.FormName() == "file" {
+			rc := http.NewResponseController(w)
+
 			sess.mu.Lock()
 			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
 				sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
@@ -1264,10 +1272,16 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
+			sess.uploadCancel = func() {
+				_ = rc.SetReadDeadline(time.Unix(1, 0))
+			}
 			sess.mu.Unlock()
 
 			var uploadErr error
 			defer func() {
+				sess.mu.Lock()
+				sess.uploadCancel = nil
+				sess.mu.Unlock()
 				sess.ClosePipesIfMatch(pr, pw, uploadErr)
 			}()
 
@@ -1301,7 +1315,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			if uploadErr != nil {
 				pw.CloseWithError(uploadErr)
 				part.Close()
-				http.Error(w, fmt.Sprintf("upload failed: %v", uploadErr), http.StatusInternalServerError)
+				http.Error(w, fmt.Sprintf("upload error: %v", uploadErr), http.StatusInternalServerError)
 				return
 			}
 			pw.Close()
