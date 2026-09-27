@@ -223,3 +223,44 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 		})
 	}
 }
+
+func TestZeroAllocationsPerFrame(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	payload := make([]byte, 64*1024)
+	if _, err := io.ReadFull(rand.Reader, payload); err != nil {
+		t.Fatalf("failed to generate random data: %v", err)
+	}
+
+	encReader, err := NewEncryptingReader(bytes.NewReader(payload), key)
+	if err != nil {
+		t.Fatalf("NewEncryptingReader failed: %v", err)
+	}
+	encryptedData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("reading encrypted data failed: %v", err)
+	}
+
+	br := bytes.NewReader(encryptedData)
+	decReader, err := NewDecryptingReader(br, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	out := make([]byte, 64*1024)
+	allocs := testing.AllocsPerRun(10, func() {
+		br.Seek(0, io.SeekStart)
+		decReader.buf = nil
+		_, err := decReader.Read(out)
+		if err != nil {
+			t.Fatalf("Read failed: %v", err)
+		}
+	})
+
+	if allocs > 0 {
+		t.Fatalf("expected 0 allocations per frame read, got %f", allocs)
+	}
+}
