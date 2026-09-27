@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -11,6 +12,9 @@ import (
 	"os"
 	"time"
 )
+
+// ErrInvalidKeyLength indicates that a non-empty encryption key length is not 32 bytes (AES-256).
+var ErrInvalidKeyLength = errors.New("invalid key length")
 
 // BackoffConfig defines exponential backoff retry parameters for relay client reconnections.
 type BackoffConfig struct {
@@ -207,7 +211,10 @@ func (c *Client) UploadReaderAtOffset(ctx context.Context, reader io.Reader, off
 
 	var r io.Reader = reader
 	var err error
-	if len(c.Key) == 32 {
+	if len(c.Key) > 0 {
+		if len(c.Key) != 32 {
+			return fmt.Errorf("%w: expected 32 bytes, got %d", ErrInvalidKeyLength, len(c.Key))
+		}
 		r, err = NewEncryptingReader(reader, c.Key)
 		if err != nil {
 			return err

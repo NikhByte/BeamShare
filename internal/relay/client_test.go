@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -223,6 +225,44 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		receivedOffset := <-uploadDoneOffset
 		if string(receivedOffset) != string(offsetData) {
 			t.Fatalf("expected offset uploaded data '%s', got '%s'", string(offsetData), string(receivedOffset))
+		}
+	})
+
+	t.Run("InvalidKeyLength10Bytes", func(t *testing.T) {
+		client, sess := createIsolatedSession(t)
+		client.Key = make([]byte, 10)
+
+		pr, pw := io.Pipe()
+		sess.SetPipes(pr, pw)
+
+		err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+		if err == nil {
+			t.Fatalf("expected error for 10-byte key, got nil")
+		}
+		if !errors.Is(err, ErrInvalidKeyLength) {
+			t.Fatalf("expected ErrInvalidKeyLength, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "32 bytes") || !strings.Contains(err.Error(), "10") {
+			t.Fatalf("expected error message stating expected 32 bytes and actual 10 bytes, got: %v", err)
+		}
+	})
+
+	t.Run("InvalidKeyLength16Bytes", func(t *testing.T) {
+		client, sess := createIsolatedSession(t)
+		client.Key = make([]byte, 16)
+
+		pr, pw := io.Pipe()
+		sess.SetPipes(pr, pw)
+
+		err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+		if err == nil {
+			t.Fatalf("expected error for 16-byte key, got nil")
+		}
+		if !errors.Is(err, ErrInvalidKeyLength) {
+			t.Fatalf("expected ErrInvalidKeyLength, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "32 bytes") || !strings.Contains(err.Error(), "16") {
+			t.Fatalf("expected error message stating expected 32 bytes and actual 16 bytes, got: %v", err)
 		}
 	})
 }
