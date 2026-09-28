@@ -184,6 +184,9 @@ func (c *Client) UploadData(ctx context.Context, filePath string) error {
 
 // UploadDataAtOffset streams file data starting at a specified byte offset (for resumable transfers).
 func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset int64) error {
+	if len(c.Key) > 0 && len(c.Key) != 32 {
+		return fmt.Errorf("invalid key length: key must be exactly 32 bytes, got %d bytes", len(c.Key))
+	}
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -203,6 +206,10 @@ func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset
 func (c *Client) UploadReaderAtOffset(ctx context.Context, reader io.Reader, offset int64) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	if len(c.Key) > 0 && len(c.Key) != 32 {
+		return fmt.Errorf("invalid key length: key must be exactly 32 bytes, got %d bytes", len(c.Key))
 	}
 
 	var r io.Reader = reader
