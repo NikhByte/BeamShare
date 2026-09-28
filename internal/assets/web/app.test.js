@@ -79,6 +79,9 @@ describe('Gaze Web Receiver Test Suite', () => {
     global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
     window.atob = global.atob;
     window.btoa = global.btoa;
+    if (typeof global.MessageChannel !== 'undefined') {
+      window.MessageChannel = global.MessageChannel;
+    }
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
     global.pako = pako;
     window.pako = pako;
@@ -536,5 +539,55 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput(''), null);
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
+  });
+
+  test('getSWPipe awaits PORT_READY before appending iframe', async () => {
+    let activeSW = {
+      postMessage: (msg, ports) => {
+        if (msg.type === 'INIT_PORT' && ports && ports[0]) {
+          setTimeout(() => {
+            ports[0].postMessage({ type: 'PORT_READY' });
+          }, 10);
+        }
+      }
+    };
+
+    const navProto = Object.getPrototypeOf(global.navigator || window.navigator);
+    Object.defineProperty(navProto, 'serviceWorker', {
+      value: {
+        ready: Promise.resolve({ active: activeSW }),
+        controller: activeSW
+      },
+      writable: true,
+      configurable: true
+    });
+
+    const fileMeta = { name: 'test.bin', size: 100, mime: 'application/octet-stream' };
+
+    const initialIframeLength = document.querySelectorAll('iframe').length;
+
+    const pipePortPromise = app.getSWPipe(fileMeta);
+
+    assert.equal(document.querySelectorAll('iframe').length, initialIframeLength);
+
+    const pipePort = await pipePortPromise;
+
+    assert.notEqual(pipePort, null);
+    assert.equal(document.querySelectorAll('iframe').length, initialIframeLength + 1);
+  });
+
+  test('getSWPipe falls back to null on SW timeout', async () => {
+    const navProto = Object.getPrototypeOf(global.navigator || window.navigator);
+    Object.defineProperty(navProto, 'serviceWorker', {
+      value: {
+        ready: new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10))
+      },
+      writable: true,
+      configurable: true
+    });
+
+    const fileMeta = { name: 'test.bin', size: 100, mime: 'application/octet-stream' };
+    const result = await app.getSWPipe(fileMeta);
+    assert.equal(result, null);
   });
 });

@@ -824,15 +824,48 @@ async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator)) return null;
 
   try {
+    let cancelTimeout;
     const swReady = navigator.serviceWorker.ready;
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
-    const reg = await Promise.race([swReady, timeout]);
+    const timeout = new Promise((resolve, reject) => {
+      const readyTimer = setTimeout(() => reject(new Error('SW ready timeout')), 10000);
+      cancelTimeout = () => { clearTimeout(readyTimer); resolve(null); };
+    });
+    const reg = await Promise.race([swReady, timeout]).finally(() => {
+      if (cancelTimeout) cancelTimeout();
+    });
+
     let sw = reg && (reg.active || navigator.serviceWorker.controller);
     if (!sw) return null;
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
     const channel = new MessageChannel();
     const port = channel.port1;
+
+    let cancelHandshakeTimeout;
+    const readyPromise = new Promise((resolve, reject) => {
+      const handshakeTimeout = setTimeout(() => {
+        port.onmessage = null;
+        reject(new Error('SW port ready timeout'));
+      }, 10000);
+
+      cancelHandshakeTimeout = () => {
+        clearTimeout(handshakeTimeout);
+        resolve();
+      };
+
+      port.onmessage = (e) => {
+        if (e.data && e.data.type === 'PORT_READY') {
+          port.onmessage = null;
+          resolve();
+        }
+      };
+
+      if (typeof port.start === 'function') {
+        port.start();
+      }
+    }).finally(() => {
+      if (cancelHandshakeTimeout) cancelHandshakeTimeout();
+    });
 
     sw.postMessage({
       type: 'INIT_PORT',
@@ -841,6 +874,8 @@ async function getSWPipe(fileMeta) {
       size: fileMeta.size,
       mime: fileMeta.mime
     }, [channel.port2]);
+
+    await readyPromise;
 
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
@@ -2591,6 +2626,7 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    getSWPipe
   };
 }
