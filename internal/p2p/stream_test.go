@@ -115,6 +115,9 @@ func TestStartStream_RepeatedCallsCancelsPriorGoroutine(t *testing.T) {
 	defer sender.Stop()
 
 	dc := newMockDataChannel()
+	// Set initial buffered amount above high water mark so the first stream pauses in backpressure
+	// and remains active when the second stream is launched.
+	dc.setBufferedAmount(2 * HighWaterMark)
 
 	var startedCount atomic.Int32
 	var completedCount atomic.Int32
