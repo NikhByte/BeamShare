@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -225,4 +227,60 @@ func TestUploadReaderAtOffset(t *testing.T) {
 			t.Fatalf("expected offset uploaded data '%s', got '%s'", string(offsetData), string(receivedOffset))
 		}
 	})
+
+	t.Run("InvalidKeyLength", func(t *testing.T) {
+		invalidLengths := []int{1, 16, 31, 33, 64}
+		for _, keyLen := range invalidLengths {
+			t.Run(fmt.Sprintf("KeyLen_%d", keyLen), func(t *testing.T) {
+				mockHTTP := &failingHTTPClient{t: t}
+				client := &Client{
+					BaseURL:   "http://localhost:8080",
+					SessionID: "test-session",
+					Key:       make([]byte, keyLen),
+					HTTP:      mockHTTP,
+				}
+
+				err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+				if err == nil {
+					t.Fatalf("expected error for key length %d, got nil", keyLen)
+				}
+
+				expectedMsg := fmt.Sprintf("invalid relay key length: expected 32 bytes, got %d", keyLen)
+				if err.Error() != expectedMsg {
+					t.Fatalf("expected error message '%s', got '%s'", expectedMsg, err.Error())
+				}
+
+				if !strings.Contains(err.Error(), expectedMsg) {
+					t.Fatalf("expected error to contain '%s', got '%s'", expectedMsg, err.Error())
+				}
+
+				if mockHTTP.called {
+					t.Fatalf("expected no HTTP requests to be dispatched for invalid key length %d", keyLen)
+				}
+			})
+		}
+	})
+}
+
+type failingHTTPClient struct {
+	t      *testing.T
+	called bool
+}
+
+func (f *failingHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	f.called = true
+	f.t.Errorf("unexpected HTTP Do call made to %s", req.URL.String())
+	return nil, fmt.Errorf("unexpected HTTP request")
+}
+
+func (f *failingHTTPClient) Get(url string) (*http.Response, error) {
+	f.called = true
+	f.t.Errorf("unexpected HTTP Get call made to %s", url)
+	return nil, fmt.Errorf("unexpected HTTP request")
+}
+
+func (f *failingHTTPClient) Post(url, contentType string, body io.Reader) (*http.Response, error) {
+	f.called = true
+	f.t.Errorf("unexpected HTTP Post call made to %s", url)
+	return nil, fmt.Errorf("unexpected HTTP request")
 }

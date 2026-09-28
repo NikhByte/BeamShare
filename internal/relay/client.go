@@ -201,6 +201,10 @@ func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset
 
 // UploadReaderAtOffset streams data from an io.Reader starting at a specified byte offset.
 func (c *Client) UploadReaderAtOffset(ctx context.Context, reader io.Reader, offset int64) error {
+	if len(c.Key) > 0 && len(c.Key) != 32 {
+		return fmt.Errorf("invalid relay key length: expected 32 bytes, got %d", len(c.Key))
+	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
