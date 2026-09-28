@@ -823,6 +823,13 @@ function setMode(mode, label) {
 async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator)) return null;
 
+  // WebKit (Safari / Mobile Safari) does not reliably route iframe navigations through SW fetch handlers
+  const isWebKit = typeof navigator !== 'undefined' && (/AppleWebKit/i.test(navigator.userAgent) && !/Chrome|Chromium|Edg|Firefox/i.test(navigator.userAgent));
+  if (isWebKit) {
+    console.warn("Service Worker iframe pipe not supported in WebKit; bypassing SW pipe.");
+    return null;
+  }
+
   try {
     let swTimer = null;
     const swReady = navigator.serviceWorker.ready;
@@ -831,8 +838,35 @@ async function getSWPipe(fileMeta) {
     });
     const reg = await Promise.race([swReady, timeout]);
     if (swTimer) clearTimeout(swTimer);
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
-    if (!sw) return null;
+
+    if (!reg) return null;
+
+    // Ensure document is controlled by Service Worker (wait for clients.claim if needed)
+    if (!navigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        const startTime = Date.now();
+        const check = () => {
+          if (navigator.serviceWorker.controller || Date.now() - startTime >= 3000) {
+            navigator.serviceWorker.removeEventListener('controllerchange', check);
+            resolve();
+          }
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', check);
+        const timer = setInterval(() => {
+          if (navigator.serviceWorker.controller || Date.now() - startTime >= 3000) {
+            clearInterval(timer);
+            navigator.serviceWorker.removeEventListener('controllerchange', check);
+            resolve();
+          }
+        }, 50);
+      });
+    }
+
+    const sw = navigator.serviceWorker.controller;
+    if (!sw) {
+      console.warn("Service Worker active but page is uncontrolled; bypassing SW pipe.");
+      return null;
+    }
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
     const channel = new MessageChannel();
@@ -842,7 +876,7 @@ async function getSWPipe(fileMeta) {
       const ackTimeout = setTimeout(() => {
         cleanupHandshake();
         reject(new Error('SW init handshake timeout'));
-      }, 2000);
+      }, 3000);
 
       function handleMessage(e) {
         if (e && e.data && e.data.type === 'READY') {
@@ -889,8 +923,8 @@ async function getSWPipe(fileMeta) {
 
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
-    iframe.src = swUrl;
     document.body.appendChild(iframe);
+    iframe.src = swUrl;
 
     return port;
   } catch (err) {
@@ -1382,6 +1416,27 @@ async function startHTTPDownload() {
     swPipePort = await getSWPipe(currentFile);
   }
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch(e) {
+    console.error("Failed to import decryption key", e);
+    showError("Decryption key error: " + e.message);
+    return;
+  }
+
+  // If unencrypted transfer and SW pipe/disk picker are not active, perform direct HTTP download via iframe
+  if (!decryptionKey && !swPipePort && !diskWritableStream) {
+    setState('downloading');
+    updateProgress(1.0);
+    const downloadIframe = document.createElement('iframe');
+    downloadIframe.hidden = true;
+    downloadIframe.src = apiPath('/api/download');
+    document.body.appendChild(downloadIframe);
+    showDone(currentFile.name, currentFile.size, 'Direct HTTP');
+    return;
+  }
+
   if (!diskWritableStream && !swPipePort && opfsSupported) {
     try {
       const root = await navigator.storage.getDirectory();
@@ -1428,15 +1483,7 @@ async function startHTTPDownload() {
 
     const reader = res.body.getReader();
     let received = initialOffset;
-    let decryptionKey = null;
     let encBuffer = new Uint8Array(0);
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch(e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      return;
-    }
 
     while (true) {
       const { done, value } = await reader.read();

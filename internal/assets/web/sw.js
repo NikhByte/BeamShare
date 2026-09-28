@@ -114,6 +114,11 @@ self.addEventListener('message', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   
+  if (url.pathname === '/sw-ping') {
+    event.respondWith(new Response('pong'));
+    return;
+  }
+
   // Intercept synthetic download URLs used by the service worker pipe
   if (url.pathname.startsWith('/sw-download-pipe/')) {
     if (streamMap.has(url.pathname)) {
@@ -137,8 +142,37 @@ self.addEventListener('fetch', (event) => {
 
       event.respondWith(new Response(stream, { headers }));
     } else {
-      // If stream not found, could be an expired link or reload, just return 404
-      event.respondWith(new Response('Stream not found or already downloaded.', { status: 404 }));
+      event.respondWith((async () => {
+        // In WebKit/Safari, fetch event can arrive before SW message event is dispatched. Wait briefly for streamMap entry.
+        const startTime = Date.now();
+        while (!streamMap.has(url.pathname) && Date.now() - startTime < 1000) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+
+        if (streamMap.has(url.pathname)) {
+          const entry = streamMap.get(url.pathname);
+          const { stream, filename, size, mime, ttlTimer } = entry;
+          
+          streamMap.delete(url.pathname);
+          if (ttlTimer) {
+            clearTimeout(ttlTimer);
+            entry.ttlTimer = null;
+          }
+          
+          const headers = new Headers({
+            'Content-Type': mime || 'application/octet-stream',
+            'Content-Disposition': formatContentDisposition(filename)
+          });
+          
+          if (size && size > 0) {
+            headers.set('Content-Length', size);
+          }
+
+          return new Response(stream, { headers });
+        }
+
+        return new Response('Stream not found or already downloaded.', { status: 404 });
+      })());
     }
   }
 });
