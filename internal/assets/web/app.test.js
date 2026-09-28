@@ -341,6 +341,122 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
   });
+
+  test('getSWPipe awaits READY handshake before attaching iframe', async () => {
+    let mockSWPostedMsg = null;
+
+    class MockMessageChannel {
+      constructor() {
+        const port1Listeners = {};
+        const port2Listeners = {};
+        this.port1 = {
+          addEventListener: (type, cb) => { port1Listeners[type] = cb; },
+          removeEventListener: (type) => { delete port1Listeners[type]; },
+          start: () => {},
+          postMessage: (msg) => {
+            if (port2Listeners['message']) port2Listeners['message']({ data: msg });
+          }
+        };
+        this.port2 = {
+          addEventListener: (type, cb) => { port2Listeners[type] = cb; },
+          removeEventListener: (type) => { delete port2Listeners[type]; },
+          start: () => {},
+          postMessage: (msg) => {
+            if (port1Listeners['message']) port1Listeners['message']({ data: msg });
+          }
+        };
+      }
+    }
+
+    window.MessageChannel = MockMessageChannel;
+    global.MessageChannel = MockMessageChannel;
+
+    let iframeCreated = false;
+    const activeSW = {
+      postMessage: (msg, ports) => {
+        mockSWPostedMsg = msg;
+        // Simulate SW sending READY signal on port2 back to port1
+        if (ports && ports[0]) {
+          setTimeout(() => {
+            // Check that iframe hasn't been created BEFORE ready is posted
+            iframeCreated = document.querySelectorAll('iframe').length > 0;
+            ports[0].postMessage({ type: 'READY' });
+          }, 10);
+        }
+      }
+    };
+
+    const swMock = {
+      ready: Promise.resolve({ active: activeSW }),
+      controller: activeSW
+    };
+    Object.defineProperty(globalThis.navigator, 'serviceWorker', {
+      value: swMock,
+      configurable: true,
+      writable: true
+    });
+
+    const fileMeta = { name: 'test.bin', size: 100, mime: 'application/octet-stream' };
+    const initialIframe = document.querySelectorAll('iframe').length;
+
+    const port = await app.getSWPipe(fileMeta);
+
+    assert.notEqual(port, null);
+    assert.equal(iframeCreated, false, 'Iframe must NOT be attached before READY signal is received');
+    assert.equal(document.querySelectorAll('iframe').length, initialIframe + 1, 'Iframe must be created after READY signal');
+    assert.equal(mockSWPostedMsg.type, 'INIT_PORT');
+  });
+
+  test('getSWPipe falls back and returns null on handshake timeout', async () => {
+    class MockMessageChannel {
+      constructor() {
+        this.port1 = {
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          start: () => {}
+        };
+        this.port2 = {};
+      }
+    }
+
+    window.MessageChannel = MockMessageChannel;
+    global.MessageChannel = MockMessageChannel;
+
+    const activeSW = {
+      postMessage: () => {
+        // Deliberately do NOT send READY message to trigger timeout
+      }
+    };
+
+    const swMockTimeout = {
+      ready: Promise.resolve({ active: activeSW }),
+      controller: activeSW
+    };
+    Object.defineProperty(globalThis.navigator, 'serviceWorker', {
+      value: swMockTimeout,
+      configurable: true,
+      writable: true
+    });
+
+    const originalSetTimeout = global.setTimeout;
+    const customSetTimeout = (cb, delay) => {
+      if (delay === 2000) {
+        return originalSetTimeout(cb, 10);
+      }
+      return originalSetTimeout(cb, delay);
+    };
+    global.setTimeout = customSetTimeout;
+    window.setTimeout = customSetTimeout;
+
+    try {
+      const fileMeta = { name: 'timeout.bin', size: 100, mime: 'application/octet-stream' };
+      const result = await app.getSWPipe(fileMeta);
+      assert.equal(result, null);
+    } finally {
+      global.setTimeout = originalSetTimeout;
+      window.setTimeout = originalSetTimeout;
+    }
+  });
 });
 
 describe('Gaze Web Sender Test Suite', () => {
