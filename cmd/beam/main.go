@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/beamshare/beam/internal/mdns"
+	"github.com/beamshare/beam/internal/p2p"
 	"github.com/beamshare/beam/internal/relay"
 	"github.com/beamshare/beam/internal/server"
 	"github.com/beamshare/beam/internal/signaling"
@@ -311,6 +312,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 	// ── Phase 3: WebRTC signaling session ─────────────────────────────────────
 	fmt.Printf("  %s\n", dimStr("Setting up WebRTC session…"))
+	streamSender := p2p.NewStreamSender()
 	session, err := signaling.NewSession(iceServers, discoveryTimeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  warn: WebRTC unavailable (%v) — HTTP-only mode\n", err)
@@ -510,84 +512,26 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if len(parts) == 2 {
 								offset, _ = strconv.ParseInt(parts[1], 10, 64)
 							}
-							// File sender goroutine (Direct-to-Disk + Backpressure)
-							go func() {
-								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
-								file, err := os.Open(filePath)
-								if err != nil {
-									fmt.Printf("  Error opening file: %v\n", err)
-									return
-								}
-								defer file.Close()
-
-								if offset > 0 {
-									_, err = file.Seek(offset, io.SeekStart)
-									if err != nil {
-										fmt.Printf("  Error seeking file: %v\n", err)
-										return
-									}
-								}
-
-								// Send META header
-								metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
-								if errSend := dc.SendText(metaHeader); errSend != nil {
-									fmt.Printf("  Error sending meta header: %v\n", errSend)
-									return
-								}
-
-								bufferedAmountLowChan := make(chan struct{}, 1)
-								dc.SetBufferedAmountLowThreshold(512 * 1024)
-								dc.OnBufferedAmountLow(func() {
-									select {
-									case bufferedAmountLowChan <- struct{}{}:
-									default:
-									}
-								})
-
-								buffer := make([]byte, 64*1024) // 64KB chunk size
-								totalSent := offset
-								start := time.Now()
-
-								for {
-									// Backpressure check: wait if buffered amount > 1MB
-									if dc.BufferedAmount() > 1024*1024 {
-										<-bufferedAmountLowChan
-									}
-
-									n, err := file.Read(buffer)
-									if n > 0 {
-										errSend := dc.Send(buffer[:n])
-										if errSend != nil {
-											fmt.Printf("\n  Error sending chunk: %v\n", errSend)
-											return
-										}
-										totalSent += int64(n)
-										fmt.Printf("\r  📤 Sending P2P: %s (%s/%s)",
-											ui.FormatPercentage(totalSent, fileSize),
-											ui.FormatBytes(totalSent),
-											ui.FormatBytes(fileSize),
-										)
-									}
-									if err != nil {
-										break
-									}
-								}
-
-								// Wait for buffer to clear before sending EOF
-								dc.SetBufferedAmountLowThreshold(0)
-								if dc.BufferedAmount() > 0 {
-									<-bufferedAmountLowChan
-								}
-								dc.SendText("EOF")
-
-								elapsed := time.Since(start)
-								sentInSession := totalSent - offset
-								fmt.Printf("\n  ✅ P2P Transfer Complete! Sent %s in %.1fs (avg %s)\n",
-									ui.FormatBytes(sentInSession),
-									elapsed.Seconds(),
-									ui.FormatSpeed(sentInSession, elapsed),
-								)
-							}()
+							fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
+							streamSender.StartStream(mainCtx, dc, filePath, fileName, fileSize, offset,
+								p2p.WithProgress(func(sent, total int64) {
+									fmt.Printf("\r  📤 Sending P2P: %s (%s/%s)",
+										ui.FormatPercentage(sent, total),
+										ui.FormatBytes(sent),
+										ui.FormatBytes(total),
+									)
+								}),
+								p2p.WithComplete(func(sentInSession int64, elapsed time.Duration) {
+									fmt.Printf("\n  ✅ P2P Transfer Complete! Sent %s in %.1fs (avg %s)\n",
+										ui.FormatBytes(sentInSession),
+										elapsed.Seconds(),
+										ui.FormatSpeed(sentInSession, elapsed),
+									)
+								}),
+								p2p.WithError(func(err error) {
+									fmt.Printf("\n  Error during P2P transfer: %v\n", err)
+								}),
+							)
 						}
 					} else {
 						if uploadFile != nil {
@@ -762,6 +706,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	go func() {
 		<-quit
 		fmt.Println("\n  beam: shutting down…")
+		streamSender.Stop()
 		mainCancel()
 		broadcaster.Stop()
 		if session != nil {
