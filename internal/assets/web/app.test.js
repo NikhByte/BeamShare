@@ -118,7 +118,7 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,mock';
     }
 
-    const QRious = require('qrious');
+    const QRious = require('./qrious.min.js');
     global.QRious = QRious;
     window.QRious = QRious;
 
@@ -139,23 +139,8 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.atob = global.atob;
     window.btoa = global.btoa;
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
-    const QRious = require('./qrious.min.js');
-    window.QRious = QRious;
-    global.QRious = QRious;
-    if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
-      window.HTMLCanvasElement.prototype.getContext = () => ({
-        fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
-        createImageData: () => [], setTransform: () => {}, drawImage: () => {}, save: () => {}, fillText: () => {},
-        restore: () => {}, beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, closePath: () => {}, stroke: () => {},
-        translate: () => {}, scale: () => {}, rotate: () => {}, arc: () => {}, fill: () => {}, measureText: () => ({ width: 0 }),
-        transform: () => {}, rect: () => {}, clip: () => {}
-      });
-    }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -1155,6 +1140,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     global.URLSearchParams = window.URLSearchParams;
     global.TextDecoder = require('util').TextDecoder;
     global.FileReader = window.FileReader;
+    global.localStorage = window.localStorage;
 
     window.__BEAM_TEST_ENV__ = true;
 

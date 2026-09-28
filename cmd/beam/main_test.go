@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/beamshare/beam/internal/relay"
 	"github.com/beamshare/beam/internal/server"
 	"github.com/beamshare/beam/internal/signaling"
 	"github.com/pion/webrtc/v3"
@@ -430,5 +434,77 @@ func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing
 	expectedLen := len(data) - 1024
 	if receivedBytesAfterMeta != expectedLen {
 		t.Fatalf("expected received bytes after meta %d, got %d", expectedLen, receivedBytesAfterMeta)
+	}
+}
+
+func TestDownloadFile_InvalidKey(t *testing.T) {
+	// Test bad base64 key
+	err := downloadFile("http://example.com/#k=!!!invalid_base64!!!")
+	if err == nil {
+		t.Fatal("expected error for invalid base64 key fragment, got nil")
+	}
+
+	// Test non-32-byte key (16 bytes = 128 bit)
+	shortKey := make([]byte, 16)
+	shortKeyB64 := base64.URLEncoding.EncodeToString(shortKey)
+	err = downloadFile("http://example.com/#k=" + shortKeyB64)
+	if err == nil {
+		t.Fatal("expected error for 16-byte key fragment, got nil")
+	}
+
+	// Test non-32-byte key (64 bytes)
+	longKey := make([]byte, 64)
+	longKeyB64 := base64.URLEncoding.EncodeToString(longKey)
+	err = downloadFile("http://example.com/#k=" + longKeyB64)
+	if err == nil {
+		t.Fatal("expected error for 64-byte key fragment, got nil")
+	}
+}
+
+func TestDownloadFile_Encrypted(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+	keyStr := base64.URLEncoding.EncodeToString(key)
+
+	plainData := []byte("Encrypted Payload Data 1234567890")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+		meta := server.FileMeta{
+			Name: "test_encrypted.txt",
+			Size: int64(len(plainData)),
+		}
+		json.NewEncoder(w).Encode(meta)
+	})
+	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+		encReader, err := relay.NewEncryptingReader(bytes.NewReader(plainData), key)
+		if err != nil {
+			t.Fatalf("NewEncryptingReader failed: %v", err)
+		}
+		encData, err := io.ReadAll(encReader)
+		if err != nil {
+			t.Fatalf("ReadAll encReader failed: %v", err)
+		}
+		w.Write(encData)
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	defer os.Remove("received_test_encrypted.txt")
+
+	downloadURL := "http://example.com/?backend=" + ts.URL + "#k=" + keyStr
+	err := downloadFile(downloadURL)
+	if err != nil {
+		t.Fatalf("downloadFile encrypted failed: %v", err)
+	}
+
+	downloaded, err := os.ReadFile("received_test_encrypted.txt")
+	if err != nil {
+		t.Fatalf("failed to read downloaded file: %v", err)
+	}
+
+	if !bytes.Equal(downloaded, plainData) {
+		t.Fatalf("expected decrypted data '%s', got '%s'", string(plainData), string(downloaded))
 	}
 }

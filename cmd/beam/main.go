@@ -997,6 +997,41 @@ func printHelp() {
 
 func dimStr(s string) string   { return "\033[2m" + s + "\033[0m" }
 func greenStr(s string) string { return "\033[32m" + s + "\033[0m" }
+
+func extractKeyFromURL(u *url.URL) string {
+	if k := u.Query().Get("k"); k != "" {
+		return k
+	}
+	frag := u.Fragment
+	if frag == "" {
+		return ""
+	}
+	if strings.HasPrefix(frag, "k=") {
+		return frag[2:]
+	}
+	if vals, err := url.ParseQuery(frag); err == nil {
+		if k := vals.Get("k"); k != "" {
+			return k
+		}
+	}
+	return ""
+}
+
+func decodeBase64Key(k string) ([]byte, error) {
+	if b, err := base64.URLEncoding.DecodeString(k); err == nil {
+		return b, nil
+	}
+	if b, err := base64.RawURLEncoding.DecodeString(k); err == nil {
+		return b, nil
+	}
+	if b, err := base64.StdEncoding.DecodeString(k); err == nil {
+		return b, nil
+	}
+	if b, err := base64.RawStdEncoding.DecodeString(k); err == nil {
+		return b, nil
+	}
+	return nil, fmt.Errorf("failed to decode base64 key")
+}
 func runReceive(code string) {
 	err := downloadFile(code)
 	if err != nil {
@@ -1021,9 +1056,18 @@ func downloadFile(code string) error {
 	backend = strings.TrimRight(backend, "/")
 
 	s := u.Query().Get("s")
-	k := u.Fragment
-	if strings.HasPrefix(k, "k=") {
-		k = k[2:]
+	k := extractKeyFromURL(u)
+
+	var keyBytes []byte
+	if k != "" {
+		var err error
+		keyBytes, err = decodeBase64Key(k)
+		if err != nil {
+			return fmt.Errorf("invalid key: %w", err)
+		}
+		if len(keyBytes) != 32 {
+			return fmt.Errorf("invalid key length: key must be exactly 32 bytes, got %d bytes", len(keyBytes))
+		}
 	}
 
 	metaURL := backend + "/api/meta"
@@ -1064,23 +1108,7 @@ func downloadFile(code string) error {
 	}
 
 	var r io.Reader = respDL.Body
-	if k != "" {
-		keyBytes, err := base64.URLEncoding.DecodeString(k)
-		if err != nil {
-			keyBytes, err = base64.StdEncoding.DecodeString(k)
-		}
-		if err != nil {
-			keyBytes, err = base64.RawURLEncoding.DecodeString(k)
-		}
-		if err != nil {
-			keyBytes, err = base64.RawStdEncoding.DecodeString(k)
-		}
-		if err != nil {
-			return fmt.Errorf("invalid decryption key encoding: %w", err)
-		}
-		if len(keyBytes) != 32 {
-			return fmt.Errorf("invalid decryption key length: expected 32 bytes, got %d", len(keyBytes))
-		}
+	if len(keyBytes) == 32 {
 		r, err = relay.NewDecryptingReader(respDL.Body, keyBytes)
 		if err != nil {
 			return fmt.Errorf("failed to initialize decryptor: %w", err)
