@@ -10,8 +10,8 @@ import (
 	"io"
 )
 
-// MaxFrameSize is the maximum allowable payload size for an encrypted frame (1MB).
-const MaxFrameSize = 1 * 1024 * 1024
+// MaxFrameSize is the maximum allowable payload size for an encrypted frame (65,564 bytes).
+const MaxFrameSize = 65564
 
 var (
 	// ErrFrameTooLarge is returned when a frame length header exceeds MaxFrameSize.
@@ -128,16 +128,12 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 		return 0, ErrFrameTooLarge
 	}
 
-	if length > MaxFrameSize {
-		return 0, ErrFrameTooLarge
-	}
-
 	nonceSize := dr.gcm.NonceSize()
 	if int(length) < nonceSize {
 		return 0, io.ErrUnexpectedEOF
 	}
 
-	frameData := make([]byte, length)
+	frameData := dr.frameBuf[:length]
 	if _, err := io.ReadFull(dr.r, frameData); err != nil {
 		return 0, err
 	}
