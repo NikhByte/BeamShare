@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -51,7 +52,7 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 	srv, err := New("", 10*1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
 	t.Run("Upload large file", func(t *testing.T) {
@@ -69,7 +70,7 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 			require.NoError(t, err)
 		}()
 
-		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload", bodyReader)
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+srv.SessionToken(), bodyReader)
 		require.NoError(t, err)
 		req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -94,7 +95,7 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 		srv.UpdateSharedFile(outName, "large_test.bin", int64(fileSize))
 
 		t.Run("Download large file", func(t *testing.T) {
-			resp, err := http.Get(ts.URL + "/api/download")
+			resp, err := http.Get(ts.URL + "/api/download?s=" + srv.SessionToken())
 			require.NoError(t, err)
 			defer resp.Body.Close()
 
@@ -113,7 +114,7 @@ func TestUploadInterruptedFile(t *testing.T) {
 	srv, err := New("", 10*1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
 	bodyReader, bodyWriter := io.Pipe()
@@ -130,7 +131,7 @@ func TestUploadInterruptedFile(t *testing.T) {
 		_ = bodyWriter.CloseWithError(fmt.Errorf("connection reset by peer"))
 	}()
 
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload", bodyReader)
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+srv.SessionToken(), bodyReader)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -186,7 +187,7 @@ func TestUploadPathTraversalAndPermissions(t *testing.T) {
 	srv, err := New("", 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
 	traversalFilenames := []struct {
@@ -217,7 +218,7 @@ func TestUploadPathTraversalAndPermissions(t *testing.T) {
 				require.NoError(t, err)
 			}()
 
-			req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload", bodyReader)
+			req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+srv.SessionToken(), bodyReader)
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -242,13 +243,13 @@ func TestLiveStream_ClientCleanupOnUpdateSharedFile(t *testing.T) {
 	srv, err := New("", 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/live/stream", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/live/stream?s="+srv.SessionToken(), nil)
 	require.NoError(t, err)
 
 	resp, err := http.DefaultClient.Do(req)
@@ -296,12 +297,12 @@ func TestDownload_HTTPRangeRequests(t *testing.T) {
 	srv, err := New(filePath, 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
 	// 1. Full Download without Range header
 	t.Run("Full Download", func(t *testing.T) {
-		resp, err := http.Get(ts.URL + "/api/download")
+		resp, err := http.Get(ts.URL + "/api/download?s=" + srv.SessionToken())
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
@@ -316,7 +317,7 @@ func TestDownload_HTTPRangeRequests(t *testing.T) {
 
 	// 2. Initial Range: bytes=0-9
 	t.Run("Initial Range bytes=0-9", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download", nil)
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+srv.SessionToken(), nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=0-9")
 
@@ -335,7 +336,7 @@ func TestDownload_HTTPRangeRequests(t *testing.T) {
 
 	// 3. Open-ended Resumption Range: bytes=20-
 	t.Run("Resume Range bytes=20-", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download", nil)
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+srv.SessionToken(), nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=20-")
 
@@ -355,7 +356,7 @@ func TestDownload_HTTPRangeRequests(t *testing.T) {
 
 	// 4. Suffix Range: bytes=-10 (last 10 bytes)
 	t.Run("Suffix Range bytes=-10", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download", nil)
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+srv.SessionToken(), nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=-10")
 
@@ -374,7 +375,7 @@ func TestDownload_HTTPRangeRequests(t *testing.T) {
 
 	// 5. Unsatisfiable Range: bytes=5000-6000
 	t.Run("Unsatisfiable Range", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download", nil)
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?s="+srv.SessionToken(), nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=5000-6000")
 
@@ -388,7 +389,7 @@ func TestDownload_HTTPRangeRequests(t *testing.T) {
 
 	// 6. Preflight CORS OPTIONS
 	t.Run("CORS Preflight", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodOptions, ts.URL+"/api/download", nil)
+		req, err := http.NewRequest(http.MethodOptions, ts.URL+"/api/download?s="+srv.SessionToken(), nil)
 		require.NoError(t, err)
 
 		resp, err := http.DefaultClient.Do(req)
@@ -427,7 +428,7 @@ func TestPNAHeaders(t *testing.T) {
 	srv, err := New("", 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
 	endpoints := []struct {
@@ -443,7 +444,11 @@ func TestPNAHeaders(t *testing.T) {
 
 	for _, ep := range endpoints {
 		t.Run(fmt.Sprintf("OPTIONS %s", ep.path), func(t *testing.T) {
-			req, err := http.NewRequest(http.MethodOptions, ts.URL+ep.path, nil)
+			sep := "?"
+			if strings.Contains(ep.path, "?") {
+				sep = "&"
+			}
+			req, err := http.NewRequest(http.MethodOptions, ts.URL+ep.path+sep+"s="+srv.SessionToken(), nil)
 			require.NoError(t, err)
 
 			resp, err := http.DefaultClient.Do(req)
@@ -455,16 +460,21 @@ func TestPNAHeaders(t *testing.T) {
 
 		t.Run(fmt.Sprintf("%s %s", ep.method, ep.path), func(t *testing.T) {
 			var req *http.Request
+			sep := "?"
+			if strings.Contains(ep.path, "?") {
+				sep = "&"
+			}
+			authedPath := ep.path + sep + "s=" + srv.SessionToken()
 			if ep.method == http.MethodPost {
 				// Upload requires multipart form data, so we'll construct a basic one just to get headers back
 				var b bytes.Buffer
 				writer := multipart.NewWriter(&b)
 				writer.Close() // empty form
-				req, err = http.NewRequest(http.MethodPost, ts.URL+ep.path, &b)
+				req, err = http.NewRequest(http.MethodPost, ts.URL+authedPath, &b)
 				require.NoError(t, err)
 				req.Header.Set("Content-Type", writer.FormDataContentType())
 			} else {
-				req, err = http.NewRequest(ep.method, ts.URL+ep.path, nil)
+				req, err = http.NewRequest(ep.method, ts.URL+authedPath, nil)
 				require.NoError(t, err)
 			}
 
@@ -481,7 +491,7 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 	srv, err := New("", 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
 	const numSubscribers = 30
@@ -498,7 +508,7 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 		wg.Add(1)
 		go func(subIdx int) {
 			defer wg.Done()
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/live/stream", nil)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/live/stream?s="+srv.SessionToken(), nil)
 			if err != nil {
 				return
 			}
@@ -657,7 +667,7 @@ func TestConcurrentMetaDownloadUpdateSharedFile(t *testing.T) {
 	srv, err := New(filePath1, 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
 	const iterations = 100
@@ -683,7 +693,7 @@ func TestConcurrentMetaDownloadUpdateSharedFile(t *testing.T) {
 		defer wg.Done()
 		client := &http.Client{Timeout: 2 * time.Second}
 		for i := 0; i < iterations; i++ {
-			resp, err := client.Get(ts.URL + "/api/meta")
+			resp, err := client.Get(ts.URL + "/api/meta?s=" + srv.SessionToken())
 			if err == nil {
 				assert.Equal(t, http.StatusOK, resp.StatusCode)
 				var meta FileMeta
@@ -702,7 +712,7 @@ func TestConcurrentMetaDownloadUpdateSharedFile(t *testing.T) {
 		defer wg.Done()
 		client := &http.Client{Timeout: 2 * time.Second}
 		for i := 0; i < iterations; i++ {
-			resp, err := client.Get(ts.URL + "/api/download")
+			resp, err := client.Get(ts.URL + "/api/download?s=" + srv.SessionToken())
 			if err == nil {
 				assert.Equal(t, http.StatusOK, resp.StatusCode)
 				_, _ = io.Copy(io.Discard, resp.Body)
@@ -724,7 +734,7 @@ func TestConcurrentMetaAndDownloadDuringUpload(t *testing.T) {
 	srv, err := New(filePath, 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
 	stop := make(chan struct{})
@@ -760,7 +770,7 @@ func TestConcurrentMetaAndDownloadDuringUpload(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				resp, err := client.Get(ts.URL + "/api/meta")
+				resp, err := client.Get(ts.URL + "/api/meta?s=" + srv.SessionToken())
 				if err == nil {
 					_, _ = io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
@@ -779,7 +789,7 @@ func TestConcurrentMetaAndDownloadDuringUpload(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				resp, err := client.Get(ts.URL + "/api/download")
+				resp, err := client.Get(ts.URL + "/api/download?s=" + srv.SessionToken())
 				if err == nil {
 					_, _ = io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
@@ -791,4 +801,101 @@ func TestConcurrentMetaAndDownloadDuringUpload(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+}
+
+func TestSessionTokenAuthentication(t *testing.T) {
+	srv, err := New("", 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	endpoints := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"Meta", http.MethodGet, "/api/meta"},
+		{"Download", http.MethodGet, "/api/download"},
+		{"Upload", http.MethodPost, "/api/upload"},
+		{"LiveStream", http.MethodGet, "/api/live/stream"},
+		{"QR", http.MethodGet, "/api/qr?url=http://example.com"},
+	}
+
+	for _, ep := range endpoints {
+		t.Run("Unauthenticated_"+ep.name, func(t *testing.T) {
+			req, err := http.NewRequest(ep.method, ts.URL+ep.path, nil)
+			require.NoError(t, err)
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+			assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"))
+			assert.Empty(t, resp.Header.Get("Access-Control-Allow-Private-Network"))
+		})
+
+		t.Run("Unauthenticated_Preflight_"+ep.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodOptions, ts.URL+ep.path, nil)
+			require.NoError(t, err)
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+			assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"))
+			assert.Empty(t, resp.Header.Get("Access-Control-Allow-Private-Network"))
+		})
+
+		t.Run("Authenticated_Query_"+ep.name, func(t *testing.T) {
+			sep := "?"
+			if strings.Contains(ep.path, "?") {
+				sep = "&"
+			}
+			req, err := http.NewRequest(ep.method, ts.URL+ep.path+sep+"s="+srv.SessionToken(), nil)
+			require.NoError(t, err)
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.NotEqual(t, http.StatusUnauthorized, resp.StatusCode)
+			assert.Equal(t, "*", resp.Header.Get("Access-Control-Allow-Origin"))
+			assert.Equal(t, "true", resp.Header.Get("Access-Control-Allow-Private-Network"))
+		})
+
+		t.Run("Authenticated_Header_"+ep.name, func(t *testing.T) {
+			req, err := http.NewRequest(ep.method, ts.URL+ep.path, nil)
+			require.NoError(t, err)
+			req.Header.Set("X-Beam-Token", srv.SessionToken())
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.NotEqual(t, http.StatusUnauthorized, resp.StatusCode)
+			assert.Equal(t, "*", resp.Header.Get("Access-Control-Allow-Origin"))
+			assert.Equal(t, "true", resp.Header.Get("Access-Control-Allow-Private-Network"))
+		})
+
+		t.Run("Authenticated_Preflight_"+ep.name, func(t *testing.T) {
+			sep := "?"
+			if strings.Contains(ep.path, "?") {
+				sep = "&"
+			}
+			req, err := http.NewRequest(http.MethodOptions, ts.URL+ep.path+sep+"s="+srv.SessionToken(), nil)
+			require.NoError(t, err)
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+			assert.Equal(t, "*", resp.Header.Get("Access-Control-Allow-Origin"))
+			assert.Equal(t, "true", resp.Header.Get("Access-Control-Allow-Private-Network"))
+		})
+	}
+>>>>>>> 0cbc36a (feat(server): enforce 128-bit session token authentication on API endpoints)
 }

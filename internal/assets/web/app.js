@@ -2606,12 +2606,30 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      let testMetaUrl = localURL;
+      try {
+        const urlObj = new URL(testMetaUrl);
+        urlObj.pathname = '/api/meta';
+        if (sessionID && !urlObj.searchParams.has('s')) {
+          urlObj.searchParams.set('s', sessionID);
+        }
+        testMetaUrl = urlObj.toString();
+      } catch (e) {}
+
+      const res = await fetch(testMetaUrl, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
         console.log("Local connection successful, using as backend...");
-        window.GAZE_BACKEND_URL = localURL;
+        try {
+          const cleanBackend = new URL(localURL);
+          cleanBackend.pathname = '';
+          cleanBackend.search = '';
+          cleanBackend.hash = '';
+          window.GAZE_BACKEND_URL = cleanBackend.toString().replace(/\/$/, '');
+        } catch (e) {
+          window.GAZE_BACKEND_URL = localURL;
+        }
         // Do not return, continue to bootstrap flow using localURL as backend
       }
     } catch (e) {
