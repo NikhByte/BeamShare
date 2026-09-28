@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	// ChunkSize is set to 64KB for optimal WebRTC streaming throughput.
-	ChunkSize = 64 * 1024
+	// ChunkSize is set to 32KB for optimal WebRTC streaming throughput.
+	ChunkSize = 32 * 1024
 
 	// HighWaterMark is the buffer threshold (1MB) above which backpressure pauses reads.
 	HighWaterMark = 1024 * 1024
@@ -78,6 +78,7 @@ func WithPollInterval(d time.Duration) StreamOption {
 type StreamSender struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // NewStreamSender creates a new thread-safe StreamSender instance.
@@ -112,11 +113,20 @@ func (s *StreamSender) StartStream(parentCtx context.Context, dc DataChannel, fi
 	if s.cancel != nil {
 		s.cancel()
 	}
+	if s.done != nil {
+		done := s.done
+		s.mu.Unlock()
+		<-done
+		s.mu.Lock()
+	}
 	ctx, cancel := context.WithCancel(parentCtx)
 	s.cancel = cancel
+	s.done = make(chan struct{})
+	currentDone := s.done
 	s.mu.Unlock()
 
 	go func() {
+		defer close(currentDone)
 		defer cancel()
 
 		if dc == nil {
@@ -176,6 +186,12 @@ func (s *StreamSender) StartStream(parentCtx context.Context, dc DataChannel, fi
 
 			n, readErr := file.Read(readBuf)
 			if n > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
 				// Per-chunk buffer isolation: allocate independent chunk slice for every read
 				chunk := make([]byte, n)
 				copy(chunk, readBuf[:n])

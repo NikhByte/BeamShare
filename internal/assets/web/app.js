@@ -4173,9 +4173,12 @@ let senderEncryptionKey = null;
 function handleSenderFileSelect(file) {
   if (!file) return;
   senderFile = file;
-  document.getElementById('sender-file-name').textContent = file.name;
-  document.getElementById('sender-file-size').textContent = formatBytes(file.size);
-  document.getElementById('sender-file-icon-wrap').innerHTML = mimeIcon(file.type);
+  const elName = document.getElementById('sender-file-name');
+  if (elName) elName.textContent = file.name;
+  const elSize = document.getElementById('sender-file-size');
+  if (elSize) elSize.textContent = formatBytes(file.size);
+  const elIcon = document.getElementById('sender-file-icon-wrap');
+  if (elIcon) elIcon.innerHTML = mimeIcon(file.type);
   setState('send-ready');
 }
 
@@ -4208,7 +4211,7 @@ async function startSenderSharing() {
     const offer = await senderPeerConnection.createOffer();
     await senderPeerConnection.setLocalDescription(offer);
 
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) ? 0 : 2000));
 
     setLoadingSub('Publishing SDP offer to relay…');
     const stateRes = await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
@@ -4226,7 +4229,8 @@ async function startSenderSharing() {
     });
     if (!stateRes.ok) throw new Error(`Publish state failed: HTTP ${stateRes.status}`);
 
-    const shareURL = new URL(window.location.origin);
+    const origin = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://localhost';
+    const shareURL = new URL(origin);
     shareURL.searchParams.set('s', senderSessionID);
     shareURL.searchParams.set('backend', backend);
     shareURL.searchParams.set('mode', 'webrtc');
@@ -5058,6 +5062,7 @@ if (typeof module !== 'undefined' && module.exports) {
     renderQRCode,
     handleSenderFileSelect,
     startSenderSharing,
+    init,
     get_senderEncryptionKey: () => senderEncryptionKey,
     OPFSStreamWriter,
     createOPFSWriter,
