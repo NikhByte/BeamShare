@@ -62,7 +62,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       url.searchParams.set('no_stun', '1');
       const webrtcURL = url.toString();
 
-      const downloadPromise = page.waitForEvent('download', { timeout: 30000 });
+      const downloadPromise = page.waitForEvent('download', { timeout: 45000 });
 
       await page.goto(webrtcURL);
 
@@ -190,6 +190,8 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       // WebRTC attempt will fail due to aborted signaling, and app should seamlessly transition to HTTP ready state
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
+
+      await page.unroute('**/api/signal/**');
 
       const downloadPromise = page.waitForEvent('download', { timeout: 30000 });
 

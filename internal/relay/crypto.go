@@ -9,7 +9,7 @@ import (
 	"io"
 )
 
-const MaxFrameSize = 1024 * 1024
+const MaxFrameSize = 65564
 
 var ErrFrameTooLarge = errors.New("frame payload size exceeds maximum threshold")
 
@@ -115,14 +115,14 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 		return 0, ErrFrameTooLarge
 	}
 
+	nonceSize := dr.gcm.NonceSize()
+	if int(length) < nonceSize {
+		return 0, io.ErrUnexpectedEOF
+	}
+
 	frameData := dr.rawBuf[:length]
 	if _, err := io.ReadFull(dr.r, frameData); err != nil {
 		return 0, err
-	}
-
-	nonceSize := dr.gcm.NonceSize()
-	if len(frameData) < nonceSize {
-		return 0, io.ErrUnexpectedEOF
 	}
 
 	nonce := frameData[:nonceSize]
