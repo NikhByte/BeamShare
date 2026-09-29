@@ -218,6 +218,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Private-Network", "true")
@@ -247,6 +248,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	s.downloads++
 	count := s.downloads
 	s.mu.Unlock()
+
 	fmt.Printf("\r  Receiver connected (download #%d)…\n", count)
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
