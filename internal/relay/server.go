@@ -42,6 +42,8 @@ type Session struct {
 	SenderOffset    int64
 
 	expiresAt time.Time
+	ctx       context.Context
+	cancel    context.CancelCauseFunc
 	mu        sync.Mutex
 
 	pendingDownload *DownloadRequest
@@ -310,6 +312,9 @@ func (s *Server) SweepExpiredSessions() {
 	s.mu.Unlock()
 
 	for _, sess := range expired {
+		if sess.cancel != nil {
+			sess.cancel(fmt.Errorf("session expired"))
+		}
 		sess.ClosePipes(fmt.Errorf("session expired"))
 		sess.ClearDownloadQueue()
 	}
@@ -426,12 +431,15 @@ func (s *Server) createSession() *Session {
 		}
 	}
 
+	ctx, cancel := context.WithCancelCause(context.Background())
 	sess := &Session{
 		ID:             id,
 		AnswerReady:    make(chan string, 1),
 		downloadNotify: make(chan struct{}, 1),
 		UploadReq:      make(chan string, 1),
 		expiresAt:      time.Now().Add(s.sessionTTL),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 	s.sessions[id] = sess
 
@@ -573,6 +581,12 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if sess.ctx == nil {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		sess.ctx = ctx
+		sess.cancel = cancel
+	}
+
 	for {
 		select {
 		case answer := <-sess.AnswerReady:
@@ -592,6 +606,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 				respondWithDownload(w, dlReq)
 				return
 			}
+		case <-sess.ctx.Done():
+			http.Error(w, "not found", http.StatusNotFound)
+			return
 		case <-r.Context().Done():
 			return
 		}
@@ -638,6 +655,10 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	defer close(done)
 
 	go func() {
+		var sessDone <-chan struct{}
+		if sess.ctx != nil {
+			sessDone = sess.ctx.Done()
+		}
 		select {
 		case <-done:
 			return
@@ -647,6 +668,13 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 				return
 			default:
 				sess.ClosePipes(fmt.Errorf("sender context cancelled: %w", r.Context().Err()))
+			}
+		case <-sessDone:
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipes(fmt.Errorf("session context cancelled"))
 			}
 		}
 	}()
@@ -967,6 +995,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	defer close(done)
 
 	go func() {
+		var sessDone <-chan struct{}
+		if sess.ctx != nil {
+			sessDone = sess.ctx.Done()
+		}
 		select {
 		case <-done:
 			return
@@ -976,6 +1008,13 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 				return
 			default:
 				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("receiver context cancelled: %w", r.Context().Err()))
+			}
+		case <-sessDone:
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("session context cancelled"))
 			}
 		}
 	}()
@@ -1032,10 +1071,16 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 	if sr.ctx != nil && sr.ctx.Err() != nil {
 		return 0, sr.ctx.Err()
 	}
+	if sr.sess != nil && sr.sess.ctx != nil && sr.sess.ctx.Err() != nil {
+		return 0, sr.sess.ctx.Err()
+	}
 
 	for {
 		if sr.ctx != nil && sr.ctx.Err() != nil {
 			return 0, sr.ctx.Err()
+		}
+		if sr.sess != nil && sr.sess.ctx != nil && sr.sess.ctx.Err() != nil {
+			return 0, sr.sess.ctx.Err()
 		}
 
 		if !sr.initDone {
