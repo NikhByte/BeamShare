@@ -2172,7 +2172,16 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
+    if (typeof QRCode !== 'undefined' && typeof QRCode.toDataURL === 'function') {
+      document.getElementById('send-qr-img').src = QRCode.toDataURL(shareURL.href, { errorCorrectionLevel: 'M', margin: 2 });
+    } else if (typeof qrcode !== 'undefined' && typeof qrcode === 'function') {
+      var qr = qrcode(0, 'M');
+      qr.addData(shareURL.href);
+      qr.make();
+      document.getElementById('send-qr-img').src = qr.createDataURL(4, 2);
+    } else {
+      document.getElementById('send-qr-img').src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180"><text x="10" y="90" fill="#ef4444">QR Error</text></svg>');
+    }
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');

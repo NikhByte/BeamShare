@@ -393,6 +393,9 @@ describe('Gaze Web Sender Test Suite', () => {
     global.RTCPeerConnection = RTCPeerConnection;
     window.__BEAM_TEST_ENV__ = true;
 
+    delete require.cache[require.resolve('./qrcode.min.js')];
+    require('./qrcode.min.js');
+
     delete require.cache[require.resolve('./app.js')];
     app = require('./app.js');
 
@@ -416,6 +419,11 @@ describe('Gaze Web Sender Test Suite', () => {
 
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
+
+    // Verify QR code image source is generated as a client-side Data URL
+    const qrImg = document.getElementById('send-qr-img');
+    assert.equal(qrImg.src.startsWith('data:image/'), true);
+    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
