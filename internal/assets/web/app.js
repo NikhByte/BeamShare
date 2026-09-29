@@ -3763,11 +3763,8 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR SVG data URL locally without external network requests
-    const qrImg = document.getElementById('done-qr-img');
-    if (qrImg) {
-      qrImg.src = generateClientQRCodeDataURL(shareLink);
-    }
+    // Render QR code locally in browser memory without calling external services
+    renderQRElements(shareLink, 'done-qr-canvas', 'done-qr-img');
     
     if (doneShare) doneShare.classList.remove('hidden');
   } else {
@@ -3944,7 +3941,7 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    renderQRElements(shareURL.href, 'send-qr-canvas', 'send-qr-img');
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -4388,6 +4385,9 @@ if (typeof module !== 'undefined' && module.exports) {
     extractKeyFragment,
     parseDecryptionKeyFromHash,
     parseSessionInput,
-    getIceServers
+    getIceServers,
+    qrcodegen,
+    renderQRCode,
+    renderQRElements
   };
 }
