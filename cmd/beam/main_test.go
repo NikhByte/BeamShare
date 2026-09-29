@@ -5,9 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-
 	"reflect"
 	"testing"
+	"time"
+
 	"github.com/beamshare/beam/internal/server"
 )
 
@@ -110,5 +111,58 @@ func TestDownloadFile_Relay(t *testing.T) {
 	err := downloadFile(urlWithSession)
 	if err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
+	}
+}
+
+func TestWaitForBufferLowSafeguard(t *testing.T) {
+	bufferedAmountLowChan := make(chan struct{}, 1)
+	var bufferedAmount uint64 = 2 * 1024 * 1024 // 2MB
+
+	waitForBufferLow := func(targetThreshold uint64) {
+		for bufferedAmount > targetThreshold {
+			select {
+			case <-bufferedAmountLowChan:
+				if bufferedAmount <= targetThreshold {
+					return
+				}
+			case <-time.After(10 * time.Millisecond):
+				if bufferedAmount <= targetThreshold {
+					return
+				}
+			}
+		}
+	}
+
+	// Case 1: Immediately below threshold
+	bufferedAmount = 100
+	start := time.Now()
+	waitForBufferLow(512 * 1024)
+	if time.Since(start) > 50*time.Millisecond {
+		t.Fatalf("expected immediate return when buffer is already low")
+	}
+
+	// Case 2: Signal received on channel
+	bufferedAmount = 2 * 1024 * 1024
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		bufferedAmount = 100
+		bufferedAmountLowChan <- struct{}{}
+	}()
+	start = time.Now()
+	waitForBufferLow(512 * 1024)
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("expected return upon signal")
+	}
+
+	// Case 3: Timeout fallback when event is missed/suppressed
+	bufferedAmount = 2 * 1024 * 1024
+	go func() {
+		time.Sleep(15 * time.Millisecond)
+		bufferedAmount = 100 // Buffer drains but signal was suppressed / missed
+	}()
+	start = time.Now()
+	waitForBufferLow(512 * 1024)
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("expected return via timeout fallback")
 	}
 }

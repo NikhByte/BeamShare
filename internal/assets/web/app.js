@@ -1865,6 +1865,84 @@ async function startWebRTC() {
   }
 }
 
+// ── State-Guarded WebRTC Buffer Low Helper ────────────────────────────────────
+async function waitForBufferLow(dataChannel, targetThreshold = (dataChannel?.bufferedAmountLowThreshold ?? 0), timeoutMs = 2000) {
+  if (!dataChannel) return;
+  if (dataChannel.readyState !== 'open') return;
+  if (dataChannel.bufferedAmount <= targetThreshold) return;
+
+  return new Promise((resolve, reject) => {
+    let timer = null;
+    let pollInterval = null;
+    let doneCalled = false;
+
+    const cleanup = () => {
+      if (doneCalled) return;
+      doneCalled = true;
+      if (timer) clearTimeout(timer);
+      if (pollInterval) clearInterval(pollInterval);
+      try {
+        dataChannel.removeEventListener('bufferedamountlow', onBufferLow);
+        dataChannel.removeEventListener('close', onCloseOrError);
+        dataChannel.removeEventListener('error', onCloseOrError);
+      } catch (e) {}
+    };
+
+    const doneResolve = () => {
+      cleanup();
+      resolve();
+    };
+
+    const doneReject = (err) => {
+      cleanup();
+      reject(err);
+    };
+
+    const onCloseOrError = () => {
+      doneReject(new Error("Data channel is no longer open"));
+    };
+
+    const onBufferLow = () => {
+      if (dataChannel.bufferedAmount <= targetThreshold) {
+        doneResolve();
+      }
+    };
+
+    // 1. Attach listeners
+    dataChannel.addEventListener('bufferedamountlow', onBufferLow);
+    dataChannel.addEventListener('close', onCloseOrError);
+    dataChannel.addEventListener('error', onCloseOrError);
+
+    // 2. Post-registration state-guarded re-check
+    if (dataChannel.bufferedAmount <= targetThreshold) {
+      doneResolve();
+      return;
+    }
+    if (dataChannel.readyState !== 'open') {
+      onCloseOrError();
+      return;
+    }
+
+    // 3. Periodic 50ms polling check
+    pollInterval = setInterval(() => {
+      if (dataChannel.readyState !== 'open') {
+        onCloseOrError();
+        return;
+      }
+      if (dataChannel.bufferedAmount <= targetThreshold) {
+        doneResolve();
+      }
+    }, 50);
+
+    // 4. Fallback timeout to unblock execution
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        doneResolve();
+      }, timeoutMs);
+    }
+  });
+}
+
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
 async function handleUploadFile(e) {
   const file = e.target.files[0];
@@ -1893,9 +1971,7 @@ async function handleUploadFile(e) {
 
       webrtcDataChannel.bufferedAmountLowThreshold = 512 * 1024;
       if (webrtcDataChannel.bufferedAmount > 1024 * 1024) {
-        await new Promise(resolve => {
-          webrtcDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-        });
+        await waitForBufferLow(webrtcDataChannel, 512 * 1024);
       }
       webrtcDataChannel.send(chunkBuffer);
       offset += chunkBuffer.byteLength;
@@ -1907,9 +1983,7 @@ async function handleUploadFile(e) {
 
     webrtcDataChannel.bufferedAmountLowThreshold = 0;
     if (webrtcDataChannel.bufferedAmount > 0) {
-      await new Promise(resolve => {
-        webrtcDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-      });
+      await waitForBufferLow(webrtcDataChannel, 0);
     }
     webrtcDataChannel.send("UPLOAD_EOF");
     showDone(file.name, file.size, "WebRTC P2P Upload");
@@ -2309,9 +2383,7 @@ async function streamFileToDataChannel(initialOffset) {
     while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
       if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
       if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await new Promise(resolve => {
-          senderDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-        });
+        await waitForBufferLow(senderDataChannel, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -2353,9 +2425,7 @@ async function streamFileToDataChannel(initialOffset) {
 
   senderDataChannel.bufferedAmountLowThreshold = 0;
   if (senderDataChannel.bufferedAmount > 0) {
-    await new Promise(resolve => {
-      senderDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-    });
+    await waitForBufferLow(senderDataChannel, 0);
   }
   senderDataChannel.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
@@ -2569,6 +2639,7 @@ if (typeof window !== 'undefined') {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    waitForBufferLow,
     SequentialChunkQueue,
     decompressOffer,
     setState,
