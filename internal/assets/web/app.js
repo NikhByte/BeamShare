@@ -1770,6 +1770,18 @@ async function startWebRTC() {
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
 
+    let decryptionKey = null;
+    let encBuffer = new Uint8Array(0);
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch (e) {
+      console.error("Failed to import decryption key", e);
+      showError("Decryption failed: corrupted payload or invalid key");
+      if (webrtcDataChannel) webrtcDataChannel.close();
+      pc.close();
+      return;
+    }
+
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
       if (dc.readyState === 'open') {
@@ -1812,40 +1824,93 @@ async function startWebRTC() {
         }
       });
 
+      let msgChain = Promise.resolve();
+
       dc.onmessage = (e) => {
         try {
           if (typeof e.data === 'string') {
             if (e.data === "EOF") {
-              chunkQueue.enqueueEOF();
-              chunkQueue.drain().then(async () => {
-                if (diskWritableStream) {
-                  await diskWritableStream.close();
-                  if (useOPFS) {
-                    const file = await diskFileHandle.getFile();
-                    triggerSave(file, currentFile.name);
-                  }
-                } else if (swPipePort) {
-                  swPipePort.postMessage("EOF");
-                } else {
-                  let finalBlob;
-                  if (useIndexedDB) {
-                    finalBlob = await getAllChunksIDB(currentFile.mime);
-                    await clearIDB();
-                  } else {
-                    finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                  }
-                  triggerSave(finalBlob, currentFile.name);
+              msgChain.then(async () => {
+                if (decryptionKey && encBuffer.length > 0) {
+                  showError("Decryption failed: corrupted payload or invalid key");
+                  dc.close();
+                  reject(new Error("Decryption failed: incomplete frame remaining at EOF"));
+                  return;
                 }
-                resolve();
+                chunkQueue.enqueueEOF();
+                try {
+                  await chunkQueue.drain();
+                  if (diskWritableStream) {
+                    await diskWritableStream.close();
+                    if (useOPFS) {
+                      const file = await diskFileHandle.getFile();
+                      triggerSave(file, currentFile.name);
+                    }
+                  } else if (swPipePort) {
+                    swPipePort.postMessage("EOF");
+                  } else {
+                    let finalBlob;
+                    if (useIndexedDB) {
+                      finalBlob = await getAllChunksIDB(currentFile.mime);
+                      await clearIDB();
+                    } else {
+                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
+                    }
+                    triggerSave(finalBlob, currentFile.name);
+                  }
+                  resolve();
+                } catch (drainErr) {
+                  reject(drainErr);
+                }
               }).catch((err) => {
-                // Handled in chunkQueue onError callback
+                reject(err);
               });
             }
             return;
           }
 
-          const chunk = new Uint8Array(e.data);
-          chunkQueue.enqueue(chunk);
+          const rawChunk = new Uint8Array(e.data);
+          if (decryptionKey) {
+            let newBuffer = new Uint8Array(encBuffer.length + rawChunk.length);
+            newBuffer.set(encBuffer, 0);
+            newBuffer.set(rawChunk, encBuffer.length);
+            encBuffer = newBuffer;
+
+            msgChain = msgChain.then(async () => {
+              while (encBuffer.length >= 4) {
+                const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+                const frameLen = dv.getUint32(0, false);
+                if (encBuffer.length >= 4 + frameLen) {
+                  const frame = encBuffer.slice(4, 4 + frameLen);
+                  encBuffer = encBuffer.slice(4 + frameLen);
+
+                  const nonce = new Uint8Array(frame.subarray(0, 12));
+                  const ciphertext = new Uint8Array(frame.subarray(12));
+                  let decrypted;
+                  try {
+                    decrypted = await crypto.subtle.decrypt(
+                      { name: "AES-GCM", iv: nonce },
+                      decryptionKey,
+                      ciphertext
+                    );
+                  } catch (decryptErr) {
+                    showError("Decryption failed: corrupted payload or invalid key");
+                    dc.close();
+                    throw decryptErr;
+                  }
+                  const decValue = new Uint8Array(decrypted);
+                  chunkQueue.enqueue(decValue);
+                } else {
+                  break;
+                }
+              }
+            }).catch((err) => {
+              dc.close();
+              reject(err);
+            });
+          } else {
+            chunkQueue.enqueue(rawChunk);
+          }
         } catch (err) {
           showError(`Transfer failed: ${err.message}`);
           dc.close();

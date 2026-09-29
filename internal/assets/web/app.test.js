@@ -69,6 +69,9 @@ describe('Gaze Web Receiver Test Suite', () => {
     global.localStorage = window.localStorage;
 
     // Set up global environment for app.js
+    const { webcrypto } = require('node:crypto');
+    window.crypto = webcrypto;
+    global.crypto = webcrypto;
     global.window = window;
     global.document = document;
     global.navigator = window.navigator;
@@ -340,6 +343,265 @@ describe('Gaze Web Receiver Test Suite', () => {
     await queue.drain();
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
+  });
+
+  test('WebRTC Receiver DataChannel AES-GCM Decryption and Framing Accumulator', async () => {
+    // Generate 32-byte key
+    const rawKey = new Uint8Array(32).fill(7);
+    const b64Key = Buffer.from(rawKey).toString('base64url');
+    window.location.hash = `#k=${b64Key}`;
+
+    const keyForEncrypt = await crypto.subtle.importKey(
+      "raw", rawKey, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]
+    );
+
+    const importedKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+    assert.notEqual(importedKey, null);
+
+    // Build two encrypted frames
+    const encoder = new TextEncoder();
+    const plain1 = encoder.encode("Hello WebRTC Chunk 1!");
+    const plain2 = encoder.encode("Hello WebRTC Chunk 2!");
+
+    const buildFrame = async (plain) => {
+      const nonce = new Uint8Array(12).fill(2);
+      const ciphertext = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: nonce },
+        keyForEncrypt,
+        plain
+      );
+      const frameLen = 12 + ciphertext.byteLength;
+      const frame = new Uint8Array(4 + frameLen);
+      const dv = new DataView(frame.buffer);
+      dv.setUint32(0, frameLen, false);
+      frame.set(nonce, 4);
+      frame.set(new Uint8Array(ciphertext), 16);
+      return frame;
+    };
+
+    const frame1 = await buildFrame(plain1);
+    const frame2 = await buildFrame(plain2);
+
+    // Concatenate frame1 and frame2
+    const combined = new Uint8Array(frame1.length + frame2.length);
+    combined.set(frame1, 0);
+    combined.set(frame2, frame1.length);
+
+    // Fragment combined into 3 arbitrary slices to test framing accumulator
+    const slice1 = combined.slice(0, 7);
+    const slice2 = combined.slice(7, 35);
+    const slice3 = combined.slice(35);
+
+    const receivedPlaintext = [];
+    const mockDC = {
+      readyState: 'open',
+      send: () => {},
+      close: () => {}
+    };
+
+    const decryptionKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+    let encBuffer = new Uint8Array(0);
+
+    const chunkQueue = new app.SequentialChunkQueue({
+      highWatermark: 1024,
+      lowWatermark: 256,
+      dataChannel: mockDC,
+      writeHandler: async (chunk) => {
+        receivedPlaintext.push(...chunk);
+      }
+    });
+
+    let msgChain = Promise.resolve();
+
+    const onmessage = (e) => {
+      if (typeof e.data === 'string') {
+        if (e.data === 'EOF') {
+          return msgChain.then(async () => {
+            if (decryptionKey && encBuffer.length > 0) {
+              mockDC.close();
+              throw new Error("Decryption failed: corrupted payload or invalid key");
+            }
+            chunkQueue.enqueueEOF();
+            await chunkQueue.drain();
+          });
+        }
+        return;
+      }
+
+      const rawChunk = new Uint8Array(e.data);
+      if (decryptionKey) {
+        let newBuffer = new Uint8Array(encBuffer.length + rawChunk.length);
+        newBuffer.set(encBuffer, 0);
+        newBuffer.set(rawChunk, encBuffer.length);
+        encBuffer = newBuffer;
+
+        msgChain = msgChain.then(async () => {
+          while (encBuffer.length >= 4) {
+            const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+            const frameLen = dv.getUint32(0, false);
+            if (encBuffer.length >= 4 + frameLen) {
+              const frame = encBuffer.slice(4, 4 + frameLen);
+              encBuffer = encBuffer.slice(4 + frameLen);
+
+              const nonce = new Uint8Array(frame.subarray(0, 12));
+              const ciphertext = new Uint8Array(frame.subarray(12));
+              let decrypted;
+              try {
+                decrypted = await crypto.subtle.decrypt(
+                  { name: "AES-GCM", iv: nonce },
+                  decryptionKey,
+                  ciphertext
+                );
+              } catch (decryptErr) {
+                mockDC.close();
+                throw decryptErr;
+              }
+              chunkQueue.enqueue(new Uint8Array(decrypted));
+            } else {
+              break;
+            }
+          }
+        });
+      } else {
+        chunkQueue.enqueue(rawChunk);
+      }
+    };
+
+    onmessage({ data: slice1.buffer });
+    onmessage({ data: slice2.buffer });
+    onmessage({ data: slice3.buffer });
+
+    await onmessage({ data: 'EOF' });
+
+    const resultText = new TextDecoder().decode(new Uint8Array(receivedPlaintext));
+    assert.equal(resultText, "Hello WebRTC Chunk 1!Hello WebRTC Chunk 2!");
+  });
+
+  test('WebRTC Receiver DataChannel Corrupted Payload Error Handling', async () => {
+    const rawKey = new Uint8Array(32).fill(9);
+    const b64Key = Buffer.from(rawKey).toString('base64url');
+    window.location.hash = `#k=${b64Key}`;
+
+    const decryptionKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+    let dcClosed = false;
+    let errorMessage = "";
+
+    const mockDC = {
+      readyState: 'open',
+      send: () => {},
+      close: () => { dcClosed = true; }
+    };
+
+    let encBuffer = new Uint8Array(0);
+    const chunkQueue = new app.SequentialChunkQueue({
+      dataChannel: mockDC,
+      writeHandler: async () => {}
+    });
+
+    let msgChain = Promise.resolve();
+
+    const onmessage = (e) => {
+      const rawChunk = new Uint8Array(e.data);
+      let newBuffer = new Uint8Array(encBuffer.length + rawChunk.length);
+      newBuffer.set(encBuffer, 0);
+      newBuffer.set(rawChunk, encBuffer.length);
+      encBuffer = newBuffer;
+
+      msgChain = msgChain.then(async () => {
+        while (encBuffer.length >= 4) {
+          const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+          const frameLen = dv.getUint32(0, false);
+          if (encBuffer.length >= 4 + frameLen) {
+            const frame = encBuffer.slice(4, 4 + frameLen);
+            encBuffer = encBuffer.slice(4 + frameLen);
+
+            const nonce = new Uint8Array(frame.subarray(0, 12));
+            const ciphertext = new Uint8Array(frame.subarray(12));
+            try {
+              await crypto.subtle.decrypt(
+                { name: "AES-GCM", iv: nonce },
+                decryptionKey,
+                ciphertext
+              );
+            } catch (decryptErr) {
+              errorMessage = "Decryption failed: corrupted payload or invalid key";
+              mockDC.close();
+              throw decryptErr;
+            }
+          } else {
+            break;
+          }
+        }
+      });
+    };
+
+    // Send frame header for 20 bytes payload, but fill payload with garbage
+    const corruptFrame = new Uint8Array(4 + 20);
+    const dv = new DataView(corruptFrame.buffer);
+    dv.setUint32(0, 20, false);
+    corruptFrame.fill(0xff, 4);
+
+    onmessage({ data: corruptFrame.buffer });
+
+    await assert.rejects(async () => await msgChain);
+    assert.equal(dcClosed, true);
+    assert.equal(errorMessage, "Decryption failed: corrupted payload or invalid key");
+  });
+
+  test('WebRTC Receiver DataChannel Incomplete Frame Remaining at EOF Error', async () => {
+    const rawKey = new Uint8Array(32).fill(5);
+    const b64Key = Buffer.from(rawKey).toString('base64url');
+    window.location.hash = `#k=${b64Key}`;
+
+    const decryptionKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+    let dcClosed = false;
+
+    const mockDC = {
+      readyState: 'open',
+      send: () => {},
+      close: () => { dcClosed = true; }
+    };
+
+    let encBuffer = new Uint8Array(0);
+    const chunkQueue = new app.SequentialChunkQueue({
+      dataChannel: mockDC,
+      writeHandler: async () => {}
+    });
+
+    let msgChain = Promise.resolve();
+
+    const onmessage = (e) => {
+      if (typeof e.data === 'string') {
+        if (e.data === 'EOF') {
+          return msgChain.then(async () => {
+            if (decryptionKey && encBuffer.length > 0) {
+              mockDC.close();
+              throw new Error("Decryption failed: corrupted payload or invalid key");
+            }
+            chunkQueue.enqueueEOF();
+            await chunkQueue.drain();
+          });
+        }
+        return;
+      }
+
+      const rawChunk = new Uint8Array(e.data);
+      let newBuffer = new Uint8Array(encBuffer.length + rawChunk.length);
+      newBuffer.set(encBuffer, 0);
+      newBuffer.set(rawChunk, encBuffer.length);
+      encBuffer = newBuffer;
+    };
+
+    // Send 2 bytes (incomplete 4-byte uint32 header)
+    onmessage({ data: new Uint8Array([0x00, 0x01]).buffer });
+
+    // Send EOF
+    await assert.rejects(
+      async () => await onmessage({ data: 'EOF' }),
+      { message: "Decryption failed: corrupted payload or invalid key" }
+    );
+
+    assert.equal(dcClosed, true);
   });
 });
 
