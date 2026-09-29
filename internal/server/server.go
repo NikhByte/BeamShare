@@ -5,6 +5,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,14 +24,15 @@ import (
 
 // Server holds the state for one Beam session.
 type Server struct {
-	filePath  string
-	fileName  string
-	fileSize  int64
-	port      int
-	srv       *http.Server
-	mux       *http.ServeMux
-	mu        sync.Mutex
-	downloads int
+	filePath     string
+	fileName     string
+	fileSize     int64
+	port         int
+	token        string
+	srv          *http.Server
+	mux          *http.ServeMux
+	mu           sync.Mutex
+	downloads    int
 
 	// Phase 5: Live Pipe
 	isLivePipe   bool
@@ -69,6 +73,12 @@ func New(filePath string, bufferSize int) (*Server, error) {
 		return nil, fmt.Errorf("find free port: %w", err)
 	}
 
+	tokenBytes := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, tokenBytes); err != nil {
+		return nil, fmt.Errorf("generate session token: %w", err)
+	}
+	token := hex.EncodeToString(tokenBytes)
+
 	mux := http.NewServeMux()
 
 	s := &Server{
@@ -76,6 +86,7 @@ func New(filePath string, bufferSize int) (*Server, error) {
 		fileName:   fileName,
 		fileSize:   fileSize,
 		port:       port,
+		token:      token,
 		mux:        mux,
 		isLivePipe: isLive,
 	}
@@ -103,13 +114,42 @@ func New(filePath string, bufferSize int) (*Server, error) {
 
 	s.srv = &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
-		Handler:      mux,
+		Handler:      s.Handler(),
 		ReadTimeout:  0, // disable read timeout for large uploads
 		WriteTimeout: 0, // disable write timeout for large downloads
 		IdleTimeout:  120 * time.Second,
 	}
 
 	return s, nil
+}
+
+// Token returns the 256-bit session token generated for this server session.
+func (s *Server) Token() string { return s.token }
+
+// Handler returns the HTTP handler wrapped with session token authentication middleware.
+func (s *Server) Handler() http.Handler {
+	return s.authMiddleware(s.mux)
+}
+
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			var reqToken string
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+				reqToken = strings.TrimSpace(authHeader[7:])
+			}
+			if reqToken == "" {
+				reqToken = r.URL.Query().Get("token")
+			}
+
+			if reqToken == "" || subtle.ConstantTimeCompare([]byte(reqToken), []byte(s.token)) != 1 {
+				http.Error(w, "unauthorized: invalid or missing session token", http.StatusUnauthorized)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // WriteLive broadcasts new input to all connected SSE clients.
@@ -155,9 +195,14 @@ func (s *Server) GetLiveBacklog() []byte {
 // Mux returns the underlying ServeMux.
 func (s *Server) Mux() *http.ServeMux { return s.mux }
 
-// LocalURL returns the http://lan-ip:port URL for this session.
-func (s *Server) LocalURL() string {
+// BaseURL returns the http://lan-ip:port URL without query parameters.
+func (s *Server) BaseURL() string {
 	return fmt.Sprintf("http://%s:%d", GetLocalIP(), s.port)
+}
+
+// LocalURL returns the http://lan-ip:port?token=... URL for this session.
+func (s *Server) LocalURL() string {
+	return fmt.Sprintf("http://%s:%d?token=%s", GetLocalIP(), s.port, s.token)
 }
 
 // Port returns the bound port.
@@ -212,18 +257,13 @@ func (s *Server) fileSnapshot() fileSnapshot {
 
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Private-Network", "true")
-
 	snap := s.fileSnapshot()
-
 	json.NewEncoder(w).Encode(FileMeta{
 		Name: snap.fileName,
 		Size: snap.fileSize,
@@ -233,10 +273,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Range")
-		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Range")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -249,9 +287,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	fmt.Printf("\r  Receiver connected (download #%d)…\n", count)
 
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Private-Network", "true")
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition, Accept-Ranges")
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	if snap.isLivePipe {
@@ -289,9 +324,8 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLiveStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -299,8 +333,6 @@ func (s *Server) handleLiveStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Private-Network", "true")
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -469,10 +501,8 @@ func guessMIME(name string) string {
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -480,9 +510,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Private-Network", "true")
 
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -610,15 +637,12 @@ func (s *Server) UpdateSharedFile(filePath string, fileName string, fileSize int
 
 func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Private-Network", "true")
 	urlParam := r.URL.Query().Get("url")
 	if urlParam == "" {
 		http.Error(w, "missing url parameter", http.StatusBadRequest)

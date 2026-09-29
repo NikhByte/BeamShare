@@ -853,7 +853,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		} else {
 			qrURL = localURL
 			if session != nil {
-				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				if strings.Contains(qrURL, "?") {
+					qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				} else {
+					qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				}
 				if len(parsedTurnServers) > 0 {
 					qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
 					if parsedTurnUsername != "" {
@@ -973,6 +977,23 @@ func downloadFile(code string) error {
 	if backend == "" {
 		backend = u.Scheme + "://" + u.Host
 	}
+
+	token := u.Query().Get("token")
+	if token == "" {
+		token = u.Query().Get("t")
+	}
+	if token == "" && backend != "" {
+		if bu, err := url.Parse(backend); err == nil {
+			token = bu.Query().Get("token")
+			if token == "" {
+				token = bu.Query().Get("t")
+			}
+		}
+	}
+
+	if backendURL, err := url.Parse(backend); err == nil && backendURL.Query().Has("token") {
+		backend = backendURL.Scheme + "://" + backendURL.Host
+	}
 	backend = strings.TrimRight(backend, "/")
 
 	s := u.Query().Get("s")
@@ -982,12 +1003,27 @@ func downloadFile(code string) error {
 	}
 
 	metaURL := backend + "/api/meta"
+	var metaParams []string
 	if s != "" {
-		metaURL += "?s=" + s
+		metaParams = append(metaParams, "s="+s)
+	}
+	if token != "" {
+		metaParams = append(metaParams, "token="+token)
+	}
+	if len(metaParams) > 0 {
+		metaURL += "?" + strings.Join(metaParams, "&")
+	}
+
+	reqMeta, err := http.NewRequest(http.MethodGet, metaURL, nil)
+	if err != nil {
+		return fmt.Errorf("create meta request: %w", err)
+	}
+	if token != "" {
+		reqMeta.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	fmt.Printf("  %s\n", dimStr("Fetching metadata..."))
-	respMeta, err := http.Get(metaURL)
+	respMeta, err := http.DefaultClient.Do(reqMeta)
 	if err != nil {
 		return fmt.Errorf("failed to fetch metadata: %w", err)
 	}
@@ -1004,12 +1040,27 @@ func downloadFile(code string) error {
 	ui.PrintFileMeta(meta.Name, meta.Size)
 
 	downloadURL := backend + "/api/download"
+	var dlParams []string
 	if s != "" {
-		downloadURL += "?s=" + s
+		dlParams = append(dlParams, "s="+s)
+	}
+	if token != "" {
+		dlParams = append(dlParams, "token="+token)
+	}
+	if len(dlParams) > 0 {
+		downloadURL += "?" + strings.Join(dlParams, "&")
+	}
+
+	reqDL, err := http.NewRequest(http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return fmt.Errorf("create download request: %w", err)
+	}
+	if token != "" {
+		reqDL.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	fmt.Printf("  %s\n", dimStr("Starting download..."))
-	respDL, err := http.Get(downloadURL)
+	respDL, err := http.DefaultClient.Do(reqDL)
 	if err != nil {
 		return fmt.Errorf("failed to start download: %w", err)
 	}
