@@ -435,6 +435,158 @@ func TestServer_SessionExpirationUnblocksBlockedUpload(t *testing.T) {
 	sess.mu.Unlock()
 }
 
+func TestServer_SessionSweeperUnblocksUploads(t *testing.T) {
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+
+	uploadCtx, uploadCancel := context.WithCancel(context.Background())
+	defer uploadCancel()
+
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+
+	go func() {
+		defer pw.Close()
+		defer mw.Close()
+		part, err := mw.CreateFormFile("file", "testfile.txt")
+		if err != nil {
+			return
+		}
+		part.Write([]byte("hello world long content that blocks when pipe fills"))
+		bigBuf := make([]byte, 128*1024)
+		part.Write(bigBuf)
+	}()
+
+	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, pr)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	errChan := make(chan error, 1)
+	go func() {
+		resp, errDo := http.DefaultClient.Do(req)
+		if errDo != nil {
+			errChan <- errDo
+			return
+		}
+		resp.Body.Close()
+		errChan <- nil
+	}()
+
+	assert.Eventually(t, func() bool {
+		return srv.GetSession(sess.ID) == nil
+	}, 2*time.Second, 10*time.Millisecond, "Session should expire and be swept")
+
+	select {
+	case err := <-errChan:
+		_ = err
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload request did not unblock on session sweep")
+	}
+}
+
+func TestServer_ReallocatingUploadPipesClosesPreviousPipes(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+
+	pr1, pw1 := io.Pipe()
+	mw1 := multipart.NewWriter(pw1)
+	go func() {
+		defer pw1.Close()
+		defer mw1.Close()
+		part, err := mw1.CreateFormFile("file", "first.txt")
+		if err != nil {
+			return
+		}
+		part.Write(make([]byte, 128*1024))
+	}()
+	go func() {
+		<-ctx1.Done()
+		pw1.CloseWithError(ctx1.Err())
+	}()
+
+	req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, pr1)
+	req1.Header.Set("Content-Type", mw1.FormDataContentType())
+
+	upload1Done := make(chan struct{})
+	go func() {
+		resp, err := http.DefaultClient.Do(req1)
+		if err == nil {
+			resp.Body.Close()
+		}
+		close(upload1Done)
+	}()
+
+	assert.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil
+	}, 1*time.Second, 10*time.Millisecond)
+
+	sess.mu.Lock()
+	oldPipeR := sess.UploadPipeR
+	sess.mu.Unlock()
+
+	pr2, pw2 := io.Pipe()
+	mw2 := multipart.NewWriter(pw2)
+	go func() {
+		defer pw2.Close()
+		defer mw2.Close()
+		part, err := mw2.CreateFormFile("file", "second.txt")
+		if err != nil {
+			return
+		}
+		part.Write([]byte("second file data"))
+	}()
+
+	req2, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, pr2)
+	req2.Header.Set("Content-Type", mw2.FormDataContentType())
+
+	upload2Done := make(chan struct{})
+	go func() {
+		resp, err := http.DefaultClient.Do(req2)
+		if err == nil {
+			resp.Body.Close()
+		}
+		close(upload2Done)
+	}()
+
+	select {
+	case <-upload1Done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("First upload request did not unblock when second upload arrived")
+	}
+
+	buf := make([]byte, 10)
+	_, readErr := oldPipeR.Read(buf)
+	require.Error(t, readErr)
+
+	respPull, err := http.Get(ts.URL + "/relay/pull?session=" + sess.ID)
+	require.NoError(t, err)
+	pullData, err := io.ReadAll(respPull.Body)
+	respPull.Body.Close()
+	require.NoError(t, err)
+	assert.Equal(t, "second file data", string(pullData))
+
+	select {
+	case <-upload2Done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Second upload request did not finish after pull")
+	}
+}
+
 func TestServer_ReassignUploadPipesClosesPreviousPipes(t *testing.T) {
 	srv := NewServer()
 	defer srv.Stop()
@@ -490,4 +642,148 @@ func TestServer_ReassignUploadPipesClosesPreviousPipes(t *testing.T) {
 
 	_, errWrite := pw1.Write([]byte("data"))
 	assert.Error(t, errWrite, "Previous UploadPipeW should be closed")
+}
+
+func TestServer_UploadContextCancellationClosesPipes(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	uploadCtx, uploadCancel := context.WithCancel(context.Background())
+
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	go func() {
+		defer pw.Close()
+		defer mw.Close()
+		part, err := mw.CreateFormFile("file", "cancel.txt")
+		if err != nil {
+			return
+		}
+		buf := make([]byte, 32*1024)
+		for {
+			select {
+			case <-uploadCtx.Done():
+				return
+			default:
+				_, err := part.Write(buf)
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/upload?s="+sess.ID, pr)
+	req = req.WithContext(uploadCtx)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rr := httptest.NewRecorder()
+
+	uploadDone := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rr, req)
+		close(uploadDone)
+	}()
+
+	assert.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil
+	}, 1*time.Second, 10*time.Millisecond)
+
+	sess.mu.Lock()
+	activePipeR := sess.UploadPipeR
+	sess.mu.Unlock()
+
+	uploadCancel()
+
+	select {
+	case <-uploadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload handler did not exit after context cancellation")
+	}
+
+	buf := make([]byte, 10)
+	_, readErr := activePipeR.Read(buf)
+	require.Error(t, readErr)
+}
+
+func TestServer_PullContextCancellationClosesPipes(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	uploadCtx, uploadCancel := context.WithCancel(context.Background())
+	defer uploadCancel()
+
+	prUpload, pwUpload := io.Pipe()
+	mw := multipart.NewWriter(pwUpload)
+	go func() {
+		defer pwUpload.Close()
+		defer mw.Close()
+		part, err := mw.CreateFormFile("file", "pullcancel.txt")
+		if err != nil {
+			return
+		}
+		buf := make([]byte, 32*1024)
+		for {
+			select {
+			case <-uploadCtx.Done():
+				return
+			default:
+				_, err := part.Write(buf)
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	reqUpload := httptest.NewRequest(http.MethodPost, "/api/upload?s="+sess.ID, prUpload)
+	reqUpload = reqUpload.WithContext(uploadCtx)
+	reqUpload.Header.Set("Content-Type", mw.FormDataContentType())
+	rrUpload := httptest.NewRecorder()
+
+	uploadDone := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rrUpload, reqUpload)
+		close(uploadDone)
+	}()
+
+	assert.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil
+	}, 1*time.Second, 10*time.Millisecond)
+
+	pullCtx, pullCancel := context.WithCancel(context.Background())
+	reqPull := httptest.NewRequest(http.MethodGet, "/relay/pull?session="+sess.ID, nil)
+	reqPull = reqPull.WithContext(pullCtx)
+	rrPull := httptest.NewRecorder()
+
+	pullDone := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rrPull, reqPull)
+		close(pullDone)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	pullCancel()
+
+	select {
+	case <-pullDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Pull handler did not exit on context cancellation")
+	}
+
+	uploadCancel()
+
+	select {
+	case <-uploadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload handler did not exit after pull context cancellation")
+	}
 }
