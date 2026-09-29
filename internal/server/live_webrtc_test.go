@@ -247,7 +247,10 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	require.NoError(t, err)
 
 	// Perform sender chunked transfer with backpressure check
+	var senderWg sync.WaitGroup
+	senderWg.Add(1)
 	go func() {
+		defer senderWg.Done()
 		file, err := os.Open(filePath)
 		if err != nil {
 			return
@@ -284,6 +287,7 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 
 	select {
 	case <-eofReceived:
+		senderWg.Wait()
 		mu.Lock()
 		defer mu.Unlock()
 		assert.Equal(t, fmt.Sprintf("META:p2p_test.bin:%d", fileSize), receivedMeta)
