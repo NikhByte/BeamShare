@@ -3,6 +3,8 @@ package relay
 import (
 	"context"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -259,6 +261,249 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestSession_ClosePipes_ClosesUploadPipesAndSetsNil(t *testing.T) {
+	pr, pw := io.Pipe()
+	sess := &Session{ID: "test-close-pipes"}
+	sess.SetUploadPipes(pr, pw)
+
+	require.NotNil(t, sess.UploadPipeR)
+	require.NotNil(t, sess.UploadPipeW)
+
+	sess.ClosePipes(fmt.Errorf("session expired"))
+
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+
+	_, err := pw.Write([]byte("test"))
+	require.Error(t, err)
+}
+
+func TestSession_SetUploadPipes_ClosesPreviousUploadPipes(t *testing.T) {
+	pr1, pw1 := io.Pipe()
+	pr2, pw2 := io.Pipe()
+	sess := &Session{ID: "test-set-upload-pipes"}
+
+	sess.SetUploadPipes(pr1, pw1)
+	assert.Equal(t, pr1, sess.UploadPipeR)
+	assert.Equal(t, pw1, sess.UploadPipeW)
+
+	sess.SetUploadPipes(pr2, pw2)
+	assert.Equal(t, pr2, sess.UploadPipeR)
+	assert.Equal(t, pw2, sess.UploadPipeW)
+
+	_, err := pw1.Write([]byte("test"))
+	require.Error(t, err)
+}
+
+func TestServer_UploadClientDisconnect_ClosesUploadPipe(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+
+	bodyPr, bodyPw := io.Pipe()
+	writer := multipart.NewWriter(bodyPw)
+
+	go func() {
+		part, err := writer.CreateFormFile("file", "test.bin")
+		if err == nil {
+			buf := make([]byte, 1024)
+			for {
+				if _, writeErr := part.Write(buf); writeErr != nil {
+					break
+				}
+			}
+		}
+		_ = writer.Close()
+		_ = bodyPw.Close()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, bodyPr)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Close = true
+
+	httpClient := newTestHTTPClient()
+	defer httpClient.CloseIdleConnections()
+
+	uploadErrCh := make(chan error, 1)
+	go func() {
+		resp, errDo := httpClient.Do(req)
+		if errDo == nil {
+			resp.Body.Close()
+		}
+		uploadErrCh <- errDo
+	}()
+
+	require.Eventually(t, func() bool {
+		return sess.IsUploadPipeReady()
+	}, 2*time.Second, 10*time.Millisecond)
+
+	cancel()
+	_ = bodyPr.CloseWithError(context.Canceled)
+	ts.CloseClientConnections()
+
+	select {
+	case <-uploadErrCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload did not terminate within 2 seconds of client disconnect")
+	}
+
+	assert.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR == nil && sess.UploadPipeW == nil
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestServer_PullReceiverDisconnect_ClosesUploadPipe(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+
+	pr, pw := io.Pipe()
+	sess.SetUploadPipes(pr, pw)
+
+	pullCtx, pullCancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(pullCtx, http.MethodGet, ts.URL+"/relay/pull?session="+sess.ID, nil)
+	require.NoError(t, err)
+	req.Close = true
+
+	httpClient := newTestHTTPClient()
+	defer httpClient.CloseIdleConnections()
+
+	pullErrCh := make(chan error, 1)
+	go func() {
+		resp, errDo := httpClient.Do(req)
+		if errDo == nil {
+			_, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+		}
+		pullErrCh <- errDo
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	pullCancel()
+
+	select {
+	case <-pullErrCh:
+		elapsed := time.Since(start)
+		assert.Less(t, elapsed, 2*time.Second, "Pull did not terminate within 2 seconds")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Pull timed out on receiver disconnect")
+	}
+
+	assert.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR == nil && sess.UploadPipeW == nil
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestServer_SweepExpiredSessions_UnblocksUploadAndPullGoroutines(t *testing.T) {
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+	sessID := sess.ID
+
+	bodyPr, bodyPw := io.Pipe()
+	writer := multipart.NewWriter(bodyPw)
+
+	uploadCtx, uploadCancel := context.WithCancel(context.Background())
+	defer uploadCancel()
+
+	go func() {
+		defer bodyPw.Close()
+		defer writer.Close()
+		part, err := writer.CreateFormFile("file", "infinite.dat")
+		if err != nil {
+			return
+		}
+		buf := make([]byte, 1024)
+		for {
+			if _, writeErr := part.Write(buf); writeErr != nil {
+				return
+			}
+		}
+	}()
+
+	reqUpload, err := http.NewRequestWithContext(uploadCtx, http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyPr)
+	require.NoError(t, err)
+	reqUpload.Header.Set("Content-Type", writer.FormDataContentType())
+	reqUpload.Close = true
+
+	httpClientUpload := newTestHTTPClient()
+	defer httpClientUpload.CloseIdleConnections()
+
+	uploadErrCh := make(chan error, 1)
+	go func() {
+		resp, errDo := httpClientUpload.Do(reqUpload)
+		if errDo == nil {
+			resp.Body.Close()
+		}
+		uploadErrCh <- errDo
+	}()
+
+	require.Eventually(t, func() bool {
+		return sess.IsUploadPipeReady()
+	}, 2*time.Second, 10*time.Millisecond)
+
+	pullCtx, pullCancel := context.WithCancel(context.Background())
+	defer pullCancel()
+
+	reqPull, err := http.NewRequestWithContext(pullCtx, http.MethodGet, ts.URL+"/relay/pull?session="+sessID, nil)
+	require.NoError(t, err)
+	reqPull.Close = true
+
+	httpClientPull := newTestHTTPClient()
+	defer httpClientPull.CloseIdleConnections()
+
+	pullErrCh := make(chan error, 1)
+	go func() {
+		resp, errDo := httpClientPull.Do(reqPull)
+		if errDo == nil {
+			_, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+		}
+		pullErrCh <- errDo
+	}()
+
+	assert.Eventually(t, func() bool {
+		return srv.GetSession(sessID) == nil
+	}, 2*time.Second, 10*time.Millisecond, "Session did not expire")
+
+	// Cancel client contexts so client test transport unblocks
+	uploadCancel()
+	pullCancel()
+	_ = bodyPr.CloseWithError(context.Canceled)
+
+	select {
+	case <-uploadErrCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload goroutine blocked on session expiration")
+	}
+
+	select {
+	case <-pullErrCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Pull goroutine blocked on session expiration")
+	}
 }
 
 
