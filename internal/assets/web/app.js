@@ -490,6 +490,9 @@ function getBackendURL() {
   if (backend && backend.endsWith('/')) {
     backend = backend.slice(0, -1);
   }
+  if (backend.includes('?')) {
+    backend = backend.split('?')[0];
+  }
   return backend;
 }
 
@@ -497,9 +500,30 @@ function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  let token = params.get('token') || params.get('t');
+  if (!token && params.get('local')) {
+    try {
+      const localUrl = new URL(params.get('local'));
+      token = localUrl.searchParams.get('token') || localUrl.searchParams.get('t');
+    } catch (e) {}
+  }
+  if (!token && params.get('backend')) {
+    try {
+      const backendUrl = new URL(params.get('backend'));
+      token = backendUrl.searchParams.get('token') || backendUrl.searchParams.get('t');
+    } catch (e) {}
+  }
   let fullPath = path;
+  let q = [];
   if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+    q.push('s=' + encodeURIComponent(s));
+  }
+  if (token) {
+    q.push('token=' + encodeURIComponent(token));
+  }
+  if (q.length > 0) {
+    const sep = path.includes('?') ? '&' : '?';
+    fullPath = path + sep + q.join('&');
   }
   if (backend) {
     return backend + fullPath;
@@ -2606,7 +2630,12 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      let localMetaURL = `${localURL}/api/meta`;
+      try {
+        const lu = new URL(localURL);
+        localMetaURL = `${lu.origin}/api/meta${lu.search}`;
+      } catch (e) {}
+      const res = await fetch(localMetaURL, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
