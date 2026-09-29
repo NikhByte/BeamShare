@@ -804,10 +804,7 @@ describe('Gaze Web Sender Test Suite', () => {
     window.__BEAM_TEST_ENV__ = true;
 
     delete require.cache[require.resolve('./qrcode.min.js')];
-    const qrcodeLib2 = require('./qrcode.min.js');
-    global.generateQRCodeSVGDataURL = qrcodeLib2.generateQRCodeSVGDataURL;
-    window.generateQRCodeSVGDataURL = qrcodeLib2.generateQRCodeSVGDataURL;
-    window.qrcode = qrcodeLib2;
+    require('./qrcode.min.js');
 
     delete require.cache[require.resolve('./app.js')];
     app = require('./app.js');
@@ -841,10 +838,9 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
+    // Verify QR code image source is generated as a client-side Data URL
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
+    assert.equal(qrImg.src.startsWith('data:image/'), true);
     assert.equal(qrImg.src.includes('api.qrserver.com'), false);
   });
 
@@ -927,7 +923,6 @@ describe('Gaze Web Sender Test Suite', () => {
     app.renderQRCode(shareURL, div);
     assert.equal(div.innerHTML.includes('<svg'), true);
   });
-
   test('createOPFSWriter uses createWritable when available', async () => {
     let written = [];
     const mockFileHandle = {
