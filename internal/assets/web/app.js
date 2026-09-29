@@ -3331,6 +3331,7 @@ async function startWebRTC() {
                   hasError = true;
                   // Handled in chunkQueue onError callback
                 }
+
               }
               return;
             }
@@ -3528,6 +3529,74 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
         resolve();
       }
     }, pollMs);
+  });
+}
+
+function waitForDataChannelBuffer(dc, maxBuffered = 1024 * 1024, targetThreshold = 512 * 1024) {
+  return new Promise((resolve, reject) => {
+    if (!dc || dc.readyState === 'closed' || dc.readyState === 'closing' || dc.readyState !== 'open') {
+      return reject(new Error("Data channel is closed or closing"));
+    }
+
+    try {
+      dc.bufferedAmountLowThreshold = targetThreshold;
+    } catch (e) {}
+
+    if (dc.bufferedAmount <= targetThreshold) {
+      return resolve();
+    }
+
+    let timer = null;
+    let resolved = false;
+
+    const cleanup = () => {
+      if (resolved) return;
+      resolved = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      try {
+        if (typeof dc.removeEventListener === 'function') {
+          dc.removeEventListener('bufferedamountlow', onLow);
+          dc.removeEventListener('close', onClose);
+          dc.removeEventListener('error', onClose);
+        }
+      } catch (e) {}
+    };
+
+    const onLow = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error("Data channel is closed or closing"));
+    };
+
+    try {
+      dc.addEventListener('bufferedamountlow', onLow);
+      dc.addEventListener('close', onClose);
+      dc.addEventListener('error', onClose);
+    } catch (e) {
+      cleanup();
+      return reject(e);
+    }
+
+    if (dc.bufferedAmount <= targetThreshold) {
+      cleanup();
+      return resolve();
+    }
+
+    timer = setTimeout(() => {
+      cleanup();
+      if (!dc || dc.readyState !== 'open') {
+        reject(new Error("Data channel is closed or closing"));
+      } else {
+        resolve();
+      }
+    }, 250);
   });
 }
 
@@ -4383,7 +4452,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
     while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
       if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
       if (dc.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(dc, 512 * 1024);
+        await waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -4424,7 +4493,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
   if (senderAborted) return;
 
   if (dc.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(dc, 0);
+    await waitForDataChannelBuffer(dc, 0, 0);
   }
   dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";

@@ -518,7 +518,19 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					streamCancel context.CancelFunc
 				)
 
+				removeDC := func() {
+					channelsMu.Lock()
+					defer channelsMu.Unlock()
+					for i, ch := range activeChannels {
+						if ch == dc {
+							activeChannels = append(activeChannels[:i], activeChannels[i+1:]...)
+							break
+						}
+					}
+				}
+
 				dc.OnClose(func() {
+					removeDC()
 					pauseCtrl.Close()
 					streamMu.Lock()
 					if streamCancel != nil {
@@ -526,6 +538,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 						streamCancel = nil
 					}
 					streamMu.Unlock()
+				})
+
+				dc.OnError(func(err error) {
+					removeDC()
 				})
 
 				// Upload state variables for incoming files from receiver
