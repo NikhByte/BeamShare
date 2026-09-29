@@ -145,6 +145,8 @@ func TestWebRTCDuplicateOffsetAndBackpressure(t *testing.T) {
 
 	senderTxReady := make(chan struct{})
 
+	var transferWg sync.WaitGroup
+
 	senderSession.OnOpen = func(dc *webrtc.DataChannel) {
 		var (
 			transferMu     sync.Mutex
@@ -169,7 +171,9 @@ func TestWebRTCDuplicateOffsetAndBackpressure(t *testing.T) {
 					cancelTransfer = cancel
 					transferMu.Unlock()
 
+					transferWg.Add(1)
 					go func(ctx context.Context) {
+						defer transferWg.Done()
 						file, err := os.Open(filePath)
 						if err != nil {
 							return
@@ -272,7 +276,9 @@ func TestWebRTCDuplicateOffsetAndBackpressure(t *testing.T) {
 			defer mu.Unlock()
 			if msg.IsString {
 				str := string(msg.Data)
-				if str == "EOF" {
+				if strings.HasPrefix(str, "META:") {
+					receivedBuf.Reset()
+				} else if str == "EOF" {
 					close(eofReceived)
 				}
 			} else {
@@ -369,6 +375,8 @@ func TestWebRTCDuplicateOffsetAndBackpressure(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for EOF after duplicate OFFSET")
 	}
+
+	transferWg.Wait()
 
 	mu.Lock()
 	receivedBytes := receivedBuf.Bytes()
