@@ -415,3 +415,119 @@ func BenchmarkDecryptingReaderRead(b *testing.B) {
 		}
 	}
 }
+
+func TestMaxFrameSizeOversizedRejection(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	oversizedLengths := []uint32{
+		MaxFrameSize + 1,
+		MaxFrameSize + 1000,
+		10 * 1024 * 1024,      // 10MB
+		100 * 1024 * 1024,     // 100MB
+		4*1024*1024*1024 - 1,  // ~4GB
+	}
+
+	for _, length := range oversizedLengths {
+		buf := new(bytes.Buffer)
+		binary.Write(buf, binary.BigEndian, length)
+
+		decReader, err := NewDecryptingReader(buf, key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		out := make([]byte, 64)
+		_, err = decReader.Read(out)
+		if err != ErrFrameTooLarge {
+			t.Fatalf("expected ErrFrameTooLarge for frame length %d, got %v", length, err)
+		}
+	}
+}
+
+func TestMaxFrameSizeBoundaryConditions(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// 1. MaxFrameSize should pass length check (not return ErrFrameTooLarge)
+	{
+		buf := new(bytes.Buffer)
+		binary.Write(buf, binary.BigEndian, uint32(MaxFrameSize))
+
+		decReader, err := NewDecryptingReader(buf, key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		out := make([]byte, 64)
+		_, err = decReader.Read(out)
+		if err == ErrFrameTooLarge {
+			t.Fatalf("unexpected ErrFrameTooLarge for exact MaxFrameSize %d", MaxFrameSize)
+		}
+		if err != io.ErrUnexpectedEOF && err != io.EOF {
+			t.Fatalf("expected EOF error due to missing body, got %v", err)
+		}
+	}
+
+	// 2. MaxFrameSize + 1 must return ErrFrameTooLarge immediately
+	{
+		buf := new(bytes.Buffer)
+		binary.Write(buf, binary.BigEndian, uint32(MaxFrameSize+1))
+
+		decReader, err := NewDecryptingReader(buf, key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		out := make([]byte, 64)
+		_, err = decReader.Read(out)
+		if err != ErrFrameTooLarge {
+			t.Fatalf("expected ErrFrameTooLarge for length %d, got %v", MaxFrameSize+1, err)
+		}
+	}
+}
+
+type headerOnlyReader struct {
+	header        [4]byte
+	headerRead    bool
+	payloadCalled bool
+}
+
+func (r *headerOnlyReader) Read(p []byte) (int, error) {
+	if !r.headerRead {
+		r.headerRead = true
+		n := copy(p, r.header[:])
+		return n, nil
+	}
+	r.payloadCalled = true
+	return 0, io.EOF
+}
+
+func TestNoPayloadReadOnOversizedFrame(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	r := &headerOnlyReader{}
+	binary.BigEndian.PutUint32(r.header[:], uint32(MaxFrameSize+1000))
+
+	decReader, err := NewDecryptingReader(r, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	out := make([]byte, 64)
+	_, err = decReader.Read(out)
+	if err != ErrFrameTooLarge {
+		t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+	}
+
+	if r.payloadCalled {
+		t.Fatal("expected reader NOT to be read for payload after oversized header check")
+	}
+}
