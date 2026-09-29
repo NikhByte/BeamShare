@@ -10,11 +10,16 @@ import (
 	"io"
 )
 
-// MaxFrameSize is the maximum allowable payload size for an encrypted frame (1MB).
-const MaxFrameSize = 1 * 1024 * 1024
+// MaxFramePayloadSize is the maximum allowable payload size for an encrypted frame (65,564 bytes).
+// EncryptingReader chunks plaintext into 64KB (65,536 bytes) blocks, which with AES-GCM 12-byte nonce
+// and 16-byte tag produces frames of at most 65,564 bytes.
+const MaxFramePayloadSize = 65564
+
+// MaxFrameSize is an alias for MaxFramePayloadSize.
+const MaxFrameSize = MaxFramePayloadSize
 
 var (
-	// ErrFrameTooLarge is returned when a frame length header exceeds MaxFrameSize.
+	// ErrFrameTooLarge is returned when a frame length header exceeds MaxFramePayloadSize.
 	ErrFrameTooLarge = errors.New("frame size exceeds maximum limit")
 	// ErrMaxFrameSizeExceeded is an alias for ErrFrameTooLarge.
 	ErrMaxFrameSizeExceeded = ErrFrameTooLarge
@@ -104,8 +109,8 @@ func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
 	return &DecryptingReader{
 		r:            r,
 		gcm:          gcm,
-		frameBuf:     make([]byte, MaxFrameSize),
-		plaintextBuf: make([]byte, MaxFrameSize),
+		frameBuf:     make([]byte, MaxFramePayloadSize),
+		plaintextBuf: make([]byte, MaxFramePayloadSize),
 	}, nil
 }
 
@@ -124,7 +129,7 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 	}
 	length := binary.BigEndian.Uint32(dr.headerBuf[:])
 
-	if length > MaxFrameSize {
+	if length > MaxFramePayloadSize {
 		return 0, ErrFrameTooLarge
 	}
 
