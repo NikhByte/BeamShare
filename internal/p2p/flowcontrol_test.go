@@ -58,7 +58,6 @@ func TestWaitBufferedAmount_ImmediateUnderMax(t *testing.T) {
 	ctx := context.Background()
 
 	err := p2p.WaitBufferedAmount(ctx, dc, 512*1024, 1024*1024)
-	assert.NoError(t, t.Context().Err())
 	assert.NoError(t, err)
 	assert.Nil(t, dc.callback)
 }
