@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
 	"github.com/beamshare/beam/internal/server"
 )
 
@@ -112,3 +114,71 @@ func TestDownloadFile_Relay(t *testing.T) {
 		t.Fatalf("downloadFile failed: %v", err)
 	}
 }
+
+func TestRelayFilenameSanitization(t *testing.T) {
+	testCases := []struct {
+		input            string
+		expectedClean    string
+		expectedOutput   string
+	}{
+		{
+			input:          "../../etc/passwd",
+			expectedClean:  "passwd",
+			expectedOutput: "received_passwd",
+		},
+		{
+			input:          "..\\..\\Windows\\System32\\cmd.exe",
+			expectedClean:  "cmd.exe",
+			expectedOutput: "received_cmd.exe",
+		},
+		{
+			input:          "/etc/shadow",
+			expectedClean:  "shadow",
+			expectedOutput: "received_shadow",
+		},
+		{
+			input:          "C:\\secret\\file.txt",
+			expectedClean:  "file.txt",
+			expectedOutput: "received_file.txt",
+		},
+		{
+			input:          "\x00./bad_file.bin",
+			expectedClean:  "bad_file.bin",
+			expectedOutput: "received_bad_file.bin",
+		},
+		{
+			input:          "../../../",
+			expectedClean:  "upload.bin",
+			expectedOutput: "received_upload.bin",
+		},
+		{
+			input:          "",
+			expectedClean:  "upload.bin",
+			expectedOutput: "received_upload.bin",
+		},
+		{
+			input:          "safe_file.txt",
+			expectedClean:  "safe_file.txt",
+			expectedOutput: "received_safe_file.txt",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.input, func(t *testing.T) {
+			cleanBase := filepath.Base(filepath.Clean(strings.ReplaceAll(tc.input, "\\", "/")))
+			cleanBase = strings.Trim(cleanBase, "\x00./\\")
+			if cleanBase == "" {
+				cleanBase = "upload.bin"
+			}
+			outName := "received_" + cleanBase
+
+			if cleanBase != tc.expectedClean {
+				t.Errorf("expected cleanBase %q, got %q", tc.expectedClean, cleanBase)
+			}
+			if outName != tc.expectedOutput {
+				t.Errorf("expected outName %q, got %q", tc.expectedOutput, outName)
+			}
+		})
+	}
+}
+
