@@ -827,8 +827,29 @@ async function getSWPipe(fileMeta) {
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
     const reg = await Promise.race([swReady, timeout]);
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
-    if (!sw) return null;
+    if (!reg) return null;
+
+    // A Service Worker can only intercept iframe fetch requests if it is actively controlling the current document.
+    if (!navigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        if (navigator.serviceWorker.controller) { resolve(); return; }
+        const onControllerChange = () => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          resolve();
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+        setTimeout(() => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          resolve();
+        }, 500);
+      });
+    }
+
+    let sw = navigator.serviceWorker.controller;
+    if (!sw) {
+      console.warn("Service worker is registered but not controlling this page yet; bypassing SW pipe.");
+      return null;
+    }
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
     const channel = new MessageChannel();
