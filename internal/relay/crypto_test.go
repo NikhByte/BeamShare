@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 )
@@ -180,5 +181,54 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 
 	if bytes.Equal(nonce1, nonce2) {
 		t.Fatal("consecutive frames reused the same nonce")
+	}
+}
+
+func TestMaxFrameSizeGuard(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		frameLen    uint32
+		expectedErr error
+	}{
+		{
+			name:        "Exceeds MaxFrameSize by 1",
+			frameLen:    MaxFrameSize + 1,
+			expectedErr: ErrFrameTooLarge,
+		},
+		{
+			name:        "Large 1GB frame header",
+			frameLen:    1024 * 1024 * 1024,
+			expectedErr: ErrFrameTooLarge,
+		},
+		{
+			name:        "Max uint32 frame header",
+			frameLen:    ^uint32(0),
+			expectedErr: ErrFrameTooLarge,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			if err := binary.Write(buf, binary.BigEndian, tc.frameLen); err != nil {
+				t.Fatalf("failed to write length header: %v", err)
+			}
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if !errors.Is(err, tc.expectedErr) {
+				t.Fatalf("expected error %v, got %v", tc.expectedErr, err)
+			}
+		})
 	}
 }
