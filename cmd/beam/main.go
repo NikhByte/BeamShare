@@ -853,7 +853,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		} else {
 			qrURL = localURL
 			if session != nil {
-				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				if strings.Contains(qrURL, "?") {
+					qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				} else {
+					qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				}
 				if len(parsedTurnServers) > 0 {
 					qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
 					if parsedTurnUsername != "" {
@@ -862,6 +866,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					if parsedTurnCredential != "" {
 						qrURL += "&turn_credential=" + url.QueryEscape(parsedTurnCredential)
 					}
+				}
 				}
 			}
 		}
