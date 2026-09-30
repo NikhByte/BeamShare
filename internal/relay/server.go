@@ -107,7 +107,10 @@ func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err er
 }
 
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
-	if pr == nil || s.DataPipeR == pr {
+	matched := false
+
+	if pr == nil || (s.DataPipeR != nil && s.DataPipeR == pr) {
+		matched = true
 		if s.DataPipeW != nil {
 			if err != nil {
 				s.DataPipeW.CloseWithError(err)
@@ -124,7 +127,29 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			}
 			s.DataPipeR = nil
 		}
-	} else {
+	}
+
+	if pr == nil || (s.UploadPipeR != nil && s.UploadPipeR == pr) {
+		matched = true
+		if s.UploadPipeW != nil {
+			if err != nil {
+				s.UploadPipeW.CloseWithError(err)
+			} else {
+				s.UploadPipeW.Close()
+			}
+			s.UploadPipeW = nil
+		}
+		if s.UploadPipeR != nil {
+			if err != nil {
+				s.UploadPipeR.CloseWithError(err)
+			} else {
+				s.UploadPipeR.Close()
+			}
+			s.UploadPipeR = nil
+		}
+	}
+
+	if !matched {
 		if pw != nil {
 			if err != nil {
 				pw.CloseWithError(err)
@@ -871,7 +896,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	sess.mu.Lock()
 	if sess.DataPipeR != nil || sess.DataPipeW != nil {
-		sess.closePipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new download request"))
+		if sess.DataPipeR != nil {
+			sess.closePipesIfMatchLocked(sess.DataPipeR, sess.DataPipeW, fmt.Errorf("replaced by new download request"))
+		} else if sess.DataPipeW != nil {
+			sess.DataPipeW.CloseWithError(fmt.Errorf("replaced by new download request"))
+			sess.DataPipeW = nil
+		}
 	}
 	sess.DataPipeR = pr
 	sess.DataPipeW = pw
@@ -1059,10 +1089,40 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		if part.FormName() == "file" {
 			sess.mu.Lock()
+			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
+				if sess.UploadPipeR != nil {
+					sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
+				} else if sess.UploadPipeW != nil {
+					sess.UploadPipeW.CloseWithError(fmt.Errorf("replaced by new upload request"))
+					sess.UploadPipeW = nil
+				}
+			}
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
 			sess.mu.Unlock()
+
+			var uploadErr error
+			defer func() {
+				sess.ClosePipesIfMatch(pr, pw, uploadErr)
+			}()
+
+			done := make(chan struct{})
+			defer close(done)
+
+			go func() {
+				select {
+				case <-done:
+					return
+				case <-r.Context().Done():
+					select {
+					case <-done:
+						return
+					default:
+						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("uploader context cancelled: %w", r.Context().Err()))
+					}
+				}
+			}()
 
 			// Notify sender
 			select {
@@ -1071,9 +1131,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Stream data to pipe
-			_, err = io.Copy(pw, part)
-			pw.CloseWithError(err)
+			_, uploadErr = io.Copy(pw, part)
+			pw.CloseWithError(uploadErr)
 			part.Close()
+
+			if uploadErr != nil {
+				http.Error(w, fmt.Sprintf("upload error: %v", uploadErr), http.StatusInternalServerError)
+				return
+			}
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})
@@ -1093,6 +1158,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	sess.mu.Lock()
 	pr := sess.UploadPipeR
+	pw := sess.UploadPipeW
 	sess.mu.Unlock()
 
 	if pr == nil {
@@ -1100,6 +1166,30 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var pullErr error
+	defer func() {
+		if pullErr != nil {
+			sess.ClosePipesIfMatch(pr, pw, pullErr)
+		}
+	}()
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-r.Context().Done():
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("puller context cancelled: %w", r.Context().Err()))
+			}
+		}
+	}()
+
 	w.Header().Set("Content-Type", "application/octet-stream")
-	io.Copy(w, pr)
+	_, pullErr = io.Copy(w, pr)
 }
