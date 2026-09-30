@@ -36,6 +36,7 @@ var (
 	liveFinished         bool
 	relayURL             string
 	receiverURL          string
+	keyFlag              string
 	liveBufferSize       int = 10 * 1024 * 1024 // 10MB
 	parsedTurnServers    []string
 	parsedTurnUsername   string
@@ -230,6 +231,15 @@ func parseFlags(args []string) ([]string, []webrtc.ICEServer, time.Duration) {
 				}
 				i++
 			}
+		} else if strings.HasPrefix(arg, "--key=") {
+			keyFlag = strings.TrimPrefix(arg, "--key=")
+		} else if arg == "--key" || arg == "-k" {
+			if i+1 < len(args) {
+				keyFlag = args[i+1]
+				i++
+			}
+		} else if strings.HasPrefix(arg, "-k=") {
+			keyFlag = strings.TrimPrefix(arg, "-k=")
 		} else {
 			cleanArgs = append(cleanArgs, arg)
 		}
@@ -1045,27 +1055,36 @@ func extractKeyFromURL(u *url.URL) string {
 	return ""
 }
 
-func decodeBase64Key(k string) ([]byte, error) {
-	if b, err := base64.URLEncoding.DecodeString(k); err == nil {
-		return b, nil
-	}
-	if b, err := base64.RawURLEncoding.DecodeString(k); err == nil {
-		return b, nil
-	}
-	if b, err := base64.StdEncoding.DecodeString(k); err == nil {
-		return b, nil
-	}
-	if b, err := base64.RawStdEncoding.DecodeString(k); err == nil {
-		return b, nil
-	}
-	return nil, fmt.Errorf("failed to decode base64 key")
-}
 func runReceive(code string) {
 	err := downloadFile(code)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n  ❌ Download failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func decodeBase64Key(kStr string) ([]byte, error) {
+	encodings := []*base64.Encoding{
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+	}
+	var keyBytes []byte
+	var err error
+	for _, enc := range encodings {
+		keyBytes, err = enc.DecodeString(kStr)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("invalid base64 key encoding: %w", err)
+	}
+	if len(keyBytes) != 32 {
+		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d", len(keyBytes))
+	}
+	return keyBytes, nil
 }
 
 func downloadFile(code string) error {
@@ -1091,10 +1110,10 @@ func downloadFile(code string) error {
 		var err error
 		keyBytes, err = decodeBase64Key(k)
 		if err != nil {
-			return fmt.Errorf("invalid key: %w", err)
+			return fmt.Errorf("invalid base64 key encoding: %w", err)
 		}
 		if len(keyBytes) != 32 {
-			return fmt.Errorf("invalid key length: key must be exactly 32 bytes, got %d bytes", len(keyBytes))
+			return fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d", len(keyBytes))
 		}
 	}
 
@@ -1136,26 +1155,11 @@ func downloadFile(code string) error {
 	}
 
 	var r io.Reader = respDL.Body
-	if k != "" {
-		keyBytes, err := base64.URLEncoding.DecodeString(k)
-		if err != nil {
-			keyBytes, err = base64.StdEncoding.DecodeString(k)
-		}
-		if err != nil {
-			keyBytes, err = base64.RawURLEncoding.DecodeString(k)
-		}
-		if err != nil {
-			keyBytes, err = base64.RawStdEncoding.DecodeString(k)
-		}
-		if err != nil {
-			return fmt.Errorf("invalid decryption key encoding: %w", err)
-		}
-		if len(keyBytes) != 32 {
-			return fmt.Errorf("invalid decryption key length: expected 32 bytes, got %d", len(keyBytes))
-		}
-		r, err = relay.NewDecryptingReader(respDL.Body, keyBytes)
-		if err != nil {
-			return fmt.Errorf("failed to initialize decryptor: %w", err)
+	if len(keyBytes) == 32 {
+		var errDec error
+		r, errDec = relay.NewDecryptingReader(respDL.Body, keyBytes)
+		if errDec != nil {
+			return fmt.Errorf("failed to initialize decryptor: %w", errDec)
 		}
 		fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
 	}
