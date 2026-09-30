@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -259,6 +260,41 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestServer_HandleQREndpoint(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	t.Run("Missing url parameter", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/qr", nil)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+		assert.Contains(t, rr.Body.String(), "missing url parameter")
+	})
+
+	t.Run("OPTIONS preflight", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodOptions, "/api/qr", nil)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusNoContent, rr.Code)
+		assert.Equal(t, "*", rr.Header().Get("Access-Control-Allow-Origin"))
+		assert.Equal(t, "true", rr.Header().Get("Access-Control-Allow-Private-Network"))
+	})
+
+	t.Run("Valid QR code PNG generation", func(t *testing.T) {
+		targetURL := "http://example.com/share#k=secretkey123"
+		req := httptest.NewRequest(http.MethodGet, "/api/qr?url="+fmt.Sprintf("%s", targetURL), nil)
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "image/png", rr.Header().Get("Content-Type"))
+		assert.True(t, bytes.HasPrefix(rr.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")), "Response should be valid PNG bytes")
+	})
 }
 
 
