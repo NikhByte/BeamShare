@@ -218,6 +218,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Private-Network", "true")
@@ -246,7 +247,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.downloads++
 	count := s.downloads
+	var data []byte
+	if snap.isLivePipe && s.liveBuf != nil {
+		data = s.liveBuf.Bytes()
+	}
 	s.mu.Unlock()
+
 	fmt.Printf("\r  Receiver connected (download #%d)…\n", count)
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -255,13 +261,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	if snap.isLivePipe {
-		s.mu.Lock()
-		var data []byte
-		if s.liveBuf != nil {
-			data = s.liveBuf.Bytes()
-		}
-		s.mu.Unlock()
-
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, snap.fileName))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		http.ServeContent(w, r, snap.fileName, time.Time{}, bytes.NewReader(data))
