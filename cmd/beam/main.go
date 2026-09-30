@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -459,6 +460,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					uploaded   int64
 					uploadStat time.Time
 				)
+				var isStreaming atomic.Bool
 
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
@@ -505,6 +507,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if isLive {
 								return
 							}
+							if !isStreaming.CompareAndSwap(false, true) {
+								return
+							}
 							parts := strings.SplitN(dataStr, ":", 2)
 							var offset int64
 							if len(parts) == 2 {
@@ -512,6 +517,8 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							}
 							// File sender goroutine (Direct-to-Disk + Backpressure)
 							go func() {
+								defer isStreaming.Store(false)
+
 								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
 								file, err := os.Open(filePath)
 								if err != nil {
@@ -535,28 +542,24 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									return
 								}
 
-								bufferedAmountLowChan := make(chan struct{}, 1)
-								dc.SetBufferedAmountLowThreshold(512 * 1024)
-								dc.OnBufferedAmountLow(func() {
-									select {
-									case bufferedAmountLowChan <- struct{}{}:
-									default:
-									}
-								})
-
-								buffer := make([]byte, 64*1024) // 64KB chunk size
+								buffer := make([]byte, 32*1024) // 32KB chunk size
 								totalSent := offset
 								start := time.Now()
 
 								for {
-									// Backpressure check: wait if buffered amount > 1MB
-									if dc.BufferedAmount() > 1024*1024 {
-										<-bufferedAmountLowChan
+									// Polling backpressure check: wait if buffered amount > 1MB
+									for dc.BufferedAmount() > 1024*1024 {
+										if dc.ReadyState() == webrtc.DataChannelStateClosed {
+											return
+										}
+										time.Sleep(5 * time.Millisecond)
 									}
 
 									n, err := file.Read(buffer)
 									if n > 0 {
-										errSend := dc.Send(buffer[:n])
+										chunk := make([]byte, n)
+										copy(chunk, buffer[:n])
+										errSend := dc.Send(chunk)
 										if errSend != nil {
 											fmt.Printf("\n  Error sending chunk: %v\n", errSend)
 											return
@@ -573,10 +576,12 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									}
 								}
 
-								// Wait for buffer to clear before sending EOF
-								dc.SetBufferedAmountLowThreshold(0)
-								if dc.BufferedAmount() > 0 {
-									<-bufferedAmountLowChan
+								// Wait for buffer to clear before sending EOF via polling
+								for dc.BufferedAmount() > 0 {
+									if dc.ReadyState() == webrtc.DataChannelStateClosed {
+										return
+									}
+									time.Sleep(5 * time.Millisecond)
 								}
 								dc.SendText("EOF")
 
