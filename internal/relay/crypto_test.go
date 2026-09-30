@@ -240,6 +240,14 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 	})
 }
 
+func TestDecryptingReader_FrameTooLarge(t *testing.T) {
+	TestMaxFrameSizeExceeded(t)
+}
+
+func TestDecryptingReader_FrameTooSmall(t *testing.T) {
+	TestFrameTooSmall(t)
+}
+
 func TestZeroAllocationsPerFrame(t *testing.T) {
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {

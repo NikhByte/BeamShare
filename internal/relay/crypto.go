@@ -10,8 +10,12 @@ import (
 	"io"
 )
 
-// MaxFrameSize is the maximum allowable payload size for an encrypted frame (1MB).
-const MaxFrameSize = 1 * 1024 * 1024
+const (
+	// MaxPlaintextChunkSize defines the maximum size of unencrypted plaintext chunks (64KB).
+	MaxPlaintextChunkSize = 65536
+	// MaxFrameSize is the maximum allowable payload size for an encrypted frame (1MB).
+	MaxFrameSize = 1 * 1024 * 1024
+)
 
 var (
 	// ErrFrameTooLarge is returned when a frame length header exceeds MaxFrameSize.
@@ -124,20 +128,20 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 	}
 	length := binary.BigEndian.Uint32(dr.headerBuf[:])
 
+	nonceSize := dr.gcm.NonceSize()
+	minFrameSize := uint32(nonceSize)
+
+	if length < minFrameSize {
+		return 0, io.ErrUnexpectedEOF
+	}
 	if length > MaxFrameSize {
 		return 0, ErrFrameTooLarge
-	}
-
-	nonceSize := dr.gcm.NonceSize()
-	if int(length) < nonceSize {
-		return 0, io.ErrUnexpectedEOF
 	}
 
 	frameData := dr.frameBuf[:length]
 	if _, err := io.ReadFull(dr.r, frameData); err != nil {
 		return 0, err
 	}
-
 	nonce := frameData[:nonceSize]
 	ciphertext := frameData[nonceSize:]
 
