@@ -733,7 +733,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		} else {
 			qrURL = localURL
 			if session != nil {
-				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				sep := "&"
+				if !strings.Contains(qrURL, "?") {
+					sep = "/?"
+				}
+				qrURL += fmt.Sprintf("%smode=webrtc&sdp=%s&timeout=%d", sep, session.CompressedOffer(), discoveryTimeout.Milliseconds())
 			}
 		}
 	}
@@ -840,7 +844,14 @@ func downloadFile(code string) error {
 		return fmt.Errorf("invalid code/URL: %w", err)
 	}
 
+	token := u.Query().Get("token")
 	backend := u.Query().Get("backend")
+	if backend != "" && token == "" {
+		if bu, err := url.Parse(backend); err == nil {
+			token = bu.Query().Get("token")
+		}
+	}
+
 	if backend == "" {
 		backend = u.Scheme + "://" + u.Host
 	}
@@ -852,13 +863,29 @@ func downloadFile(code string) error {
 		k = k[2:]
 	}
 
-	metaURL := backend + "/api/meta"
+	var queryParams []string
 	if s != "" {
-		metaURL += "?s=" + s
+		queryParams = append(queryParams, "s="+url.QueryEscape(s))
+	}
+	if token != "" {
+		queryParams = append(queryParams, "token="+url.QueryEscape(token))
+	}
+
+	metaURL := backend + "/api/meta"
+	if len(queryParams) > 0 {
+		metaURL += "?" + strings.Join(queryParams, "&")
 	}
 
 	fmt.Printf("  %s\n", dimStr("Fetching metadata..."))
-	respMeta, err := http.Get(metaURL)
+	reqMeta, err := http.NewRequest(http.MethodGet, metaURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create metadata request: %w", err)
+	}
+	if token != "" {
+		reqMeta.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	respMeta, err := http.DefaultClient.Do(reqMeta)
 	if err != nil {
 		return fmt.Errorf("failed to fetch metadata: %w", err)
 	}
@@ -875,12 +902,20 @@ func downloadFile(code string) error {
 	ui.PrintFileMeta(meta.Name, meta.Size)
 
 	downloadURL := backend + "/api/download"
-	if s != "" {
-		downloadURL += "?s=" + s
+	if len(queryParams) > 0 {
+		downloadURL += "?" + strings.Join(queryParams, "&")
 	}
 
 	fmt.Printf("  %s\n", dimStr("Starting download..."))
-	respDL, err := http.Get(downloadURL)
+	reqDL, err := http.NewRequest(http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create download request: %w", err)
+	}
+	if token != "" {
+		reqDL.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	respDL, err := http.DefaultClient.Do(reqDL)
 	if err != nil {
 		return fmt.Errorf("failed to start download: %w", err)
 	}
