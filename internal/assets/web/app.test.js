@@ -537,4 +537,105 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('waitForDataChannelBuffer — Immediate resolution when buffer is below target limit', async () => {
+    const mockChannel = {
+      readyState: 'open',
+      bufferedAmount: 100000,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    };
+
+    await app.waitForDataChannelBuffer(mockChannel, 1024 * 1024, 512 * 1024);
+    assert.equal(mockChannel.bufferedAmountLowThreshold, 512 * 1024);
+  });
+
+  test('waitForDataChannelBuffer — Immediate re-check after listener setup (rapid drain)', async () => {
+    let listenerAttached = false;
+    const mockChannel = {
+      readyState: 'open',
+      bufferedAmount: 2000000,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: (event, cb) => {
+        listenerAttached = true;
+        // Simulate rapid buffer drainage occurring during listener setup
+        mockChannel.bufferedAmount = 100000;
+      },
+      removeEventListener: () => {}
+    };
+
+    await app.waitForDataChannelBuffer(mockChannel, 1024 * 1024, 512 * 1024);
+    assert.equal(listenerAttached, true);
+    assert.equal(mockChannel.bufferedAmount, 100000);
+  });
+
+  test('waitForDataChannelBuffer — Event-driven resolution on bufferedamountlow event', async () => {
+    let lowCallback = null;
+    const mockChannel = {
+      readyState: 'open',
+      bufferedAmount: 2000000,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: (event, cb) => {
+        if (event === 'bufferedamountlow') lowCallback = cb;
+      },
+      removeEventListener: (event, cb) => {
+        if (cb === lowCallback) lowCallback = null;
+      }
+    };
+
+    const promise = app.waitForDataChannelBuffer(mockChannel, 1024 * 1024, 512 * 1024);
+    assert.notEqual(lowCallback, null);
+
+    mockChannel.bufferedAmount = 200000;
+    lowCallback();
+
+    await promise;
+    assert.equal(lowCallback, null, 'Listener should be cleaned up');
+  });
+
+  test('waitForDataChannelBuffer — Polling timer fallback when bufferedamountlow does not fire', async () => {
+    let listenerRemoved = false;
+    const mockChannel = {
+      readyState: 'open',
+      bufferedAmount: 2000000,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: () => {},
+      removeEventListener: () => {
+        listenerRemoved = true;
+      }
+    };
+
+    const promise = app.waitForDataChannelBuffer(mockChannel, 1024 * 1024, 512 * 1024);
+
+    setTimeout(() => {
+      mockChannel.bufferedAmount = 400000;
+    }, 20);
+
+    await promise;
+    assert.equal(listenerRemoved, true, 'Polling timer should resolve and clean up listener');
+  });
+
+  test('waitForDataChannelBuffer — EOF flush waits for 0 bufferedAmount', async () => {
+    let listenerRemoved = false;
+    const mockChannel = {
+      readyState: 'open',
+      bufferedAmount: 50000,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: () => {},
+      removeEventListener: () => {
+        listenerRemoved = true;
+      }
+    };
+
+    const promise = app.waitForDataChannelBuffer(mockChannel, 0, 0);
+
+    setTimeout(() => {
+      mockChannel.bufferedAmount = 0;
+    }, 30);
+
+    await promise;
+    assert.equal(mockChannel.bufferedAmountLowThreshold, 0);
+    assert.equal(listenerRemoved, true);
+  });
 });
