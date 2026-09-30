@@ -464,25 +464,28 @@ describe('Gaze Web Receiver Test Suite', () => {
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
   });
 
-  test('WebRTC Receiver AES-GCM Decryption and Chunk Queueing', async () => {
-    const { webcrypto } = require('node:crypto');
-    const key = await webcrypto.subtle.generateKey(
-      { name: 'AES-GCM', length: 256 },
+  test('WebRTC Receiver Encrypted Stream Decryption and Order Preservation', async () => {
+    // Generate AES-GCM key and set location hash
+    const cryptoKey = await global.crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
       true,
-      ['encrypt', 'decrypt']
+      ["encrypt", "decrypt"]
     );
-    const rawKey = await webcrypto.subtle.exportKey('raw', key);
-    const keyB64 = Buffer.from(rawKey).toString('base64url');
-
+    const rawKey = await global.crypto.subtle.exportKey("raw", cryptoKey);
+    const keyB64 = Buffer.from(rawKey).toString('base64')
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
     window.location.hash = `#k=${keyB64}`;
-    const importedKey = await app.parseDecryptionKeyFromHash(window.location.hash);
-    assert.notEqual(importedKey, null);
+
+    // Import key via app method
+    const decKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+    assert.notEqual(decKey, null);
 
     const receivedData = [];
+    let closed = false;
     const mockDC = {
       readyState: 'open',
       send: () => {},
-      close: () => {}
+      close: () => { closed = true; }
     };
 
     const queue = new app.SequentialChunkQueue({
@@ -490,19 +493,18 @@ describe('Gaze Web Receiver Test Suite', () => {
       lowWatermark: 256,
       dataChannel: mockDC,
       writeHandler: async (chunk) => {
+        await new Promise(r => setTimeout(r, 2));
         receivedData.push(...chunk);
       }
     });
 
-    const plaintext1 = new Uint8Array([10, 20, 30, 40]);
-    const plaintext2 = new Uint8Array([50, 60, 70, 80]);
-
-    async function createEncryptedFrame(pt) {
-      const nonce = webcrypto.getRandomValues(new Uint8Array(12));
-      const ciphertext = await webcrypto.subtle.encrypt(
-        { name: 'AES-GCM', iv: nonce },
-        key,
-        pt
+    // Helper to encrypt and frame payload
+    async function createFrame(plaintext) {
+      const nonce = global.crypto.getRandomValues(new Uint8Array(12));
+      const ciphertext = await global.crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: nonce },
+        cryptoKey,
+        plaintext
       );
       const frameLen = 12 + ciphertext.byteLength;
       const payload = new Uint8Array(4 + frameLen);
@@ -513,26 +515,37 @@ describe('Gaze Web Receiver Test Suite', () => {
       return payload;
     }
 
-    const frame1 = await createEncryptedFrame(plaintext1);
-    const frame2 = await createEncryptedFrame(plaintext2);
+    const frame1 = await createFrame(new Uint8Array([10, 20, 30, 40]));
+    const frame2 = await createFrame(new Uint8Array([50, 60, 70, 80]));
 
     let encBuffer = new Uint8Array(0);
-    let decryptChain = Promise.resolve();
+    let msgChain = Promise.resolve();
+    let isTerminated = false;
 
     const onmessage = (e) => {
-      decryptChain = decryptChain.then(async () => {
-        if (typeof e.data === 'string') {
-          if (e.data === 'EOF') {
+      if (isTerminated) return;
+
+      if (typeof e.data === 'string') {
+        if (e.data === "EOF") {
+          msgChain = msgChain.then(async () => {
+            if (isTerminated) return;
+            if (decKey && encBuffer.length > 0) {
+              throw new Error("Truncated encrypted frame");
+            }
             queue.enqueueEOF();
             await queue.drain();
-          }
-          return;
+          });
         }
+        return;
+      }
 
-        const value = new Uint8Array(e.data);
-        let newBuffer = new Uint8Array(encBuffer.length + value.length);
+      const chunk = new Uint8Array(e.data);
+      msgChain = msgChain.then(async () => {
+        if (isTerminated) return;
+
+        let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
         newBuffer.set(encBuffer, 0);
-        newBuffer.set(value, encBuffer.length);
+        newBuffer.set(chunk, encBuffer.length);
         encBuffer = newBuffer;
 
         while (encBuffer.length >= 4) {
@@ -544,9 +557,10 @@ describe('Gaze Web Receiver Test Suite', () => {
 
             const nonce = new Uint8Array(frame.subarray(0, 12));
             const ciphertext = new Uint8Array(frame.subarray(12));
-            const decrypted = await webcrypto.subtle.decrypt(
-              { name: 'AES-GCM', iv: nonce },
-              importedKey,
+
+            const decrypted = await global.crypto.subtle.decrypt(
+              { name: "AES-GCM", iv: nonce },
+              decKey,
               ciphertext
             );
             queue.enqueue(new Uint8Array(decrypted));
@@ -557,70 +571,66 @@ describe('Gaze Web Receiver Test Suite', () => {
       });
     };
 
-    onmessage({ data: frame1.buffer });
+    // Split frame1 into two chunks to test fragment accumulation
+    const half1 = frame1.slice(0, 10);
+    const half2 = frame1.slice(10);
+
+    onmessage({ data: half1.buffer });
+    onmessage({ data: half2.buffer });
     onmessage({ data: frame2.buffer });
     onmessage({ data: 'EOF' });
 
-    await decryptChain;
-
+    await queue.drain();
     assert.deepEqual(receivedData, [10, 20, 30, 40, 50, 60, 70, 80]);
   });
 
-  test('WebRTC Receiver AES-GCM Decryption with Chunk Fragmentation', async () => {
-    const { webcrypto } = require('node:crypto');
-    const key = await webcrypto.subtle.generateKey(
-      { name: 'AES-GCM', length: 256 },
+  test('WebRTC Receiver Decryption Failure Closes DataChannel', async () => {
+    const cryptoKey = await global.crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
       true,
-      ['encrypt', 'decrypt']
+      ["encrypt", "decrypt"]
     );
-    const rawKey = await webcrypto.subtle.exportKey('raw', key);
-    const keyB64 = Buffer.from(rawKey).toString('base64url');
-
+    const rawKey = await global.crypto.subtle.exportKey("raw", cryptoKey);
+    const keyB64 = Buffer.from(rawKey).toString('base64')
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
     window.location.hash = `#k=${keyB64}`;
-    const importedKey = await app.parseDecryptionKeyFromHash(window.location.hash);
 
-    const receivedData = [];
+    const decKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+
+    let closed = false;
+    const mockDC = {
+      readyState: 'open',
+      send: () => {},
+      close: () => { closed = true; }
+    };
+
     const queue = new app.SequentialChunkQueue({
-      writeHandler: async (chunk) => {
-        receivedData.push(...chunk);
-      }
+      highWatermark: 1024,
+      lowWatermark: 256,
+      dataChannel: mockDC,
+      writeHandler: async () => {}
     });
 
-    const plaintext = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-    const nonce = webcrypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = await webcrypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: nonce },
-      key,
-      plaintext
-    );
-    const frameLen = 12 + ciphertext.byteLength;
-    const fullPayload = new Uint8Array(4 + frameLen);
-    const dv = new DataView(fullPayload.buffer);
+    // Create frame with corrupted ciphertext
+    const nonce = global.crypto.getRandomValues(new Uint8Array(12));
+    const badCiphertext = new Uint8Array(32).fill(0xff);
+    const frameLen = 12 + badCiphertext.byteLength;
+    const badFrame = new Uint8Array(4 + frameLen);
+    const dv = new DataView(badFrame.buffer);
     dv.setUint32(0, frameLen, false);
-    fullPayload.set(nonce, 4);
-    fullPayload.set(new Uint8Array(ciphertext), 16);
-
-    const chunkA = new Uint8Array(fullPayload.subarray(0, 5));
-    const chunkB = new Uint8Array(fullPayload.subarray(5, 15));
-    const chunkC = new Uint8Array(fullPayload.subarray(15));
+    badFrame.set(nonce, 4);
+    badFrame.set(badCiphertext, 16);
 
     let encBuffer = new Uint8Array(0);
-    let decryptChain = Promise.resolve();
+    let msgChain = Promise.resolve();
+    let errorOccurred = false;
 
     const onmessage = (e) => {
-      decryptChain = decryptChain.then(async () => {
-        if (typeof e.data === 'string') {
-          if (e.data === 'EOF') {
-            queue.enqueueEOF();
-            await queue.drain();
-          }
-          return;
-        }
-
-        const value = new Uint8Array(e.data);
-        let newBuffer = new Uint8Array(encBuffer.length + value.length);
+      const chunk = new Uint8Array(e.data);
+      msgChain = msgChain.then(async () => {
+        let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
         newBuffer.set(encBuffer, 0);
-        newBuffer.set(value, encBuffer.length);
+        newBuffer.set(chunk, encBuffer.length);
         encBuffer = newBuffer;
 
         while (encBuffer.length >= 4) {
@@ -632,12 +642,18 @@ describe('Gaze Web Receiver Test Suite', () => {
 
             const nonce = new Uint8Array(frame.subarray(0, 12));
             const ciphertext = new Uint8Array(frame.subarray(12));
-            const decrypted = await webcrypto.subtle.decrypt(
-              { name: 'AES-GCM', iv: nonce },
-              importedKey,
-              ciphertext
-            );
-            queue.enqueue(new Uint8Array(decrypted));
+
+            try {
+              const decrypted = await global.crypto.subtle.decrypt(
+                { name: "AES-GCM", iv: nonce },
+                decKey,
+                ciphertext
+              );
+              queue.enqueue(new Uint8Array(decrypted));
+            } catch (err) {
+              errorOccurred = true;
+              mockDC.close();
+            }
           } else {
             break;
           }
@@ -645,14 +661,12 @@ describe('Gaze Web Receiver Test Suite', () => {
       });
     };
 
-    onmessage({ data: chunkA.buffer });
-    onmessage({ data: chunkB.buffer });
-    onmessage({ data: chunkC.buffer });
-    onmessage({ data: 'EOF' });
+    onmessage({ data: badFrame.buffer });
+    await msgChain;
 
-    await decryptChain;
-
-    assert.deepEqual(receivedData, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    assert.equal(errorOccurred, true);
+    assert.equal(closed, true);
+  });
   });
 });
 
