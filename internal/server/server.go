@@ -201,13 +201,19 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+
+	s.mu.Lock()
+	fileName := s.fileName
+	fileSize := s.fileSize
+	s.mu.Unlock()
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Private-Network", "true")
 	json.NewEncoder(w).Encode(FileMeta{
-		Name: s.fileName,
-		Size: s.fileSize,
-		MIME: guessMIME(s.fileName),
+		Name: fileName,
+		Size: fileSize,
+		MIME: guessMIME(fileName),
 	})
 }
 
@@ -224,7 +230,15 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.downloads++
 	count := s.downloads
+	isLivePipe := s.isLivePipe
+	fileName := s.fileName
+	filePath := s.filePath
+	var data []byte
+	if isLivePipe && s.liveBuf != nil {
+		data = s.liveBuf.Bytes()
+	}
 	s.mu.Unlock()
+
 	fmt.Printf("\r  Receiver connected (download #%d)…\n", count)
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -232,21 +246,14 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition, Accept-Ranges")
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	if s.isLivePipe {
-		s.mu.Lock()
-		var data []byte
-		if s.liveBuf != nil {
-			data = s.liveBuf.Bytes()
-		}
-		s.mu.Unlock()
-
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, s.fileName))
+	if isLivePipe {
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		http.ServeContent(w, r, s.fileName, time.Time{}, bytes.NewReader(data))
+		http.ServeContent(w, r, fileName, time.Time{}, bytes.NewReader(data))
 		return
 	}
 
-	f, err := os.Open(s.filePath)
+	f, err := os.Open(filePath)
 	if err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
@@ -259,10 +266,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		modTime = stat.ModTime()
 	}
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, s.fileName))
-	w.Header().Set("Content-Type", guessMIME(s.fileName))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
+	w.Header().Set("Content-Type", guessMIME(fileName))
 
-	http.ServeContent(w, r, s.fileName, modTime, f)
+	http.ServeContent(w, r, fileName, modTime, f)
 }
 
 func (s *Server) handleLiveStream(w http.ResponseWriter, r *http.Request) {
