@@ -481,3 +481,158 @@ func TestServer_ReassignUploadPipesClosesPreviousPipes(t *testing.T) {
 	_, errWrite := pw1.Write([]byte("data"))
 	assert.Error(t, errWrite, "Previous UploadPipeW should be closed")
 }
+
+func TestServer_SessionExpirationClosesUploadPipes(t *testing.T) {
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	ctx := context.Background()
+
+	sessID, err := client.Register(ctx)
+	require.NoError(t, err)
+
+	sess := srv.GetSession(sessID)
+	require.NotNil(t, sess)
+
+	// Set up data pipes and upload pipes manually
+	dPr, dPw := io.Pipe()
+	sess.SetPipes(dPr, dPw)
+
+	uPr, uPw := io.Pipe()
+	sess.mu.Lock()
+	sess.UploadPipeR = uPr
+	sess.UploadPipeW = uPw
+	sess.mu.Unlock()
+
+	// Verify all 4 pipes exist
+	assert.NotNil(t, sess.DataPipeR)
+	assert.NotNil(t, sess.DataPipeW)
+	assert.NotNil(t, sess.UploadPipeR)
+	assert.NotNil(t, sess.UploadPipeW)
+
+	// Start a goroutine writing to UploadPipeW
+	uploadWriterErrCh := make(chan error, 1)
+	go func() {
+		_, writeErr := uPw.Write([]byte("upload chunk"))
+		uploadWriterErrCh <- writeErr
+	}()
+
+	// Wait for sweeper to clean up expired session
+	require.Eventually(t, func() bool {
+		return srv.GetSession(sessID) == nil
+	}, 2*time.Second, 10*time.Millisecond, "Session did not expire in time")
+
+	// Verify all 4 pipes are nil on the session object
+	sess.mu.Lock()
+	assert.Nil(t, sess.DataPipeR)
+	assert.Nil(t, sess.DataPipeW)
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+
+	// Verify upload writer unblocked with error
+	select {
+	case writeErr := <-uploadWriterErrCh:
+		require.Error(t, writeErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("upload writer goroutine did not unblock upon session expiration")
+	}
+}
+
+func TestServer_ReplacedWebUploadClosesPreviousPipe(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	// First upload pipe setup
+	uPr1, uPw1 := io.Pipe()
+	sess.mu.Lock()
+	sess.UploadPipeR = uPr1
+	sess.UploadPipeW = uPw1
+	sess.mu.Unlock()
+
+	firstWriterDone := make(chan error, 1)
+	go func() {
+		_, err := uPw1.Write([]byte("first upload data"))
+		firstWriterDone <- err
+	}()
+
+	// Simulate second upload replacing the first
+	sess.mu.Lock()
+	if sess.UploadPipeR != nil {
+		sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
+	}
+	uPr2, uPw2 := io.Pipe()
+	sess.UploadPipeR = uPr2
+	sess.UploadPipeW = uPw2
+	sess.mu.Unlock()
+
+	select {
+	case err := <-firstWriterDone:
+		require.Error(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("First upload writer did not unblock when upload pipe was replaced")
+	}
+
+	// Verify new upload pipe handles are active
+	sess.mu.Lock()
+	assert.Equal(t, uPr2, sess.UploadPipeR)
+	assert.Equal(t, uPw2, sess.UploadPipeW)
+	sess.mu.Unlock()
+
+	sess.ClosePipes(nil)
+}
+
+func TestServer_ClosePipesIfMatchLockedNilReader(t *testing.T) {
+	sess := &Session{
+		ID: "test-close-all",
+	}
+
+	dPr, dPw := io.Pipe()
+	uPr, uPw := io.Pipe()
+
+	sess.DataPipeR = dPr
+	sess.DataPipeW = dPw
+	sess.UploadPipeR = uPr
+	sess.UploadPipeW = uPw
+
+	dReadErrCh := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 10)
+		_, err := dPr.Read(buf)
+		dReadErrCh <- err
+	}()
+
+	uWriteErrCh := make(chan error, 1)
+	go func() {
+		_, err := uPw.Write([]byte("upload test"))
+		uWriteErrCh <- err
+	}()
+
+	expectedErr := fmt.Errorf("test session expiration error")
+	sess.ClosePipes(expectedErr)
+
+	assert.Nil(t, sess.DataPipeR)
+	assert.Nil(t, sess.DataPipeW)
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+
+	select {
+	case errData := <-dReadErrCh:
+		require.Error(t, errData)
+	case <-time.After(2 * time.Second):
+		t.Fatal("data pipe reader did not unblock on ClosePipes")
+	}
+
+	select {
+	case errUpload := <-uWriteErrCh:
+		require.Error(t, errUpload)
+	case <-time.After(2 * time.Second):
+		t.Fatal("upload pipe writer did not unblock on ClosePipes")
+	}
+}
