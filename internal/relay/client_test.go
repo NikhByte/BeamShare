@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -226,3 +227,84 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		}
 	})
 }
+
+func TestRelayClient_ValidateKey(t *testing.T) {
+	testCases := []struct {
+		name      string
+		keySize   int
+		isNil     bool
+		expectErr bool
+	}{
+		{name: "Nil key (unencrypted)", isNil: true, expectErr: false},
+		{name: "0-byte key (unencrypted)", keySize: 0, expectErr: false},
+		{name: "1-byte key", keySize: 1, expectErr: true},
+		{name: "16-byte key", keySize: 16, expectErr: true},
+		{name: "24-byte key", keySize: 24, expectErr: true},
+		{name: "31-byte key", keySize: 31, expectErr: true},
+		{name: "32-byte key (valid)", keySize: 32, expectErr: false},
+		{name: "64-byte key", keySize: 64, expectErr: true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &Client{}
+			if !tc.isNil {
+				client.Key = make([]byte, tc.keySize)
+			}
+
+			err := client.ValidateKey()
+			if tc.expectErr {
+				if err == nil {
+					t.Fatalf("expected error for key size %d, got nil", tc.keySize)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("expected no error for key size %d, got %v", tc.keySize, err)
+				}
+			}
+		})
+	}
+}
+
+type panicHTTPClient struct{}
+
+func (p *panicHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	panic("HTTP Do called when request should have failed fast")
+}
+func (p *panicHTTPClient) Get(url string) (*http.Response, error) {
+	panic("HTTP Get called when request should have failed fast")
+}
+func (p *panicHTTPClient) Post(url, contentType string, body io.Reader) (*http.Response, error) {
+	panic("HTTP Post called when request should have failed fast")
+}
+
+func TestRelayClient_InvalidKeyUploadFailFast(t *testing.T) {
+	invalidSizes := []int{1, 16, 24, 31, 64}
+
+	for _, size := range invalidSizes {
+		t.Run(fmt.Sprintf("%d-byte key", size), func(t *testing.T) {
+			client := &Client{
+				Key:     make([]byte, size),
+				BaseURL: "http://invalid.local",
+				HTTP:    &panicHTTPClient{},
+			}
+
+			// Test UploadReaderAtOffset fails fast before HTTP call
+			err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader([]byte("data")), 0)
+			if err == nil {
+				t.Fatalf("expected error for UploadReaderAtOffset with %d-byte key, got nil", size)
+			}
+
+			// Test UploadDataAtOffset fails fast before file opening/HTTP call
+			tmpDir := t.TempDir()
+			filePath := filepath.Join(tmpDir, "dummy.txt")
+			os.WriteFile(filePath, []byte("data"), 0644)
+
+			err = client.UploadDataAtOffset(context.Background(), filePath, 0)
+			if err == nil {
+				t.Fatalf("expected error for UploadDataAtOffset with %d-byte key, got nil", size)
+			}
+		})
+	}
+}
+
