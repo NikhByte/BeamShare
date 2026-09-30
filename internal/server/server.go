@@ -5,6 +5,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +25,7 @@ import (
 
 // Server holds the state for one Beam session.
 type Server struct {
+	token     string
 	filePath  string
 	fileName  string
 	fileSize  int64
@@ -42,6 +47,14 @@ type FileMeta struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
 	MIME string `json:"mime"`
+}
+
+func generateToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate random session token: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // New creates and configures a new Server. If filePath is empty,
@@ -69,9 +82,15 @@ func New(filePath string, bufferSize int) (*Server, error) {
 		return nil, fmt.Errorf("find free port: %w", err)
 	}
 
+	token, err := generateToken()
+	if err != nil {
+		return nil, err
+	}
+
 	mux := http.NewServeMux()
 
 	s := &Server{
+		token:      token,
 		filePath:   filePath,
 		fileName:   fileName,
 		fileSize:   fileSize,
@@ -104,7 +123,7 @@ func New(filePath string, bufferSize int) (*Server, error) {
 
 	s.srv = &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
-		Handler:      mux,
+		Handler:      s.authMiddleware(mux),
 		ReadTimeout:  0, // disable read timeout for large uploads
 		WriteTimeout: 0, // disable write timeout for large downloads
 		IdleTimeout:  120 * time.Second,
@@ -155,6 +174,42 @@ func (s *Server) GetLiveBacklog() []byte {
 
 // Mux returns the underlying ServeMux.
 func (s *Server) Mux() *http.ServeMux { return s.mux }
+
+// Handler returns the HTTP handler wrapped with authentication middleware.
+func (s *Server) Handler() http.Handler { return s.srv.Handler }
+
+// Token returns the session token.
+func (s *Server) Token() string { return s.token }
+
+func extractToken(r *http.Request) string {
+	if tok := r.URL.Query().Get("token"); tok != "" {
+		return tok
+	}
+	if tok := r.URL.Query().Get("s"); tok != "" {
+		return tok
+	}
+	if tok := r.Header.Get("X-Beam-Token"); tok != "" {
+		return tok
+	}
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		return strings.TrimPrefix(authHeader, "Bearer ")
+	}
+	return ""
+}
+
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			provided := extractToken(r)
+			if provided == "" || s.token == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(s.token)) != 1 {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // LocalURL returns the http://lan-ip:port URL for this session.
 func (s *Server) LocalURL() string {
