@@ -226,3 +226,52 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		}
 	})
 }
+
+func TestUploadData_InvalidKeyLength(t *testing.T) {
+	relayServer := NewServer()
+	ts := httptest.NewServer(relayServer)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	sessID, err := client.Register(context.Background())
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	_ = sessID
+
+	// 1. Key length < 32 bytes should return an error
+	client.Key = []byte("short-16-byte-key")
+	err = client.UploadReaderAtOffset(context.Background(), bytes.NewReader([]byte("test")), 0)
+	if err == nil {
+		t.Fatal("expected error for non-32-byte key (< 32), got nil")
+	}
+
+	// 2. Key length > 32 bytes should return an error
+	client.Key = make([]byte, 64)
+	err = client.UploadReaderAtOffset(context.Background(), bytes.NewReader([]byte("test")), 0)
+	if err == nil {
+		t.Fatal("expected error for non-32-byte key (> 32), got nil")
+	}
+
+	// 3. Empty key should succeed with unencrypted stream
+	client.Key = nil
+	sess := relayServer.getSession(sessID)
+	pr, pw := io.Pipe()
+	sess.SetPipes(pr, pw)
+
+	uploadDone := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(pr)
+		uploadDone <- data
+	}()
+
+	err = client.UploadReaderAtOffset(context.Background(), bytes.NewReader([]byte("unencrypted-data")), 0)
+	if err != nil {
+		t.Fatalf("expected success for empty key (unencrypted), got %v", err)
+	}
+
+	received := <-uploadDone
+	if string(received) != "unencrypted-data" {
+		t.Fatalf("expected 'unencrypted-data', got '%s'", string(received))
+	}
+}
