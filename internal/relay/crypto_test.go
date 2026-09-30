@@ -182,3 +182,78 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 		t.Fatal("consecutive frames reused the same nonce")
 	}
 }
+
+func TestDecryptingReader_FrameTooLarge(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name   string
+		length uint32
+	}{
+		{"Just above MaxFrameLength", MaxFrameLength + 1},
+		{"Huge length 4GB", 0xFFFFFFFF},
+		{"Large length 10MB", 10 * 1024 * 1024},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tc.length)
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if err != ErrFrameTooLarge {
+				t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDecryptingReader_ZeroPerReadAllocations(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// Produce 100 frames worth of data (100 * 64KB)
+	data := make([]byte, 100*65536)
+	if _, err := io.ReadFull(rand.Reader, data); err != nil {
+		t.Fatalf("failed to generate random data: %v", err)
+	}
+
+	encReader, err := NewEncryptingReader(bytes.NewReader(data), key)
+	if err != nil {
+		t.Fatalf("NewEncryptingReader failed: %v", err)
+	}
+
+	encryptedData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("reading encrypted data failed: %v", err)
+	}
+
+	decReader, err := NewDecryptingReader(bytes.NewReader(encryptedData), key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	buf := make([]byte, 65536)
+
+	allocs := testing.AllocsPerRun(20, func() {
+		_, err := io.ReadFull(decReader, buf)
+		if err != nil {
+			t.Fatalf("io.ReadFull failed: %v", err)
+		}
+	})
+
+	if allocs > 0 {
+		t.Fatalf("expected 0 allocations per frame read, got %f", allocs)
+	}
+}

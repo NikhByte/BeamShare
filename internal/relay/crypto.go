@@ -5,7 +5,20 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
+)
+
+const (
+	// MaxFrameLength is the maximum allowed frame length (64KB payload + AEAD overhead).
+	// Calculated as 64KB chunk size (65536) + GCM NonceSize (12) + GCM TagSize (16) = 65564 bytes.
+	MaxFrameLength = 65564
+	MaxFrameSize   = MaxFrameLength
+)
+
+var (
+	// ErrFrameTooLarge is returned when an incoming frame length header exceeds MaxFrameLength.
+	ErrFrameTooLarge = errors.New("frame length exceeds maximum allowed size")
 )
 
 type EncryptingReader struct {
@@ -66,9 +79,12 @@ func (er *EncryptingReader) Read(p []byte) (int, error) {
 }
 
 type DecryptingReader struct {
-	r   io.Reader
-	gcm cipher.AEAD
-	buf []byte
+	r         io.Reader
+	gcm       cipher.AEAD
+	buf       []byte
+	rawBuf    []byte
+	plainBuf  []byte
+	headerBuf [4]byte
 }
 
 func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
@@ -81,8 +97,10 @@ func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
 		return nil, err
 	}
 	return &DecryptingReader{
-		r:   r,
-		gcm: gcm,
+		r:        r,
+		gcm:      gcm,
+		rawBuf:   make([]byte, MaxFrameLength),
+		plainBuf: make([]byte, MaxFrameLength),
 	}, nil
 }
 
@@ -96,25 +114,28 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 		return n, nil
 	}
 
-	var length uint32
-	if err := binary.Read(dr.r, binary.BigEndian, &length); err != nil {
+	if _, err := io.ReadFull(dr.r, dr.headerBuf[:]); err != nil {
 		return 0, err
 	}
 
-	frameData := make([]byte, length)
-	if _, err := io.ReadFull(dr.r, frameData); err != nil {
-		return 0, err
-	}
-
+	length := binary.BigEndian.Uint32(dr.headerBuf[:])
 	nonceSize := dr.gcm.NonceSize()
-	if len(frameData) < nonceSize {
+
+	if int(length) < nonceSize {
 		return 0, io.ErrUnexpectedEOF
 	}
+	if length > MaxFrameLength {
+		return 0, ErrFrameTooLarge
+	}
 
-	nonce := frameData[:nonceSize]
-	ciphertext := frameData[nonceSize:]
+	if _, err := io.ReadFull(dr.r, dr.rawBuf[:length]); err != nil {
+		return 0, err
+	}
 
-	plaintext, err := dr.gcm.Open(nil, nonce, ciphertext, nil)
+	nonce := dr.rawBuf[:nonceSize]
+	ciphertext := dr.rawBuf[nonceSize:length]
+
+	plaintext, err := dr.gcm.Open(dr.plainBuf[:0], nonce, ciphertext, nil)
 	if err != nil {
 		return 0, err
 	}
