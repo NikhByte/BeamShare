@@ -1,6 +1,29 @@
+function getSessionToken() {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get('token');
+  if (!token) {
+    const s = params.get('s');
+    if (s) return s;
+  }
+  if (!token) {
+    const rawLocal = params.get('local') || params.get('backend') || window.GAZE_BACKEND_URL || '';
+    if (rawLocal && rawLocal.includes('?')) {
+      try {
+        const queryPart = rawLocal.split('?')[1];
+        const localParams = new URLSearchParams(queryPart);
+        token = localParams.get('token') || localParams.get('s');
+      } catch (e) {}
+    }
+  }
+  return token || '';
+}
+
 function getBackendURL() {
   const params = new URLSearchParams(window.location.search);
   let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
+  if (backend && backend.includes('?')) {
+    backend = backend.split('?')[0];
+  }
   if (!backend) {
     backend = window.location.origin;
     if (backend.includes('vercel.app') || backend.startsWith('file://')) {
@@ -16,10 +39,11 @@ function getBackendURL() {
 function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
-  const s = params.get('s');
+  const token = getSessionToken();
   let fullPath = path;
-  if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+  if (token && !fullPath.includes('token=') && !fullPath.includes('s=')) {
+    const key = (params.get('s') && !params.get('token')) ? 's' : 'token';
+    fullPath = fullPath.includes('?') ? `${fullPath}&${key}=${encodeURIComponent(token)}` : `${fullPath}?${key}=${encodeURIComponent(token)}`;
   }
   if (backend) {
     return backend + fullPath;
@@ -1203,7 +1227,12 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      const savedBackend = window.GAZE_BACKEND_URL;
+      window.GAZE_BACKEND_URL = localURL;
+      const testUrl = apiPath('/api/meta');
+      window.GAZE_BACKEND_URL = savedBackend;
+
+      const res = await fetch(testUrl, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
