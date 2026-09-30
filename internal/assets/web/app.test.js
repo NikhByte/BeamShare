@@ -537,4 +537,74 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('generateQRCodeDataURL encodes complete share URL with session ID and key fragment', () => {
+    const fullShareURL = 'http://localhost:8080/?s=mock-session-123&mode=webrtc#k=dGVzdC1rZXlfMDEyMzQ1Njc4OTA=';
+    const dataUrl = app.generateQRCodeDataURL(fullShareURL);
+
+    assert.equal(dataUrl.startsWith('data:image/svg+xml;charset=utf-8,'), true);
+    
+    // Decode data URL content
+    const svgContent = decodeURIComponent(dataUrl.replace('data:image/svg+xml;charset=utf-8,', ''));
+    assert.equal(svgContent.includes('<svg'), true);
+    assert.equal(svgContent.includes('</svg>'), true);
+    assert.equal(svgContent.includes('<rect'), true);
+  });
+
+  test('startSenderSharing creates client-side QR code with zero external third-party requests', async () => {
+    const fetchCalls = [];
+    global.fetch = async (url) => {
+      fetchCalls.push(url);
+      if (url.includes('/poll')) {
+        return { ok: false, status: 404 };
+      }
+      return {
+        ok: true,
+        json: async () => ({ session: 'mock-session-123' })
+      };
+    };
+    window.fetch = global.fetch;
+
+    await app.startSenderSharing();
+
+    const qrImg = document.getElementById('send-qr-img');
+    assert.notEqual(qrImg, null);
+    
+    // Check that QR image src is a local SVG Data URL
+    assert.equal(qrImg.src.startsWith('data:image/svg+xml'), true);
+    
+    // Check that NO external network requests to api.qrserver.com or third-party domains were made
+    for (const callUrl of fetchCalls) {
+      assert.equal(callUrl.includes('api.qrserver.com'), false, 'Must not call third-party api.qrserver.com');
+      assert.equal(callUrl.includes('/api/qr'), false, 'Must not send key fragment to /api/qr');
+    }
+    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
+  });
+
+  test('renderQRCode handles failures gracefully without exposing key material in console logs', () => {
+    const originalConsoleError = console.error;
+    let capturedErrorMsg = '';
+    console.error = (msg) => {
+      capturedErrorMsg += msg;
+    };
+
+    try {
+      const secretKey = 'super-secret-decryption-key-12345';
+      const secretUrl = `http://localhost:8080/?s=123#k=${secretKey}`;
+
+      // Simulate a target element where image assignment triggers error or with bad element
+      const mockImg = {
+        set src(v) {
+          throw new Error('Image rendering failure');
+        }
+      };
+
+      app.renderQRCode(mockImg, secretUrl);
+
+      assert.equal(capturedErrorMsg.includes('Failed to generate QR code client-side'), true);
+      assert.equal(capturedErrorMsg.includes(secretKey), false, 'Must not expose secret key fragment in error logs');
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
 });
