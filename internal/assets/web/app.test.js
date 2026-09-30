@@ -341,6 +341,136 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
   });
+
+  test('WebRTC Receiver AES-GCM Frame Decryption and Fragmented Chunk Reassembly', async () => {
+    const { webcrypto } = require('node:crypto');
+    window.crypto = webcrypto;
+    global.crypto = webcrypto;
+
+    // 1. Generate 256-bit AES-GCM key
+    const aesKey = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    const rawKey = await crypto.subtle.exportKey("raw", aesKey);
+    const keyB64 = Buffer.from(rawKey).toString('base64url');
+    window.location.hash = `#k=${keyB64}`;
+
+    // 2. Parse decryption key from hash (Requirement 1 & Acceptance Criteria 1)
+    const importedKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+    assert.notEqual(importedKey, null);
+
+    // 3. Prepare plaintext payload
+    const plaintext = Buffer.from("BeamShare WebRTC Decrypted Payload Test Bit-For-Bit");
+
+    // 4. Encrypt plaintext into sender frame format using aesKey (which has "encrypt" usage)
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: nonce },
+      aesKey,
+      plaintext
+    );
+    const frameLen = 12 + ciphertext.byteLength;
+    const framedPayload = new Uint8Array(4 + frameLen);
+    const dv = new DataView(framedPayload.buffer);
+    dv.setUint32(0, frameLen, false); // Big endian length
+    framedPayload.set(nonce, 4);
+    framedPayload.set(new Uint8Array(ciphertext), 16);
+
+    // 5. Split framedPayload into 3 arbitrary network fragments
+    const frag1 = framedPayload.subarray(0, 10);
+    const frag2 = framedPayload.subarray(10, 30);
+    const frag3 = framedPayload.subarray(30);
+
+    // 6. Simulate SequentialChunkQueue writeHandler with frame reassembly & decryption
+    const receivedPlaintext = [];
+    let encBuffer = new Uint8Array(0);
+
+    const queue = new app.SequentialChunkQueue({
+      writeHandler: async (chunk) => {
+        let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
+        newBuffer.set(encBuffer, 0);
+        newBuffer.set(chunk, encBuffer.length);
+        encBuffer = newBuffer;
+
+        while (encBuffer.length >= 4) {
+          const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+          const fLen = dv.getUint32(0, false);
+          if (encBuffer.length >= 4 + fLen) {
+            const frame = encBuffer.slice(4, 4 + fLen);
+            encBuffer = encBuffer.slice(4 + fLen);
+
+            const n = new Uint8Array(frame.subarray(0, 12));
+            const c = new Uint8Array(frame.subarray(12));
+            const dec = await crypto.subtle.decrypt(
+              { name: "AES-GCM", iv: n },
+              importedKey,
+              c
+            );
+            receivedPlaintext.push(Buffer.from(dec));
+          } else {
+            break;
+          }
+        }
+      }
+    });
+
+    queue.enqueue(frag1);
+    queue.enqueue(frag2);
+    queue.enqueue(frag3);
+    queue.enqueueEOF();
+
+    await queue.drain();
+
+    assert.equal(encBuffer.length, 0);
+    const finalBuffer = Buffer.concat(receivedPlaintext);
+    assert.equal(finalBuffer.toString('utf8'), plaintext.toString('utf8'));
+  });
+
+  test('WebRTC Receiver Aborts and Throws Error on Incomplete Frame at EOF', async () => {
+    const { webcrypto } = require('node:crypto');
+    window.crypto = webcrypto;
+    global.crypto = webcrypto;
+
+    const aesKey = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    const rawKey = await crypto.subtle.exportKey("raw", aesKey);
+    const keyB64 = Buffer.from(rawKey).toString('base64url');
+    window.location.hash = `#k=${keyB64}`;
+
+    const importedKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+
+    // Create incomplete frame (only 10 bytes of a 50 byte frame)
+    const incompleteFrame = new Uint8Array(10);
+    const dv = new DataView(incompleteFrame.buffer);
+    dv.setUint32(0, 50, false); // Length header indicates 50 bytes
+
+    let encBuffer = new Uint8Array(0);
+    const queue = new app.SequentialChunkQueue({
+      writeHandler: async (chunk) => {
+        let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
+        newBuffer.set(encBuffer, 0);
+        newBuffer.set(chunk, encBuffer.length);
+        encBuffer = newBuffer;
+      }
+    });
+
+    queue.enqueue(incompleteFrame);
+    queue.enqueueEOF();
+
+    await queue.drain();
+
+    assert.equal(encBuffer.length > 0, true);
+    assert.throws(() => {
+      if (importedKey && encBuffer.length > 0) {
+        throw new Error("Incomplete encrypted frame remaining at end of stream");
+      }
+    }, { message: "Incomplete encrypted frame remaining at end of stream" });
+  });
 });
 
 describe('Gaze Web Sender Test Suite', () => {
