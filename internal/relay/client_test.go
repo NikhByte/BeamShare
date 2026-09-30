@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -226,3 +228,58 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		}
 	})
 }
+
+type mockHTTPClient struct {
+	called bool
+}
+
+func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	m.called = true
+	return nil, fmt.Errorf("HTTP request should not have been emitted")
+}
+
+func (m *mockHTTPClient) Get(url string) (*http.Response, error) {
+	m.called = true
+	return nil, fmt.Errorf("HTTP request should not have been emitted")
+}
+
+func (m *mockHTTPClient) Post(url, contentType string, body io.Reader) (*http.Response, error) {
+	m.called = true
+	return nil, fmt.Errorf("HTTP request should not have been emitted")
+}
+
+func TestUploadReaderAtOffset_InvalidKeyLength(t *testing.T) {
+	invalidKeyLengths := []int{1, 10, 16, 31, 33, 64}
+
+	for _, keyLen := range invalidKeyLengths {
+		t.Run(fmt.Sprintf("KeyLength_%d", keyLen), func(t *testing.T) {
+			mockHTTP := &mockHTTPClient{}
+			client := &Client{
+				BaseURL:   "http://localhost:9999",
+				SessionID: "test-session",
+				HTTP:      mockHTTP,
+				Key:       make([]byte, keyLen),
+			}
+
+			err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader([]byte("data")), 0)
+			if err == nil {
+				t.Fatalf("expected error for key length %d, got nil", keyLen)
+			}
+
+			expectedSubstr := "expected 32 bytes"
+			if !strings.Contains(err.Error(), expectedSubstr) {
+				t.Errorf("expected error message to contain %q, got %q", expectedSubstr, err.Error())
+			}
+
+			expectedLenSubstr := fmt.Sprintf("got %d", keyLen)
+			if !strings.Contains(err.Error(), expectedLenSubstr) {
+				t.Errorf("expected error message to contain %q, got %q", expectedLenSubstr, err.Error())
+			}
+
+			if mockHTTP.called {
+				t.Errorf("expected no HTTP request to be emitted for invalid key length %d", keyLen)
+			}
+		})
+	}
+}
+
