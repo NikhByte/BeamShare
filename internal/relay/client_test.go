@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -223,6 +224,33 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		receivedOffset := <-uploadDoneOffset
 		if string(receivedOffset) != string(offsetData) {
 			t.Fatalf("expected offset uploaded data '%s', got '%s'", string(offsetData), string(receivedOffset))
+		}
+	})
+
+	t.Run("InvalidKeyLength", func(t *testing.T) {
+		requestsReceived := 0
+		tsDummy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestsReceived++
+			http.Error(w, "should not be called", http.StatusInternalServerError)
+		}))
+		defer tsDummy.Close()
+
+		client := NewClient(tsDummy.URL)
+
+		invalidLengths := []int{1, 10, 16, 24, 31, 33, 64}
+		for _, l := range invalidLengths {
+			client.Key = make([]byte, l)
+			err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+			if err == nil {
+				t.Fatalf("expected error for key length %d, got nil", l)
+			}
+			if !strings.Contains(err.Error(), "invalid encryption key length: expected 32 bytes") {
+				t.Fatalf("expected key length error message for len %d, got: %v", l, err)
+			}
+		}
+
+		if requestsReceived != 0 {
+			t.Fatalf("expected 0 HTTP requests when key length is invalid, got %d", requestsReceived)
 		}
 	})
 }
