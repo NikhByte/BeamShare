@@ -182,3 +182,74 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 		t.Fatal("consecutive frames reused the same nonce")
 	}
 }
+
+func TestDecryptingReader_FrameTooLarge(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name   string
+		length uint32
+	}{
+		{name: "OneByteOverMax", length: 65565}, // Max allowed frame size is 65564
+		{name: "1MBFrameHeader", length: 1024 * 1024},
+		{name: "4GBFrameHeader", length: 0xFFFFFFFF},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tc.length)
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if err != ErrFrameTooLarge {
+				t.Fatalf("expected ErrFrameTooLarge for frame length %d, got %v", tc.length, err)
+			}
+		})
+	}
+}
+
+func TestDecryptingReader_FrameTooSmall(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name   string
+		length uint32
+	}{
+		{name: "ZeroLength", length: 0},
+		{name: "OneByteLength", length: 1},
+		{name: "ElevenBytesLength", length: 11},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tc.length)
+			if tc.length > 0 {
+				buf.Write(bytes.Repeat([]byte{0x01}, int(tc.length)))
+			}
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if err != io.ErrUnexpectedEOF {
+				t.Fatalf("expected io.ErrUnexpectedEOF for frame length %d, got %v", tc.length, err)
+			}
+		})
+	}
+}
