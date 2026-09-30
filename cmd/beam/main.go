@@ -551,7 +551,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								for {
 									// Backpressure check: wait if buffered amount > 1MB
 									if dc.BufferedAmount() > 1024*1024 {
-										<-bufferedAmountLowChan
+										if errWait := waitDataChannelBuffer(dc, bufferedAmountLowChan, 1024*1024); errWait != nil {
+											fmt.Printf("\n  Data channel closed during transfer: %v\n", errWait)
+											return
+										}
 									}
 
 									n, err := file.Read(buffer)
@@ -576,7 +579,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								// Wait for buffer to clear before sending EOF
 								dc.SetBufferedAmountLowThreshold(0)
 								if dc.BufferedAmount() > 0 {
-									<-bufferedAmountLowChan
+									if errWait := waitDataChannelBuffer(dc, bufferedAmountLowChan, 0); errWait != nil {
+										fmt.Printf("\n  Data channel closed before EOF: %v\n", errWait)
+										return
+									}
 								}
 								dc.SendText("EOF")
 
@@ -942,4 +948,36 @@ func downloadFile(code string) error {
 
 	fmt.Printf("\n\n  ✅ Saved to %s\n", outName)
 	return nil
+}
+
+func waitDataChannelBuffer(dc *webrtc.DataChannel, lowChan <-chan struct{}, target uint64) error {
+	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
+		return fmt.Errorf("data channel is no longer open")
+	}
+	if dc.BufferedAmount() <= target {
+		return nil
+	}
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if dc.ReadyState() != webrtc.DataChannelStateOpen {
+			return fmt.Errorf("data channel is no longer open")
+		}
+		if dc.BufferedAmount() <= target {
+			return nil
+		}
+
+		select {
+		case <-lowChan:
+			if dc.BufferedAmount() <= target {
+				return nil
+			}
+		case <-ticker.C:
+			if dc.BufferedAmount() <= target {
+				return nil
+			}
+		}
+	}
 }
