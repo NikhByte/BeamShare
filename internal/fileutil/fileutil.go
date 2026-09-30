@@ -22,8 +22,8 @@ func SanitizeReceivedFilename(rawName string, fallback string) string {
 	// Strip directory paths and normalize relative path tokens
 	cleaned = filepath.Base(filepath.Clean(cleaned))
 
-	// Trim leading/trailing boundary characters (dots, slashes, backslashes, nulls)
-	cleaned = strings.Trim(cleaned, "\x00./\\")
+	// Trim remaining null bytes, dots, slashes, backslashes, and surrounding spaces
+	cleaned = strings.Trim(cleaned, "\x00./\\ \t\r\n")
 
 	// Trim whitespace
 	cleaned = strings.TrimSpace(cleaned)
