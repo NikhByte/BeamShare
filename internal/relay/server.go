@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -1137,6 +1138,20 @@ func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 	w.Write(pngBytes)
 }
 
+// SanitizeFilename cleans an untrusted filename to prevent path traversal vulnerabilities.
+// It strips null bytes, path separators, and relative directory traversal markers.
+// If the sanitized filename is empty, it falls back to "upload.bin".
+func SanitizeFilename(name string) string {
+	clean := strings.ReplaceAll(name, "\x00", "")
+	clean = strings.ReplaceAll(clean, "\\", "/")
+	cleanBase := filepath.Base(filepath.Clean(clean))
+	cleanBase = strings.Trim(cleanBase, "\x00./\\")
+	if cleanBase == "" {
+		return "upload.bin"
+	}
+	return cleanBase
+}
+
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1177,6 +1192,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if part.FormName() == "file" {
+			cleanBase := SanitizeFilename(part.FileName())
+
 			pr, pw := io.Pipe()
 
 			sess.mu.Lock()
@@ -1194,7 +1211,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 			// Notify sender
 			select {
-			case sess.UploadReq <- part.FileName():
+			case sess.UploadReq <- cleanBase:
 			default:
 			}
 
@@ -1262,7 +1279,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}
 
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": cleanBase})
 			return
 		}
 		part.Close()
