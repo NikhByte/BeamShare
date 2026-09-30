@@ -1,8 +1,12 @@
 package relay
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -259,6 +263,118 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestSanitizeFilename(t *testing.T) {
+	testCases := []struct {
+		input    string
+		expected string
+	}{
+		{"../../evil.sh", "evil.sh"},
+		{"..\\..\\evil.bat", "evil.bat"},
+		{"/etc/passwd", "passwd"},
+		{"nested/dir/sub/data.dat", "data.dat"},
+		{"nested\\dir\\sub\\data.dat", "data.dat"},
+		{"....", "upload.bin"},
+		{"././.", "upload.bin"},
+		{"\\\\", "upload.bin"},
+		{"", "upload.bin"},
+		{"\x00", "upload.bin"},
+		{"evil\x00.sh", "evil.sh"},
+		{"valid_file.txt", "valid_file.txt"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.input, func(t *testing.T) {
+			result := SanitizeFilename(tc.input)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+func TestServer_HandleUploadFilenameSanitization(t *testing.T) {
+	relayServer := NewServer()
+	defer relayServer.Stop()
+
+	ts := httptest.NewServer(relayServer)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	sessID, err := client.Register(testCtx)
+	require.NoError(t, err)
+
+	testCases := []struct {
+		inputFilename    string
+		expectedFilename string
+	}{
+		{"../../evil.sh", "evil.sh"},
+		{"..\\..\\evil.bat", "evil.bat"},
+		{"/etc/passwd", "passwd"},
+		{"....", "upload.bin"},
+		{"", "upload.bin"},
+	}
+
+	httpClient := newTestHTTPClient()
+	defer httpClient.CloseIdleConnections()
+
+	for _, tc := range testCases {
+		t.Run(tc.inputFilename, func(t *testing.T) {
+			bodyBuf := new(bytes.Buffer)
+			mw := multipart.NewWriter(bodyBuf)
+			part, errPart := mw.CreateFormFile("file", tc.inputFilename)
+			require.NoError(t, errPart)
+			_, errWrite := part.Write([]byte("dummy content"))
+			require.NoError(t, errWrite)
+			require.NoError(t, mw.Close())
+
+			req, errReq := http.NewRequestWithContext(testCtx, http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyBuf)
+			require.NoError(t, errReq)
+			req.Header.Set("Content-Type", mw.FormDataContentType())
+
+			type uploadResult struct {
+				resp *http.Response
+				err  error
+			}
+			uploadCh := make(chan uploadResult, 1)
+
+			go func() {
+				resp, errDo := httpClient.Do(req)
+				uploadCh <- uploadResult{resp: resp, err: errDo}
+			}()
+
+			// Verify that long-polling gets the sanitized filename
+			cmd, errPoll := client.Poll(testCtx)
+			require.NoError(t, errPoll)
+			assert.Equal(t, "upload", cmd.Action)
+			assert.Equal(t, tc.expectedFilename, cmd.Filename)
+
+			// Pull data to unblock upload streaming
+			rc, errDl := client.DownloadData()
+			require.NoError(t, errDl)
+			downloaded, errCopy := io.ReadAll(rc)
+			rc.Close()
+			require.NoError(t, errCopy)
+			assert.Equal(t, "dummy content", string(downloaded))
+
+			select {
+			case res := <-uploadCh:
+				require.NoError(t, res.err)
+				defer res.resp.Body.Close()
+				assert.Equal(t, http.StatusOK, res.resp.StatusCode)
+
+				var respBody map[string]interface{}
+				errJSON := json.NewDecoder(res.resp.Body).Decode(&respBody)
+				require.NoError(t, errJSON)
+				assert.Equal(t, "ok", respBody["status"])
+				assert.Equal(t, tc.expectedFilename, respBody["filename"])
+			case <-time.After(3 * time.Second):
+				t.Fatal("upload request timed out waiting for response")
+			}
+		})
+	}
 }
 
 
