@@ -3,22 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"reflect"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/beamshare/beam/internal/server"
-	"github.com/beamshare/beam/internal/signaling"
-	"github.com/pion/webrtc/v3"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -172,263 +165,301 @@ func TestDownloadFile_PathTraversalSanitization(t *testing.T) {
 	}
 }
 
-func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing.T) {
+type mockDataChannel struct {
+	mu                  sync.Mutex
+	sentChunks          [][]byte
+	sentTexts           []string
+	bufferedAmount      uint64
+	bufferedThreshold   uint64
+	onBufferedAmountLow func()
+}
+
+func newMockDataChannel() *mockDataChannel {
+	return &mockDataChannel{
+		sentChunks: make([][]byte, 0),
+		sentTexts:  make([]string, 0),
+	}
+}
+
+func (m *mockDataChannel) Send(data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sentChunks = append(m.sentChunks, data)
+	return nil
+}
+
+func (m *mockDataChannel) SendText(text string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sentTexts = append(m.sentTexts, text)
+	return nil
+}
+
+func (m *mockDataChannel) BufferedAmount() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.bufferedAmount
+}
+
+func (m *mockDataChannel) SetBufferedAmountLowThreshold(th uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bufferedThreshold = th
+}
+
+func (m *mockDataChannel) OnBufferedAmountLow(f func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onBufferedAmountLow = f
+}
+
+func (m *mockDataChannel) setBufferedAmount(amt uint64) {
+	m.mu.Lock()
+	m.bufferedAmount = amt
+	cb := m.onBufferedAmountLow
+	th := m.bufferedThreshold
+	m.mu.Unlock()
+
+	if amt <= th && cb != nil {
+		cb()
+	}
+}
+
+func TestStreamFile_IndependentBufferSlices(t *testing.T) {
+	// Create a temporary file with 150KB of test data (spanning multiple 64KB chunks)
 	tmpFile, err := os.CreateTemp("", "beam_test_*.bin")
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
 	}
 	defer os.Remove(tmpFile.Name())
 
-	data := make([]byte, 512*1024)
-	for i := range data {
-		data[i] = byte(i % 256)
+	content := make([]byte, 150*1024)
+	for i := range content {
+		content[i] = byte(i % 251)
 	}
-	tmpFile.Write(data)
+	if _, err := tmpFile.Write(content); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
 	tmpFile.Close()
 
-	api := signaling.NewWebRTCAPI()
-	pcSender, err := api.NewPeerConnection(webrtc.Configuration{})
-	if err != nil {
-		t.Fatalf("failed to create pcSender: %v", err)
-	}
-	defer pcSender.Close()
+	mockDC := newMockDataChannel()
+	ctx := context.Background()
 
-	pcReceiver, err := api.NewPeerConnection(webrtc.Configuration{})
+	err = streamFile(ctx, mockDC, tmpFile.Name(), "test.bin", int64(len(content)), 0)
 	if err != nil {
-		t.Fatalf("failed to create pcReceiver: %v", err)
+		t.Fatalf("streamFile failed: %v", err)
 	}
-	defer pcReceiver.Close()
 
-	pcSender.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c != nil {
-			pcReceiver.AddICECandidate(c.ToJSON())
+	mockDC.mu.Lock()
+	defer mockDC.mu.Unlock()
+
+	if len(mockDC.sentChunks) == 0 {
+		t.Fatalf("expected sent chunks, got none")
+	}
+
+	// Verify each chunk slice points to distinct memory (independent buffer slices)
+	pointers := make(map[*byte]bool)
+	reconstructed := make([]byte, 0, len(content))
+	for _, chunk := range mockDC.sentChunks {
+		if len(chunk) == 0 {
+			continue
 		}
-	})
-	pcReceiver.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c != nil {
-			pcSender.AddICECandidate(c.ToJSON())
+		ptr := &chunk[0]
+		if pointers[ptr] {
+			t.Fatalf("found duplicate slice pointer %p; chunk buffers were reused instead of independent allocations", ptr)
 		}
-	})
+		pointers[ptr] = true
+		reconstructed = append(reconstructed, chunk...)
+	}
 
-	var receiverDC *webrtc.DataChannel
-	dcReady := make(chan struct{})
+	if !reflect.DeepEqual(reconstructed, content) {
+		t.Fatalf("reconstructed content does not match original content")
+	}
 
-	var receivedChunks [][]byte
-	var receivedChunksMu sync.Mutex
-	eofReceived := make(chan struct{})
+	if len(mockDC.sentTexts) == 0 || mockDC.sentTexts[len(mockDC.sentTexts)-1] != "EOF" {
+		t.Fatalf("expected final text to be EOF, got %v", mockDC.sentTexts)
+	}
+}
 
-	var receivedBytesAfterMeta int
-	pcReceiver.OnDataChannel(func(dc *webrtc.DataChannel) {
-		receiverDC = dc
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			if msg.IsString {
-				dataStr := string(msg.Data)
-				if strings.HasPrefix(dataStr, "META:") {
-					receivedChunksMu.Lock()
-					receivedBytesAfterMeta = 0
-					receivedChunksMu.Unlock()
-				} else if dataStr == "EOF" {
-					close(eofReceived)
-				}
-			} else {
-				receivedChunksMu.Lock()
-				c := make([]byte, len(msg.Data))
-				copy(c, msg.Data)
-				receivedChunks = append(receivedChunks, c)
-				receivedBytesAfterMeta += len(msg.Data)
-				receivedChunksMu.Unlock()
-			}
-		})
-		dc.OnOpen(func() {
-			close(dcReady)
-		})
-	})
-
-	ordered := true
-	dcSender, err := pcSender.CreateDataChannel("beam-file", &webrtc.DataChannelInit{
-		Ordered: &ordered,
-	})
+func TestStreamFile_HybridBackpressure(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "beam_bp_*.bin")
 	if err != nil {
-		t.Fatalf("failed to create data channel: %v", err)
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	content := make([]byte, 200*1024)
+	tmpFile.Write(content)
+	tmpFile.Close()
+
+	mockDC := newMockDataChannel()
+	// Set initial buffered amount > 1MB (1.5MB)
+	mockDC.setBufferedAmount(1500 * 1024)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	doneChan := make(chan error, 1)
+	go func() {
+		doneChan <- streamFile(ctx, mockDC, tmpFile.Name(), "bp.bin", int64(len(content)), 0)
+	}()
+
+	// Verify that sender is paused while buffer > 1MB
+	time.Sleep(100 * time.Millisecond)
+	mockDC.mu.Lock()
+	sentCountBefore := len(mockDC.sentChunks)
+	mockDC.mu.Unlock()
+
+	if sentCountBefore > 0 {
+		t.Fatalf("expected 0 chunks sent while backpressure is active (>1MB), got %d", sentCountBefore)
 	}
 
-	offer, err := pcSender.CreateOffer(nil)
-	if err != nil {
-		t.Fatalf("failed to create offer: %v", err)
-	}
-	if err := pcSender.SetLocalDescription(offer); err != nil {
-		t.Fatalf("failed to set local sdp: %v", err)
-	}
-
-	<-webrtc.GatheringCompletePromise(pcSender)
-
-	if err := pcReceiver.SetRemoteDescription(*pcSender.LocalDescription()); err != nil {
-		t.Fatalf("failed to set remote sdp: %v", err)
-	}
-
-	answer, err := pcReceiver.CreateAnswer(nil)
-	if err != nil {
-		t.Fatalf("failed to create answer: %v", err)
-	}
-	if err := pcReceiver.SetLocalDescription(answer); err != nil {
-		t.Fatalf("failed to set local answer: %v", err)
-	}
-
-	<-webrtc.GatheringCompletePromise(pcReceiver)
-
-	if err := pcSender.SetRemoteDescription(*pcReceiver.LocalDescription()); err != nil {
-		t.Fatalf("failed to set remote answer: %v", err)
-	}
+	// Drain buffer below 512KB (256KB) and then to 0
+	mockDC.setBufferedAmount(256 * 1024)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		mockDC.setBufferedAmount(0)
+	}()
 
 	select {
-	case <-dcReady:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for data channel to open")
+	case err := <-doneChan:
+		if err != nil {
+			t.Fatalf("streamFile returned error after backpressure release: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("streamFile timed out waiting for backpressure resume")
 	}
+
+	mockDC.mu.Lock()
+	defer mockDC.mu.Unlock()
+	if len(mockDC.sentChunks) == 0 {
+		t.Fatalf("expected chunks to be sent after buffer drained")
+	}
+}
+
+func TestStreamFile_ContextCancellationOnDuplicateOffset(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "beam_cancel_*.bin")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	content := make([]byte, 200*1024)
+	tmpFile.Write(content)
+	tmpFile.Close()
+
+	mockDC := newMockDataChannel()
+	// Pause stream using high buffer amount
+	mockDC.setBufferedAmount(2 * 1024 * 1024)
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+
+	errChan1 := make(chan error, 1)
+	go func() {
+		errChan1 <- streamFile(ctx1, mockDC, tmpFile.Name(), "cancel.bin", int64(len(content)), 0)
+	}()
 
 	time.Sleep(50 * time.Millisecond)
-
-	mainCtx, mainCancel := context.WithCancel(context.Background())
-	defer mainCancel()
-
-	filePath := tmpFile.Name()
-	fileName := filepath.Base(filePath)
-	fileSize := int64(len(data))
-
-	var streamMu sync.Mutex
-	var streamCancel context.CancelFunc
-
-	dcSender.OnMessage(func(msg webrtc.DataChannelMessage) {
-		if !msg.IsString {
-			return
-		}
-		dataStr := string(msg.Data)
-		if strings.HasPrefix(dataStr, "OFFSET:") {
-			parts := strings.SplitN(dataStr, ":", 2)
-			var offset int64
-			if len(parts) == 2 {
-				offset, _ = strconv.ParseInt(parts[1], 10, 64)
-			}
-
-			streamMu.Lock()
-			if streamCancel != nil {
-				streamCancel()
-			}
-			var streamCtx context.Context
-			streamCtx, streamCancel = context.WithCancel(mainCtx)
-			streamMu.Unlock()
-
-			go func(ctx context.Context, reqOffset int64) {
-				file, err := os.Open(filePath)
-				if err != nil {
-					return
-				}
-				defer file.Close()
-
-				if reqOffset > 0 {
-					_, err = file.Seek(reqOffset, io.SeekStart)
-					if err != nil {
-						return
-					}
-				}
-
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-
-				metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
-				dcSender.SendText(metaHeader)
-
-				bufferedAmountLowChan := make(chan struct{}, 1)
-				dcSender.SetBufferedAmountLowThreshold(512 * 1024)
-				dcSender.OnBufferedAmountLow(func() {
-					select {
-					case bufferedAmountLowChan <- struct{}{}:
-					default:
-					}
-				})
-
-				buffer := make([]byte, 16*1024)
-				totalSent := reqOffset
-
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					default:
-					}
-
-					if dcSender.BufferedAmount() > 1024*1024 {
-						for dcSender.BufferedAmount() > 512*1024 {
-							select {
-							case <-ctx.Done():
-								return
-							case <-bufferedAmountLowChan:
-							case <-time.After(10 * time.Millisecond):
-							}
-						}
-					}
-
-					n, err := file.Read(buffer)
-					if n > 0 {
-						select {
-						case <-ctx.Done():
-							return
-						default:
-						}
-
-						chunk := make([]byte, n)
-						copy(chunk, buffer[:n])
-
-						errSend := dcSender.Send(chunk)
-						if errSend != nil {
-							return
-						}
-						totalSent += int64(n)
-					}
-					if err != nil {
-						break
-					}
-				}
-
-				dcSender.SetBufferedAmountLowThreshold(0)
-				for dcSender.BufferedAmount() > 0 {
-					select {
-					case <-ctx.Done():
-						return
-					case <-bufferedAmountLowChan:
-					case <-time.After(10 * time.Millisecond):
-					}
-				}
-
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-
-				dcSender.SendText("EOF")
-			}(streamCtx, offset)
-		}
-	})
-
-	receiverDC.SendText("OFFSET:0")
-	time.Sleep(5 * time.Millisecond)
-	receiverDC.SendText("OFFSET:1024")
+	// Duplicate OFFSET signal arrives: cancel routine 1
+	cancel1()
 
 	select {
-	case <-eofReceived:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for EOF")
+	case err1 := <-errChan1:
+		if err1 == nil {
+			t.Fatalf("expected canceled context error from routine 1, got nil")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("routine 1 failed to terminate after context cancellation")
 	}
 
-	receivedChunksMu.Lock()
-	defer receivedChunksMu.Unlock()
+	// Routine 2 starts after duplicate OFFSET
+	mockDC.setBufferedAmount(0)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
 
-	expectedLen := len(data) - 1024
-	if receivedBytesAfterMeta != expectedLen {
-		t.Fatalf("expected received bytes after meta %d, got %d", expectedLen, receivedBytesAfterMeta)
+	err2 := streamFile(ctx2, mockDC, tmpFile.Name(), "cancel.bin", int64(len(content)), 0)
+	if err2 != nil {
+		t.Fatalf("routine 2 streamFile failed: %v", err2)
+	}
+
+	mockDC.mu.Lock()
+	defer mockDC.mu.Unlock()
+
+	// Verify only 1 EOF token was sent across both routines
+	eofCount := 0
+	for _, text := range mockDC.sentTexts {
+		if text == "EOF" {
+			eofCount++
+		}
+	}
+	if eofCount != 1 {
+		t.Fatalf("expected exactly 1 EOF token sent, got %d", eofCount)
+	}
+}
+
+func TestStreamFile_SafeEOFFlush_ZeroBuffer(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "beam_eof_*.bin")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	content := []byte("small file payload")
+	tmpFile.Write(content)
+	tmpFile.Close()
+
+	mockDC := newMockDataChannel()
+	mockDC.setBufferedAmount(0)
+
+	start := time.Now()
+	err = streamFile(context.Background(), mockDC, tmpFile.Name(), "eof.bin", int64(len(content)), 0)
+	if err != nil {
+		t.Fatalf("streamFile failed: %v", err)
+	}
+
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("zero-buffer EOF flush took unexpectedly long")
+	}
+
+	mockDC.mu.Lock()
+	defer mockDC.mu.Unlock()
+
+	if len(mockDC.sentTexts) == 0 || mockDC.sentTexts[len(mockDC.sentTexts)-1] != "EOF" {
+		t.Fatalf("expected EOF sent, got %v", mockDC.sentTexts)
+	}
+}
+
+func TestStreamFile_SafeEOFFlush_NonZeroBufferTimeout(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "beam_eoftout_*.bin")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	content := []byte("timeout test payload")
+	tmpFile.Write(content)
+	tmpFile.Close()
+
+	mockDC := newMockDataChannel()
+	// Keep buffered amount at 100 bytes continuously (never drains to 0)
+	mockDC.setBufferedAmount(100)
+
+	start := time.Now()
+	err = streamFile(context.Background(), mockDC, tmpFile.Name(), "timeout.bin", int64(len(content)), 0)
+	if err != nil {
+		t.Fatalf("streamFile failed: %v", err)
+	}
+
+	elapsed := time.Since(start)
+	// Bounded flush timeout is 5s, so it should take ~5s and not hang indefinitely
+	if elapsed < 4500*time.Millisecond || elapsed > 8*time.Second {
+		t.Fatalf("expected bounded timeout flush ~5s, took %v", elapsed)
+	}
+
+	mockDC.mu.Lock()
+	defer mockDC.mu.Unlock()
+
+	if len(mockDC.sentTexts) == 0 || mockDC.sentTexts[len(mockDC.sentTexts)-1] != "EOF" {
+		t.Fatalf("expected EOF sent after bounded timeout, got %v", mockDC.sentTexts)
 	}
 }
