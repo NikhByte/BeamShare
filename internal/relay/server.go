@@ -107,24 +107,50 @@ func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err er
 }
 
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
-	if pr == nil || s.DataPipeR == pr {
-		if s.DataPipeW != nil {
+	closePipeWriter := func(w **io.PipeWriter) {
+		if *w != nil {
 			if err != nil {
-				s.DataPipeW.CloseWithError(err)
+				(*w).CloseWithError(err)
 			} else {
-				s.DataPipeW.Close()
+				(*w).Close()
 			}
-			s.DataPipeW = nil
+			*w = nil
 		}
-		if s.DataPipeR != nil {
+	}
+	closePipeReader := func(r **io.PipeReader) {
+		if *r != nil {
 			if err != nil {
-				s.DataPipeR.CloseWithError(err)
+				(*r).CloseWithError(err)
 			} else {
-				s.DataPipeR.Close()
+				(*r).Close()
 			}
-			s.DataPipeR = nil
+			*r = nil
 		}
-	} else {
+	}
+
+	if pr == nil && pw == nil {
+		closePipeWriter(&s.DataPipeW)
+		closePipeReader(&s.DataPipeR)
+		closePipeWriter(&s.UploadPipeW)
+		closePipeReader(&s.UploadPipeR)
+		return
+	}
+
+	matched := false
+
+	if (pr != nil && s.DataPipeR == pr) || (pw != nil && s.DataPipeW == pw) {
+		closePipeWriter(&s.DataPipeW)
+		closePipeReader(&s.DataPipeR)
+		matched = true
+	}
+
+	if (pr != nil && s.UploadPipeR == pr) || (pw != nil && s.UploadPipeW == pw) {
+		closePipeWriter(&s.UploadPipeW)
+		closePipeReader(&s.UploadPipeR)
+		matched = true
+	}
+
+	if !matched {
 		if pw != nil {
 			if err != nil {
 				pw.CloseWithError(err)
@@ -871,7 +897,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	sess.mu.Lock()
 	if sess.DataPipeR != nil || sess.DataPipeW != nil {
-		sess.closePipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new download request"))
+		sess.closePipesIfMatchLocked(sess.DataPipeR, sess.DataPipeW, fmt.Errorf("replaced by new download request"))
 	}
 	sess.DataPipeR = pr
 	sess.DataPipeW = pw
@@ -1059,10 +1085,36 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		if part.FormName() == "file" {
 			sess.mu.Lock()
+			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
+				sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
+			}
+
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
 			sess.mu.Unlock()
+
+			var uploadErr error
+			defer func() {
+				sess.ClosePipesIfMatch(pr, pw, uploadErr)
+			}()
+
+			done := make(chan struct{})
+			defer close(done)
+
+			go func() {
+				select {
+				case <-done:
+					return
+				case <-r.Context().Done():
+					select {
+					case <-done:
+						return
+					default:
+						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("upload context cancelled: %w", r.Context().Err()))
+					}
+				}
+			}()
 
 			// Notify sender
 			select {
@@ -1071,8 +1123,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Stream data to pipe
-			_, err = io.Copy(pw, part)
-			pw.CloseWithError(err)
+			_, uploadErr = io.Copy(pw, part)
+			if uploadErr != nil {
+				pw.CloseWithError(uploadErr)
+				part.Close()
+				http.Error(w, fmt.Sprintf("upload failed: %v", uploadErr), http.StatusInternalServerError)
+				return
+			}
+			pw.Close()
 			part.Close()
 
 			w.Header().Set("Content-Type", "application/json")
@@ -1093,6 +1151,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	sess.mu.Lock()
 	pr := sess.UploadPipeR
+	pw := sess.UploadPipeW
 	sess.mu.Unlock()
 
 	if pr == nil {
@@ -1100,6 +1159,30 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var pullErr error
+	defer func() {
+		if pullErr != nil {
+			sess.ClosePipesIfMatch(pr, pw, pullErr)
+		}
+	}()
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-r.Context().Done():
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("pull context cancelled: %w", r.Context().Err()))
+			}
+		}
+	}()
+
 	w.Header().Set("Content-Type", "application/octet-stream")
-	io.Copy(w, pr)
+	_, pullErr = io.Copy(w, pr)
 }
