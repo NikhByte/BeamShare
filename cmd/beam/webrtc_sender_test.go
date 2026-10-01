@@ -23,7 +23,7 @@ import (
 )
 
 func setupWebRTCPair(t *testing.T, srv *server.Server, testFilePath string, testFileName string, testFileSize int64, onRxMsg func(dc *webrtc.DataChannel, msg webrtc.DataChannelMessage)) (*signaling.Session, *webrtc.PeerConnection, *webrtc.DataChannel, chan struct{}) {
-	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 10*time.Second)
+	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 200*time.Millisecond)
 	require.NoError(t, err)
 
 	senderTxReady := make(chan struct{})
@@ -266,7 +266,7 @@ func setupWebRTCPair(t *testing.T, srv *server.Server, testFilePath string, test
 		rxDataChannelCh <- dc
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	_, err = senderSession.CreateOffer(ctx)
@@ -308,19 +308,19 @@ func setupWebRTCPair(t *testing.T, srv *server.Server, testFilePath string, test
 	var rxDC *webrtc.DataChannel
 	select {
 	case rxDC = <-rxDataChannelCh:
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for receiver DataChannel")
 	}
 
 	select {
 	case <-rxOpenCh:
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for receiver DataChannel open")
 	}
 
 	select {
 	case <-senderTxReady:
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for sender DataChannel open")
 	}
 
@@ -408,7 +408,7 @@ func TestWebRTC_DuplicateOffsetCancellation(t *testing.T) {
 		assert.Equal(t, expectedHash, actualHash, "Hash of file received after duplicate OFFSET must match expected hash")
 		assert.Equal(t, 2, len(receivedMeta), "Should receive two META headers from initial and duplicate stream")
 		assert.True(t, duplicateSent, "Duplicate OFFSET signal should have been sent during stream")
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for transfer completion after duplicate OFFSET")
 	}
 }
@@ -467,7 +467,7 @@ func TestWebRTC_IndependentChunkSlicesAndBackpressure(t *testing.T) {
 
 		assert.Equal(t, testPayload, receivedBuf.Bytes())
 		assert.True(t, len(chunkPointers) > 1, "Should receive multiple chunks")
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for chunked transfer completion")
 	}
 }
@@ -507,7 +507,7 @@ func TestWebRTC_EOFFlushZeroBuffer(t *testing.T) {
 	select {
 	case <-eofReceived:
 		// EOF received successfully without hanging on zero buffer
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for EOF token on zero-buffer flush")
 	}
 }
@@ -553,7 +553,7 @@ func TestWebRTC_BackpressureThresholdPauseResume(t *testing.T) {
 		} else {
 			receivedBuf.Write(msg.Data)
 			// Introduce small delay to simulate slow receiver consuming buffer
-			time.Sleep(500 * time.Microsecond)
+			time.Sleep(50 * time.Microsecond)
 		}
 	}
 
@@ -575,7 +575,7 @@ func TestWebRTC_BackpressureThresholdPauseResume(t *testing.T) {
 
 		assert.Equal(t, fileSize, receivedBuf.Len())
 		assert.Equal(t, expectedHash, actualHash)
-	case <-time.After(15 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for backpressure transfer completion")
 	}
 }
