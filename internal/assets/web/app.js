@@ -1766,6 +1766,18 @@ async function startWebRTC() {
       receivedChunks = [];
     }
 
+    let decryptionKey = null;
+    let encBuffer = new Uint8Array(0);
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch (e) {
+      console.error("Failed to import decryption key", e);
+      showError("Decryption key error: " + e.message);
+      if (webrtcDataChannel) webrtcDataChannel.close();
+      if (pc) pc.close();
+      return;
+    }
+
     setState('downloading');
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
@@ -1792,22 +1804,72 @@ async function startWebRTC() {
           reject(err);
         },
         writeHandler: async (chunk) => {
-          if (diskWritableStream) {
-            await diskWritableStream.write(chunk);
-          } else if (swPipePort) {
-            swPipePort.postMessage(chunk);
-          } else if (useIndexedDB) {
-            await storeChunkIDB(chunk);
-          } else {
-            receivedChunks.push(chunk);
-          }
+          if (decryptionKey) {
+            let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
+            newBuffer.set(encBuffer, 0);
+            newBuffer.set(chunk, encBuffer.length);
+            encBuffer = newBuffer;
 
-          receivedBytes += chunk.byteLength;
-          maybeSaveProgress();
-          if (totalBytes > 0) {
-            updateProgress(receivedBytes / totalBytes);
-            updateDLStats(receivedBytes, totalBytes);
-            updateSpeed(receivedBytes);
+            while (encBuffer.length >= 4) {
+              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+              const frameLen = dv.getUint32(0, false);
+              if (encBuffer.length >= 4 + frameLen) {
+                const frame = encBuffer.slice(4, 4 + frameLen);
+                encBuffer = encBuffer.slice(4 + frameLen);
+
+                if (frame.length < 12) {
+                  throw new Error("Invalid encrypted frame: frame length shorter than IV");
+                }
+
+                const nonce = new Uint8Array(frame.subarray(0, 12));
+                const ciphertext = new Uint8Array(frame.subarray(12));
+
+                const decrypted = await crypto.subtle.decrypt(
+                  { name: "AES-GCM", iv: nonce },
+                  decryptionKey,
+                  ciphertext
+                );
+                const decValue = new Uint8Array(decrypted);
+
+                if (diskWritableStream) {
+                  await diskWritableStream.write(decValue);
+                } else if (swPipePort) {
+                  swPipePort.postMessage(decValue);
+                } else if (useIndexedDB) {
+                  await storeChunkIDB(decValue);
+                } else {
+                  receivedChunks.push(decValue);
+                }
+
+                receivedBytes += decValue.byteLength;
+                maybeSaveProgress();
+                if (totalBytes > 0) {
+                  updateProgress(receivedBytes / totalBytes);
+                  updateDLStats(receivedBytes, totalBytes);
+                  updateSpeed(receivedBytes);
+                }
+              } else {
+                break;
+              }
+            }
+          } else {
+            if (diskWritableStream) {
+              await diskWritableStream.write(chunk);
+            } else if (swPipePort) {
+              swPipePort.postMessage(chunk);
+            } else if (useIndexedDB) {
+              await storeChunkIDB(chunk);
+            } else {
+              receivedChunks.push(chunk);
+            }
+
+            receivedBytes += chunk.byteLength;
+            maybeSaveProgress();
+            if (totalBytes > 0) {
+              updateProgress(receivedBytes / totalBytes);
+              updateDLStats(receivedBytes, totalBytes);
+              updateSpeed(receivedBytes);
+            }
           }
         }
       });
@@ -1818,6 +1880,9 @@ async function startWebRTC() {
             if (e.data === "EOF") {
               chunkQueue.enqueueEOF();
               chunkQueue.drain().then(async () => {
+                if (decryptionKey && encBuffer.length > 0) {
+                  throw new Error("Incomplete encrypted frame remaining at EOF");
+                }
                 if (diskWritableStream) {
                   await diskWritableStream.close();
                   if (useOPFS) {
@@ -1838,7 +1903,9 @@ async function startWebRTC() {
                 }
                 resolve();
               }).catch((err) => {
-                // Handled in chunkQueue onError callback
+                showError(`Transfer failed: ${err.message}`);
+                dc.close();
+                reject(err);
               });
             }
             return;

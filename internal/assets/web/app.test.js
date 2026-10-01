@@ -69,6 +69,9 @@ describe('Gaze Web Receiver Test Suite', () => {
     global.localStorage = window.localStorage;
 
     // Set up global environment for app.js
+    const { webcrypto } = require('node:crypto');
+    window.crypto = webcrypto;
+    global.crypto = window.crypto;
     global.window = window;
     global.document = document;
     global.navigator = window.navigator;
@@ -340,6 +343,177 @@ describe('Gaze Web Receiver Test Suite', () => {
     await queue.drain();
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
+  });
+
+  test('WebRTC Receiver — AES-GCM Decryption within SequentialChunkQueue writeHandler', async () => {
+    // 1. Generate key and set hash
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    const rawKey = await crypto.subtle.exportKey("raw", key);
+    const keyB64 = Buffer.from(rawKey).toString('base64url');
+    window.location.hash = `#k=${keyB64}`;
+
+    // Import key using parseDecryptionKeyFromHash
+    const decryptionKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+    assert.notEqual(decryptionKey, null);
+
+    // Prepare helper to create encrypted frames
+    const createEncryptedFrame = async (plainData) => {
+      const nonce = crypto.getRandomValues(new Uint8Array(12));
+      const ciphertext = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: nonce },
+        key,
+        plainData
+      );
+      const frameLen = 12 + ciphertext.byteLength;
+      const payload = new Uint8Array(4 + frameLen);
+      const dv = new DataView(payload.buffer);
+      dv.setUint32(0, frameLen, false);
+      payload.set(nonce, 4);
+      payload.set(new Uint8Array(ciphertext), 4 + 12);
+      return payload;
+    };
+
+    const plaintext1 = new Uint8Array([72, 101, 108, 108, 111]); // "Hello"
+    const plaintext2 = new Uint8Array([32, 87, 111, 114, 108, 100]); // " World"
+    const frame1 = await createEncryptedFrame(plaintext1);
+    const frame2 = await createEncryptedFrame(plaintext2);
+
+    const receivedChunks = [];
+    let receivedBytes = 0;
+    let encBuffer = new Uint8Array(0);
+
+    const mockDC = { readyState: 'open', send: () => {}, close: () => {} };
+    const queue = new app.SequentialChunkQueue({
+      dataChannel: mockDC,
+      writeHandler: async (chunk) => {
+        if (decryptionKey) {
+          let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
+          newBuffer.set(encBuffer, 0);
+          newBuffer.set(chunk, encBuffer.length);
+          encBuffer = newBuffer;
+
+          while (encBuffer.length >= 4) {
+            const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+            const frameLen = dv.getUint32(0, false);
+            if (encBuffer.length >= 4 + frameLen) {
+              const frame = encBuffer.slice(4, 4 + frameLen);
+              encBuffer = encBuffer.slice(4 + frameLen);
+
+              const nonce = new Uint8Array(frame.subarray(0, 12));
+              const ciphertext = new Uint8Array(frame.subarray(12));
+
+              const decrypted = await crypto.subtle.decrypt(
+                { name: "AES-GCM", iv: nonce },
+                decryptionKey,
+                ciphertext
+              );
+              const decValue = new Uint8Array(decrypted);
+              receivedChunks.push(decValue);
+              receivedBytes += decValue.byteLength;
+            } else {
+              break;
+            }
+          }
+        }
+      }
+    });
+
+    queue.enqueue(frame1);
+    queue.enqueue(frame2);
+    queue.enqueueEOF();
+    await queue.drain();
+
+    const fullPlaintext = Buffer.concat(receivedChunks.map(c => Buffer.from(c))).toString('utf8');
+    assert.equal(fullPlaintext, "Hello World");
+    assert.equal(receivedBytes, 11);
+  });
+
+  test('WebRTC Receiver — Invalid Key or Tampered Ciphertext Triggers Exception in writeHandler', async () => {
+    // Key A used to encrypt
+    const keyA = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    // Key B set in receiver hash
+    const keyB = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    const rawKeyB = await crypto.subtle.exportKey("raw", keyB);
+    const keyB64 = Buffer.from(rawKeyB).toString('base64url');
+    window.location.hash = `#k=${keyB64}`;
+
+    const receiverKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+
+    // Encrypt frame with keyA
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: nonce },
+      keyA,
+      new Uint8Array([1, 2, 3, 4, 5])
+    );
+    const frameLen = 12 + ciphertext.byteLength;
+    const payload = new Uint8Array(4 + frameLen);
+    const dv = new DataView(payload.buffer);
+    dv.setUint32(0, frameLen, false);
+    payload.set(nonce, 4);
+    payload.set(new Uint8Array(ciphertext), 4 + 12);
+
+    let onErrorCalled = false;
+    let closedChannel = false;
+    const mockDC = {
+      readyState: 'open',
+      send: () => {},
+      close: () => { closedChannel = true; }
+    };
+
+    let encBuffer = new Uint8Array(0);
+    const queue = new app.SequentialChunkQueue({
+      dataChannel: mockDC,
+      onError: (err) => {
+        onErrorCalled = true;
+        mockDC.close();
+      },
+      writeHandler: async (chunk) => {
+        let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
+        newBuffer.set(encBuffer, 0);
+        newBuffer.set(chunk, encBuffer.length);
+        encBuffer = newBuffer;
+
+        while (encBuffer.length >= 4) {
+          const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+          const fLen = dv.getUint32(0, false);
+          if (encBuffer.length >= 4 + fLen) {
+            const frame = encBuffer.slice(4, 4 + fLen);
+            encBuffer = encBuffer.slice(4 + fLen);
+            const iv = new Uint8Array(frame.subarray(0, 12));
+            const cipher = new Uint8Array(frame.subarray(12));
+
+            // Should throw OperationError because receiverKey is keyB, but chunk was encrypted with keyA
+            await crypto.subtle.decrypt(
+              { name: "AES-GCM", iv },
+              receiverKey,
+              cipher
+            );
+          } else {
+            break;
+          }
+        }
+      }
+    });
+
+    queue.enqueue(payload);
+    queue.enqueueEOF();
+
+    await assert.rejects(async () => await queue.drain());
+    assert.equal(onErrorCalled, true);
+    assert.equal(closedChannel, true);
   });
 });
 
