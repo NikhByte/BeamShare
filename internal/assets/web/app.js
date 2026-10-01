@@ -1,3 +1,18 @@
+function getToken() {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get('token') || params.get('t') || '';
+  if (!token) {
+    const backend = params.get('backend') || params.get('b') || '';
+    if (backend && backend.includes('token=')) {
+      try {
+        const backendUrl = new URL(backend);
+        token = backendUrl.searchParams.get('token') || backendUrl.searchParams.get('t') || '';
+      } catch (e) {}
+    }
+  }
+  return token;
+}
+
 function getBackendURL() {
   const params = new URLSearchParams(window.location.search);
   let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
@@ -6,6 +21,9 @@ function getBackendURL() {
     if (backend.includes('vercel.app') || backend.startsWith('file://')) {
       backend = 'https://beamshare.onrender.com';
     }
+  }
+  if (backend && backend.includes('?')) {
+    backend = backend.split('?')[0];
   }
   if (backend && backend.endsWith('/')) {
     backend = backend.slice(0, -1);
@@ -17,10 +35,18 @@ function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
-  let fullPath = path;
-  if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
-  }
+  const token = getToken();
+
+  const urlParts = path.split('?');
+  const basePath = urlParts[0];
+  const queryParams = new URLSearchParams(urlParts[1] || '');
+
+  if (s) queryParams.set('s', s);
+  if (token && !queryParams.has('token')) queryParams.set('token', token);
+
+  const queryString = queryParams.toString();
+  const fullPath = queryString ? `${basePath}?${queryString}` : basePath;
+
   if (backend) {
     return backend + fullPath;
   }
@@ -821,16 +847,16 @@ function setMode(mode, label) {
 
 // ── Service Worker Pipe ───────────────────────────────────────────────────────
 async function getSWPipe(fileMeta) {
-  if (!('serviceWorker' in navigator)) return null;
+  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
 
   try {
     const swReady = navigator.serviceWorker.ready;
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 3000));
     const reg = await Promise.race([swReady, timeout]);
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
+    let sw = navigator.serviceWorker.controller;
     if (!sw) return null;
 
-    const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
+    const swUrl = apiPath(`/sw-download-pipe/${Math.random().toString(36).substring(2)}`);
     const channel = new MessageChannel();
     const port = channel.port1;
 
@@ -1958,11 +1984,15 @@ function renderFileCard(meta) {
 
 function triggerSave(blob, name) {
   const url = URL.createObjectURL(blob);
-  const a   = Object.assign(document.createElement('a'), { href: url, download: name });
+  triggerSaveURL(url, name);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function triggerSaveURL(url, name) {
+  const a = Object.assign(document.createElement('a'), { href: url, download: name });
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  setTimeout(() => a.remove(), 1000);
 }
 
 function appendTerminalText(text) {
@@ -2577,6 +2607,7 @@ if (typeof module !== 'undefined' && module.exports) {
     VirtualLogViewer,
     startHTTPSSE,
     getBackendURL,
+    getToken,
     apiPath,
     formatBytes,
     mimeLabel,
