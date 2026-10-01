@@ -458,7 +458,19 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					uploadSize int64
 					uploaded   int64
 					uploadStat time.Time
+
+					senderMu     sync.Mutex
+					senderCancel context.CancelFunc
+					senderDone   chan struct{}
 				)
+
+				dc.OnClose(func() {
+					senderMu.Lock()
+					if senderCancel != nil {
+						senderCancel()
+					}
+					senderMu.Unlock()
+				})
 
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
@@ -510,8 +522,27 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if len(parts) == 2 {
 								offset, _ = strconv.ParseInt(parts[1], 10, 64)
 							}
+
+							senderMu.Lock()
+							if senderCancel != nil {
+								senderCancel()
+								prevDone := senderDone
+								senderMu.Unlock()
+								if prevDone != nil {
+									<-prevDone
+								}
+								senderMu.Lock()
+							}
+
+							ctx, cancel := context.WithCancel(context.Background())
+							done := make(chan struct{})
+							senderCancel = cancel
+							senderDone = done
+							senderMu.Unlock()
+
 							// File sender goroutine (Direct-to-Disk + Backpressure)
-							go func() {
+							go func(ctx context.Context, done chan struct{}) {
+								defer close(done)
 								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
 								file, err := os.Open(filePath)
 								if err != nil {
@@ -526,6 +557,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 										fmt.Printf("  Error seeking file: %v\n", err)
 										return
 									}
+								}
+
+								if ctx.Err() != nil {
+									return
 								}
 
 								// Send META header
@@ -544,23 +579,45 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									}
 								})
 
-								buffer := make([]byte, 64*1024) // 64KB chunk size
+								buffer := make([]byte, 32*1024) // 32KB chunk size (bounded under 64KB)
 								totalSent := offset
 								start := time.Now()
 
 								for {
+									if ctx.Err() != nil {
+										return
+									}
+
 									// Backpressure check: wait if buffered amount > 1MB
 									if dc.BufferedAmount() > 1024*1024 {
-										<-bufferedAmountLowChan
+										ticker := time.NewTicker(10 * time.Millisecond)
+										for dc.BufferedAmount() > 512*1024 {
+											select {
+											case <-ctx.Done():
+												ticker.Stop()
+												return
+											case <-bufferedAmountLowChan:
+											case <-ticker.C:
+											}
+										}
+										ticker.Stop()
+									}
+
+									if ctx.Err() != nil {
+										return
 									}
 
 									n, err := file.Read(buffer)
 									if n > 0 {
-										errSend := dc.Send(buffer[:n])
+										chunk := make([]byte, n)
+										copy(chunk, buffer[:n])
+
+										errSend := dc.Send(chunk)
 										if errSend != nil {
 											fmt.Printf("\n  Error sending chunk: %v\n", errSend)
 											return
 										}
+										time.Sleep(2 * time.Millisecond)
 										totalSent += int64(n)
 										fmt.Printf("\r  📤 Sending P2P: %s (%s/%s)",
 											ui.FormatPercentage(totalSent, fileSize),
@@ -573,12 +630,32 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									}
 								}
 
+								if ctx.Err() != nil {
+									return
+								}
+
 								// Wait for buffer to clear before sending EOF
 								dc.SetBufferedAmountLowThreshold(0)
 								if dc.BufferedAmount() > 0 {
-									<-bufferedAmountLowChan
+									eofCtx, eofCancel := context.WithTimeout(ctx, 5*time.Second)
+									defer eofCancel()
+									ticker := time.NewTicker(10 * time.Millisecond)
+									defer ticker.Stop()
+
+									for dc.BufferedAmount() > 0 {
+										select {
+										case <-eofCtx.Done():
+											goto sendEOF
+										case <-bufferedAmountLowChan:
+										case <-ticker.C:
+										}
+									}
 								}
-								dc.SendText("EOF")
+
+							sendEOF:
+								if ctx.Err() == nil {
+									dc.SendText("EOF")
+								}
 
 								elapsed := time.Since(start)
 								sentInSession := totalSent - offset
@@ -587,7 +664,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									elapsed.Seconds(),
 									ui.FormatSpeed(sentInSession, elapsed),
 								)
-							}()
+							}(ctx, done)
 						}
 					} else {
 						if uploadFile != nil {

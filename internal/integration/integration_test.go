@@ -95,7 +95,7 @@ func TestEndToEndDirectHTTP(t *testing.T) {
 // TestEndToEndOpticalWebRTCP2P tests optical QR SDP compression/decompression and WebRTC P2P transfer offline.
 func TestEndToEndOpticalWebRTCP2P(t *testing.T) {
 	// 1. Create Sender Session
-	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 10*time.Second)
+	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 200*time.Millisecond)
 	require.NoError(t, err)
 	defer senderSession.Close()
 
