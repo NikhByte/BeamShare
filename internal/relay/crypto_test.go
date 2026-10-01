@@ -81,15 +81,23 @@ func TestEncryptDecryptEmptyData(t *testing.T) {
 }
 
 func TestInvalidKeyLengths(t *testing.T) {
-	invalidKey := make([]byte, 10) // Invalid for AES (requires 16, 24, or 32)
-	_, err := NewEncryptingReader(bytes.NewReader([]byte("test")), invalidKey)
-	if err == nil {
-		t.Fatal("expected error for invalid key length in NewEncryptingReader, got nil")
+	invalidKeys := [][]byte{
+		make([]byte, 10),
+		make([]byte, 16),
+		make([]byte, 24),
+		make([]byte, 64),
 	}
 
-	_, err = NewDecryptingReader(bytes.NewReader([]byte("test")), invalidKey)
-	if err == nil {
-		t.Fatal("expected error for invalid key length in NewDecryptingReader, got nil")
+	for _, invalidKey := range invalidKeys {
+		_, err := NewEncryptingReader(bytes.NewReader([]byte("test")), invalidKey)
+		if err == nil {
+			t.Fatalf("expected error for invalid key length %d in NewEncryptingReader, got nil", len(invalidKey))
+		}
+
+		_, err = NewDecryptingReader(bytes.NewReader([]byte("test")), invalidKey)
+		if err == nil {
+			t.Fatalf("expected error for invalid key length %d in NewDecryptingReader, got nil", len(invalidKey))
+		}
 	}
 }
 

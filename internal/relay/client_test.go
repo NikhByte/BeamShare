@@ -200,6 +200,31 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		}
 	})
 
+	t.Run("InvalidKeyLengths", func(t *testing.T) {
+		invalidKeys := [][]byte{
+			make([]byte, 10),
+			make([]byte, 16),
+			make([]byte, 64),
+		}
+
+		for _, badKey := range invalidKeys {
+			client, _ := createIsolatedSession(t)
+			client.Key = badKey
+
+			err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+			if err == nil {
+				t.Fatalf("expected error for key length %d in UploadReaderAtOffset, got nil", len(badKey))
+			}
+
+			tmpFile := filepath.Join(t.TempDir(), "test.txt")
+			os.WriteFile(tmpFile, testData, 0644)
+			err = client.UploadData(context.Background(), tmpFile)
+			if err == nil {
+				t.Fatalf("expected error for key length %d in UploadData, got nil", len(badKey))
+			}
+		}
+	})
+
 	t.Run("WithOffset", func(t *testing.T) {
 		client, sess := createIsolatedSession(t)
 		sess.mu.Lock()
