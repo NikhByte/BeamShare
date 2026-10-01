@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
+	"math"
 	"testing"
 )
 
@@ -182,3 +184,92 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 		t.Fatal("consecutive frames reused the same nonce")
 	}
 }
+
+func TestOversizedFrameHeader(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name   string
+		length uint32
+	}{
+		{
+			name:   "MaxFrameSize plus one",
+			length: MaxFrameSize + 1,
+		},
+		{
+			name:   "Large frame size 1MB",
+			length: 1024 * 1024,
+		},
+		{
+			name:   "Maximum uint32",
+			length: math.MaxUint32,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			if err := binary.Write(buf, binary.BigEndian, tc.length); err != nil {
+				t.Fatalf("failed to write frame length header: %v", err)
+			}
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if !errors.Is(err, ErrFrameTooLarge) {
+				t.Fatalf("expected ErrFrameTooLarge for length %d, got %v", tc.length, err)
+			}
+		})
+	}
+}
+
+func TestMaxFrameSizeExactBound(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// 64KB input produces a payload frame of exactly 65,564 bytes (12 nonce + 65536 chunk + 16 auth tag)
+	chunk64K := make([]byte, 65536)
+	if _, err := io.ReadFull(rand.Reader, chunk64K); err != nil {
+		t.Fatalf("failed to generate chunk data: %v", err)
+	}
+
+	encReader, err := NewEncryptingReader(bytes.NewReader(chunk64K), key)
+	if err != nil {
+		t.Fatalf("NewEncryptingReader failed: %v", err)
+	}
+
+	encryptedData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("io.ReadAll failed on EncryptingReader: %v", err)
+	}
+
+	// Sanity check frame header length
+	frameLen := binary.BigEndian.Uint32(encryptedData[0:4])
+	if frameLen != MaxFrameSize {
+		t.Fatalf("expected encrypted frame length to be %d, got %d", MaxFrameSize, frameLen)
+	}
+
+	decReader, err := NewDecryptingReader(bytes.NewReader(encryptedData), key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	decryptedData, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("reading decrypted data failed: %v", err)
+	}
+
+	if !bytes.Equal(decryptedData, chunk64K) {
+		t.Fatal("decrypted data does not match original 64KB chunk")
+	}
+}
+
