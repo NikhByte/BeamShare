@@ -694,6 +694,125 @@ class SequentialChunkQueue {
   }
 }
 
+// ── WebRTC Stream Decrypter ────────────────────────────────────────────────────
+class WebRTCStreamDecrypter {
+  constructor(keyOrOptions, onChunk, onError) {
+    if (keyOrOptions && typeof keyOrOptions === 'object' && !('algorithm' in keyOrOptions)) {
+      this.key = keyOrOptions.key || null;
+      this.onChunk = keyOrOptions.onChunk || null;
+      this.onError = keyOrOptions.onError || null;
+    } else {
+      this.key = keyOrOptions || null;
+      this.onChunk = onChunk || null;
+      this.onError = onError || null;
+    }
+
+    this.buffer = new Uint8Array(0);
+    this.isProcessing = false;
+    this.hasError = false;
+  }
+
+  write(chunk) {
+    if (this.hasError || !chunk) return;
+
+    let data;
+    if (chunk instanceof Uint8Array) {
+      data = chunk;
+    } else if (chunk instanceof ArrayBuffer) {
+      data = new Uint8Array(chunk);
+    } else if (ArrayBuffer.isView(chunk)) {
+      data = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    } else {
+      data = new Uint8Array(chunk);
+    }
+
+    if (!this.key) {
+      if (this.onChunk) {
+        try {
+          this.onChunk(data);
+        } catch (err) {
+          this.hasError = true;
+          if (this.onError) this.onError(err);
+        }
+      }
+      return;
+    }
+
+    const newBuf = new Uint8Array(this.buffer.length + data.length);
+    newBuf.set(this.buffer, 0);
+    newBuf.set(data, this.buffer.length);
+    this.buffer = newBuf;
+
+    this._startProcessing();
+  }
+
+  push(chunk) { return this.write(chunk); }
+  processChunk(chunk) { return this.write(chunk); }
+  enqueue(chunk) { return this.write(chunk); }
+
+  _startProcessing() {
+    if (this.isProcessing || this.hasError) return;
+    this.isProcessing = true;
+    this._processLoop();
+  }
+
+  async _processLoop() {
+    while (this.buffer.length >= 4) {
+      if (this.hasError) break;
+
+      const dv = new DataView(this.buffer.buffer, this.buffer.byteOffset, this.buffer.byteLength);
+      const frameLen = dv.getUint32(0, false);
+
+      if (frameLen < 12) {
+        const err = new Error(`Invalid AES-GCM frame length header: ${frameLen} bytes (minimum 12 bytes required)`);
+        this.hasError = true;
+        this.buffer = new Uint8Array(0);
+        if (this.onError) this.onError(err);
+        break;
+      }
+
+      if (this.buffer.length < 4 + frameLen) {
+        // Incomplete frame, wait for more data
+        break;
+      }
+
+      const frame = this.buffer.subarray(4, 4 + frameLen);
+      this.buffer = this.buffer.slice(4 + frameLen);
+
+      const nonce = new Uint8Array(frame.subarray(0, 12));
+      const ciphertext = new Uint8Array(frame.subarray(12));
+
+      let decryptedBuffer;
+      try {
+        decryptedBuffer = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv: nonce },
+          this.key,
+          ciphertext
+        );
+      } catch (err) {
+        this.hasError = true;
+        this.buffer = new Uint8Array(0);
+        if (this.onError) this.onError(err);
+        break;
+      }
+
+      const plaintext = new Uint8Array(decryptedBuffer);
+      if (this.onChunk) {
+        try {
+          await this.onChunk(plaintext);
+        } catch (err) {
+          this.hasError = true;
+          this.buffer = new Uint8Array(0);
+          if (this.onError) this.onError(err);
+          break;
+        }
+      }
+    }
+
+    this.isProcessing = false;
+  }
+}
+
 // ── IndexedDB Buffering ────────────────────────────────────────────────────────
 const IDB_NAME = 'GazeTransferDB';
 const IDB_STORE = 'chunks';
@@ -1770,6 +1889,13 @@ async function startWebRTC() {
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
 
+    let decryptionKey = null;
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch (e) {
+      console.error("Failed to parse decryption key from hash", e);
+    }
+
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
       if (dc.readyState === 'open') {
@@ -1812,6 +1938,18 @@ async function startWebRTC() {
         }
       });
 
+      const decrypter = new WebRTCStreamDecrypter(
+        decryptionKey,
+        (plaintext) => {
+          chunkQueue.enqueue(plaintext);
+        },
+        (err) => {
+          showError(`Transfer failed: ${err.message}`);
+          dc.close();
+          reject(err);
+        }
+      );
+
       dc.onmessage = (e) => {
         try {
           if (typeof e.data === 'string') {
@@ -1845,7 +1983,7 @@ async function startWebRTC() {
           }
 
           const chunk = new Uint8Array(e.data);
-          chunkQueue.enqueue(chunk);
+          decrypter.write(chunk);
         } catch (err) {
           showError(`Transfer failed: ${err.message}`);
           dc.close();
@@ -2570,6 +2708,7 @@ if (typeof window !== 'undefined') {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     SequentialChunkQueue,
+    WebRTCStreamDecrypter,
     decompressOffer,
     setState,
     renderFileCard,
