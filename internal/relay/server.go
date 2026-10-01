@@ -1268,7 +1268,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 			var uploadErr error
 			defer func() {
-				sess.ClosePipesIfMatch(pr, pw, uploadErr)
+				if uploadErr != nil {
+					sess.ClosePipesIfMatch(pr, pw, uploadErr)
+				}
 			}()
 
 			done := make(chan struct{})
