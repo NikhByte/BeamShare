@@ -1991,10 +1991,10 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR PNG dynamically from the server's newly added QR API
+    // Generate client-side QR code for sharing
     const qrImg = document.getElementById('done-qr-img');
     if (qrImg) {
-      qrImg.src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareLink);
+      renderQRCode(qrImg, shareLink);
     }
     
     if (doneShare) doneShare.classList.remove('hidden');
@@ -2172,7 +2172,7 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
+    renderQRCode('send-qr-img', shareURL.href);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -2567,6 +2567,33 @@ if (typeof window !== 'undefined') {
   });
 }
 
+// ── Local Client-Side QR Generation ───────────────────────────────────────────
+function generateQRCodeDataURL(text, options) {
+  if (typeof QRCode !== 'undefined' && QRCode.generateQRCodeDataURL) {
+    return QRCode.generateQRCodeDataURL(text, options);
+  }
+  if (typeof require === 'function') {
+    try {
+      const qrcodeLib = require('./qrcode.min.js');
+      if (qrcodeLib && qrcodeLib.generateQRCodeDataURL) {
+        return qrcodeLib.generateQRCodeDataURL(text, options);
+      }
+    } catch (e) {}
+  }
+  throw new Error("Client-side QR generator unavailable");
+}
+
+function renderQRCode(elementOrId, url) {
+  const img = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
+  if (!img) return;
+  try {
+    const dataUrl = generateQRCodeDataURL(url);
+    img.src = dataUrl;
+  } catch (err) {
+    console.error("Failed to generate QR code client-side");
+  }
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     SequentialChunkQueue,
@@ -2591,6 +2618,8 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    generateQRCodeDataURL,
+    renderQRCode
   };
 }
