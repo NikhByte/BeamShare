@@ -1770,6 +1770,17 @@ async function startWebRTC() {
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
 
+    let decryptionKey = null;
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch(e) {
+      console.error("Failed to import decryption key", e);
+      showError("Decryption key error: " + e.message);
+      if (webrtcDataChannel) webrtcDataChannel.close();
+      pc.close();
+      return;
+    }
+
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
       if (dc.readyState === 'open') {
@@ -1777,6 +1788,9 @@ async function startWebRTC() {
       } else {
         dc.onopen = () => dc.send(`OFFSET:${initialOffset}`);
       }
+
+      let encBuffer = new Uint8Array(0);
+      let decryptionChain = Promise.resolve();
 
       const chunkQueue = new SequentialChunkQueue({
         highWatermark: 16 * 1024 * 1024,
@@ -1813,11 +1827,11 @@ async function startWebRTC() {
       });
 
       dc.onmessage = (e) => {
-        try {
+        decryptionChain = decryptionChain.then(async () => {
           if (typeof e.data === 'string') {
             if (e.data === "EOF") {
               chunkQueue.enqueueEOF();
-              chunkQueue.drain().then(async () => {
+              await chunkQueue.drain().then(async () => {
                 if (diskWritableStream) {
                   await diskWritableStream.close();
                   if (useOPFS) {
@@ -1845,12 +1859,40 @@ async function startWebRTC() {
           }
 
           const chunk = new Uint8Array(e.data);
-          chunkQueue.enqueue(chunk);
-        } catch (err) {
+          if (decryptionKey) {
+            let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
+            newBuffer.set(encBuffer, 0);
+            newBuffer.set(chunk, encBuffer.length);
+            encBuffer = newBuffer;
+
+            while (encBuffer.length >= 4) {
+              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+              const frameLen = dv.getUint32(0, false);
+              if (encBuffer.length >= 4 + frameLen) {
+                const frame = encBuffer.slice(4, 4 + frameLen);
+                encBuffer = encBuffer.slice(4 + frameLen);
+
+                const nonce = new Uint8Array(frame.subarray(0, 12));
+                const ciphertext = new Uint8Array(frame.subarray(12));
+                const decrypted = await crypto.subtle.decrypt(
+                  { name: "AES-GCM", iv: nonce },
+                  decryptionKey,
+                  ciphertext
+                );
+                const decValue = new Uint8Array(decrypted);
+                chunkQueue.enqueue(decValue);
+              } else {
+                break;
+              }
+            }
+          } else {
+            chunkQueue.enqueue(chunk);
+          }
+        }).catch((err) => {
           showError(`Transfer failed: ${err.message}`);
           dc.close();
           reject(err);
-        }
+        });
       };
 
       dc.onerror = (e) => reject(new Error('data channel error: ' + e));
