@@ -416,6 +416,12 @@ describe('Gaze Web Sender Test Suite', () => {
 
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
+
+    // Verify local internal QR code image URL construction
+    const qrImg = document.getElementById('send-qr-img');
+    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
+    assert.equal(qrImg.src.includes('/api/qr?'), true);
+    assert.equal(qrImg.src.includes('url=' + encodeURIComponent(urlInput.value)), true);
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
