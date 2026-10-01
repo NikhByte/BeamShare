@@ -831,7 +831,40 @@ func runReceive(code string) {
 	}
 }
 
-func downloadFile(code string) error {
+func decodeKey(k string) ([]byte, error) {
+	k = strings.TrimSpace(k)
+	if strings.HasPrefix(k, "k=") {
+		k = k[2:]
+	}
+	if strings.HasPrefix(k, "k%3D") || strings.HasPrefix(k, "k%3d") {
+		k = k[4:]
+	}
+	if unescaped, err := url.QueryUnescape(k); err == nil {
+		k = unescaped
+	}
+	k = strings.TrimPrefix(k, "k=")
+	k = strings.TrimSpace(k)
+	if k == "" {
+		return nil, fmt.Errorf("empty key")
+	}
+
+	if keyBytes, err := base64.URLEncoding.DecodeString(k); err == nil {
+		return keyBytes, nil
+	}
+	if keyBytes, err := base64.RawURLEncoding.DecodeString(k); err == nil {
+		return keyBytes, nil
+	}
+	if keyBytes, err := base64.StdEncoding.DecodeString(k); err == nil {
+		return keyBytes, nil
+	}
+	if keyBytes, err := base64.RawStdEncoding.DecodeString(k); err == nil {
+		return keyBytes, nil
+	}
+
+	return nil, fmt.Errorf("failed to decode base64 encryption key")
+}
+
+func downloadFile(code string, keyOverride ...string) error {
 	if !strings.HasPrefix(code, "http://") && !strings.HasPrefix(code, "https://") {
 		code = "http://" + code
 	}
@@ -850,6 +883,15 @@ func downloadFile(code string) error {
 	k := u.Fragment
 	if strings.HasPrefix(k, "k=") {
 		k = k[2:]
+	}
+	if k == "" {
+		k = u.Query().Get("k")
+		if strings.HasPrefix(k, "k=") {
+			k = k[2:]
+		}
+	}
+	if k == "" && len(keyOverride) > 0 && keyOverride[0] != "" {
+		k = keyOverride[0]
 	}
 
 	metaURL := backend + "/api/meta"
@@ -891,14 +933,18 @@ func downloadFile(code string) error {
 
 	var r io.Reader = respDL.Body
 	if k != "" {
-		keyBytes, err := base64.URLEncoding.DecodeString(k)
-		if err == nil && len(keyBytes) == 32 {
-			r, err = relay.NewDecryptingReader(respDL.Body, keyBytes)
-			if err != nil {
-				return fmt.Errorf("failed to initialize decryptor: %w", err)
-			}
-			fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
+		keyBytes, err := decodeKey(k)
+		if err != nil {
+			return fmt.Errorf("invalid encryption key: %w", err)
 		}
+		if len(keyBytes) != 32 {
+			return fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d", len(keyBytes))
+		}
+		r, err = relay.NewDecryptingReader(respDL.Body, keyBytes)
+		if err != nil {
+			return fmt.Errorf("failed to initialize decryptor: %w", err)
+		}
+		fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
 	}
 
 	cleanBase := filepath.Base(filepath.Clean(meta.Name))
