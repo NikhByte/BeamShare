@@ -325,3 +325,30 @@ func TestServer_SeekingReaderCheckSessionContextCancellation(t *testing.T) {
 	assert.Equal(t, 0, n)
 	assert.ErrorIs(t, err, context.Canceled)
 }
+
+func TestServer_CORSPreflightHeaders(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	endpoints := []string{
+		"/api/meta?s=test",
+		"/api/signal/answer?s=test",
+		"/api/upload?s=test",
+		"/api/download?s=test",
+	}
+
+	for _, path := range endpoints {
+		t.Run("OPTIONS "+path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodOptions, path, nil)
+			req.Header.Set("Origin", "http://example.com")
+			req.Header.Set("Access-Control-Request-Headers", "Content-Type, X-Beam-Token, Authorization")
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, req)
+
+			assert.Equal(t, "*", rr.Header().Get("Access-Control-Allow-Origin"))
+			allowHeaders := rr.Header().Get("Access-Control-Allow-Headers")
+			assert.Contains(t, allowHeaders, "X-Beam-Token")
+			assert.Contains(t, allowHeaders, "Authorization")
+		})
+	}
+}

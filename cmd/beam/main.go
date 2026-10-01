@@ -870,7 +870,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
 
-		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURLWithToken))
+		relayDisplayURL := fmt.Sprintf("%s/?s=%s&token=%s&local=%s", baseHost, relSessionID, token, url.QueryEscape(localURLWithToken))
 		if receiverURL != "" {
 			relayDisplayURL += "&backend=" + url.QueryEscape(relayURL)
 		}
@@ -891,7 +891,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
 
-		qrURL = fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURLWithToken))
+		qrURL = fmt.Sprintf("%s/?s=%s&token=%s&local=%s", baseHost, relSessionID, token, url.QueryEscape(localURLWithToken))
 		if receiverURL != "" {
 			qrURL += "&backend=" + url.QueryEscape(relayURL)
 		}
