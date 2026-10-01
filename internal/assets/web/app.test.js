@@ -416,6 +416,25 @@ describe('Gaze Web Sender Test Suite', () => {
 
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
+
+    // Verify QR code image is generated client-side without third-party external HTTP calls
+    const qrImg = document.getElementById('send-qr-img');
+    assert.notEqual(qrImg, null);
+    assert.equal(qrImg.src.startsWith('data:image/'), true);
+    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
+  });
+
+  test('generateClientQRCodeDataURL and renderClientQRCode generate local data URLs without network requests', () => {
+    const testURL = 'http://localhost:8080/?s=test-session-id&mode=webrtc#k=SecretKeyHashFragment123';
+    const dataURL = app.generateClientQRCodeDataURL(testURL);
+
+    assert.equal(typeof dataURL, 'string');
+    assert.equal(dataURL.startsWith('data:image/'), true);
+    assert.equal(dataURL.includes('api.qrserver.com'), false);
+
+    const mockImg = document.createElement('img');
+    app.renderClientQRCode(testURL, mockImg);
+    assert.equal(mockImg.src, dataURL);
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
