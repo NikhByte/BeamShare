@@ -895,6 +895,30 @@ function checkRamWarning(size) {
   });
 }
 
+// ── QR Code Generation ────────────────────────────────────────────────────────
+function renderQRCode(elementId, text) {
+  let elem = document.getElementById(elementId);
+  if (!elem) return;
+
+  if (typeof QRious !== 'undefined') {
+    if (elem.tagName && elem.tagName.toLowerCase() === 'canvas') {
+      new QRious({
+        element: elem,
+        value: text,
+        size: 180,
+        level: 'H'
+      });
+    } else if (elem.tagName && elem.tagName.toLowerCase() === 'img') {
+      const qr = new QRious({
+        value: text,
+        size: 180,
+        level: 'H'
+      });
+      elem.src = qr.toDataURL();
+    }
+  }
+}
+
 // ── QR Scanning ───────────────────────────────────────────────────────────────
 let qrStream = null;
 let qrScanFrame = null;
@@ -1991,10 +2015,10 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR PNG dynamically from the server's newly added QR API
-    const qrImg = document.getElementById('done-qr-img');
-    if (qrImg) {
-      qrImg.src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareLink);
+    // Render QR matrix locally using bundled QR library
+    const doneQRElem = document.getElementById('done-qr-canvas') || document.getElementById('done-qr-img');
+    if (doneQRElem) {
+      renderQRCode(doneQRElem.id, shareLink);
     }
     
     if (doneShare) doneShare.classList.remove('hidden');
@@ -2172,7 +2196,10 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
+    const sendQRElem = document.getElementById('send-qr-canvas') || document.getElementById('send-qr-img');
+    if (sendQRElem) {
+      renderQRCode(sendQRElem.id, shareURL.href);
+    }
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -2583,6 +2610,7 @@ if (typeof module !== 'undefined' && module.exports) {
     resetState,
     stripAnsi,
     parseAnsiToHtml,
+    renderQRCode,
     handleSenderFileSelect,
     startSenderSharing,
     get_senderEncryptionKey: () => senderEncryptionKey,
