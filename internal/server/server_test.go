@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -554,5 +555,103 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 		defer srv.mu.Unlock()
 		return len(srv.liveClients) == 0
 	}, 5*time.Second, 20*time.Millisecond)
+}
+
+func TestConcurrentMetaDownloadUpdateSharedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	file1Path := filepath.Join(tmpDir, "file1.txt")
+	file1Content := []byte("hello file 1 content")
+	require.NoError(t, os.WriteFile(file1Path, file1Content, 0644))
+
+	file2Path := filepath.Join(tmpDir, "file2.pdf")
+	file2Content := []byte("hello file 2 pdf content")
+	require.NoError(t, os.WriteFile(file2Path, file2Content, 0644))
+
+	srv, err := New(file1Path, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	done := make(chan struct{})
+	time.AfterFunc(1*time.Second, func() {
+		close(done)
+	})
+
+	var wg sync.WaitGroup
+
+	// Routine group 1: Meta readers
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					resp, err := http.Get(ts.URL + "/api/meta")
+					if err != nil {
+						continue
+					}
+					assert.Equal(t, http.StatusOK, resp.StatusCode)
+					var meta FileMeta
+					err = json.NewDecoder(resp.Body).Decode(&meta)
+					resp.Body.Close()
+					assert.NoError(t, err)
+					assert.NotEmpty(t, meta.Name)
+					assert.NotEmpty(t, meta.MIME)
+				}
+			}
+		}()
+	}
+
+	// Routine group 2: Download readers
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					resp, err := http.Get(ts.URL + "/api/download")
+					if err != nil {
+						continue
+					}
+					assert.Equal(t, http.StatusOK, resp.StatusCode)
+					assert.Contains(t, resp.Header.Get("Content-Disposition"), "attachment; filename=")
+					_, err = io.ReadAll(resp.Body)
+					resp.Body.Close()
+					assert.NoError(t, err)
+				}
+			}
+		}()
+	}
+
+	// Routine group 3: Shared file updater
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		toggle := false
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				if toggle {
+					srv.UpdateSharedFile(file1Path, "file1.txt", int64(len(file1Content)))
+				} else {
+					srv.UpdateSharedFile(file2Path, "file2.pdf", int64(len(file2Content)))
+				}
+				toggle = !toggle
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+	}()
+
+	wg.Wait()
 }
 

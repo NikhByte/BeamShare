@@ -823,16 +823,32 @@ function setMode(mode, label) {
 async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator)) return null;
 
+  // Safari/WebKit does not reliably trigger file downloads from hidden SW pipe iframes.
+  const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent) || (navigator.vendor && navigator.vendor.includes('Apple'));
+  if (isSafari) return null;
+
   try {
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
     const reg = await Promise.race([swReady, timeout]);
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
+    let sw = reg && navigator.serviceWorker.controller;
     if (!sw) return null;
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
     const channel = new MessageChannel();
     const port = channel.port1;
+
+    const ackPromise = new Promise((resolve) => {
+      const handleMsg = (e) => {
+        if (e && e.data && e.data.type === 'INIT_ACK') {
+          port.removeEventListener('message', handleMsg);
+          resolve(true);
+        }
+      };
+      port.addEventListener('message', handleMsg);
+      if (port.start) port.start();
+      setTimeout(() => resolve(false), 1500);
+    });
 
     sw.postMessage({
       type: 'INIT_PORT',
@@ -841,6 +857,12 @@ async function getSWPipe(fileMeta) {
       size: fileMeta.size,
       mime: fileMeta.mime
     }, [channel.port2]);
+
+    const acked = await ackPromise;
+    if (!acked) {
+      console.warn("SW pipe INIT_ACK timed out, falling back");
+      return null;
+    }
 
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
