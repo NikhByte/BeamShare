@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -555,4 +556,75 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 		return len(srv.liveClients) == 0
 	}, 5*time.Second, 20*time.Millisecond)
 }
+
+func TestConcurrentUploadAndMetaDownloadRace(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "race_test.bin")
+	content := []byte("race test initial content")
+	err := os.WriteFile(filePath, content, 0600)
+	require.NoError(t, err)
+
+	srv, err := New(filePath, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	const numRoutines = 10
+	const iterations = 30
+
+	var wg sync.WaitGroup
+
+	// Goroutines updating shared file state
+	for i := 0; i < numRoutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				fname := fmt.Sprintf("file_%d_%d.bin", id, j)
+				fsize := int64(100 + id*10 + j)
+				srv.UpdateSharedFile(filePath, fname, fsize)
+				time.Sleep(1 * time.Millisecond)
+			}
+		}(i)
+	}
+
+	// Goroutines querying metadata
+	for i := 0; i < numRoutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				resp, err := http.Get(ts.URL + "/api/meta")
+				if err == nil {
+					var meta FileMeta
+					_ = json.NewDecoder(resp.Body).Decode(&meta)
+					resp.Body.Close()
+					assert.Equal(t, http.StatusOK, resp.StatusCode)
+				}
+				time.Sleep(1 * time.Millisecond)
+			}
+		}()
+	}
+
+	// Goroutines downloading file
+	for i := 0; i < numRoutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				resp, err := http.Get(ts.URL + "/api/download")
+				if err == nil {
+					_, _ = io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+					assert.Equal(t, http.StatusOK, resp.StatusCode)
+				}
+				time.Sleep(1 * time.Millisecond)
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
 
