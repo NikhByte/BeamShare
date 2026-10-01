@@ -197,6 +197,7 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 		claimLength uint32
 	}{
 		{name: "One Byte Over MaxFrameSize", claimLength: MaxFrameSize + 1},
+		{name: "1GB frame length header", claimLength: 1073741824},
 		{name: "10MB Oversized Frame", claimLength: 10 * 1024 * 1024},
 		{name: "Max Uint32 Oversized Frame", claimLength: 0xFFFFFFFF},
 	}
