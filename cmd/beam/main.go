@@ -35,6 +35,7 @@ var (
 	liveFinished   bool
 	relayURL       string
 	receiverURL    string
+	keyFlag        string
 	liveBufferSize int = 10 * 1024 * 1024 // 10MB
 )
 
@@ -184,6 +185,15 @@ func parseFlags(args []string) ([]string, []webrtc.ICEServer, time.Duration) {
 				}
 				i++
 			}
+		} else if strings.HasPrefix(arg, "--key=") {
+			keyFlag = strings.TrimPrefix(arg, "--key=")
+		} else if arg == "--key" || arg == "-k" {
+			if i+1 < len(args) {
+				keyFlag = args[i+1]
+				i++
+			}
+		} else if strings.HasPrefix(arg, "-k=") {
+			keyFlag = strings.TrimPrefix(arg, "-k=")
 		} else {
 			cleanArgs = append(cleanArgs, arg)
 		}
@@ -831,6 +841,30 @@ func runReceive(code string) {
 	}
 }
 
+func decodeBase64Key(kStr string) ([]byte, error) {
+	encodings := []*base64.Encoding{
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+	}
+	var keyBytes []byte
+	var err error
+	for _, enc := range encodings {
+		keyBytes, err = enc.DecodeString(kStr)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("invalid base64 key encoding: %w", err)
+	}
+	if len(keyBytes) != 32 {
+		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d", len(keyBytes))
+	}
+	return keyBytes, nil
+}
+
 func downloadFile(code string) error {
 	if !strings.HasPrefix(code, "http://") && !strings.HasPrefix(code, "https://") {
 		code = "http://" + code
@@ -848,8 +882,36 @@ func downloadFile(code string) error {
 
 	s := u.Query().Get("s")
 	k := u.Fragment
-	if strings.HasPrefix(k, "k=") {
+	if strings.Contains(k, "k=") || strings.Contains(k, "key=") {
+		fragVals, _ := url.ParseQuery(k)
+		if val := fragVals.Get("k"); val != "" {
+			k = val
+		} else if val := fragVals.Get("key"); val != "" {
+			k = val
+		}
+	} else if strings.HasPrefix(k, "k=") {
 		k = k[2:]
+	} else if strings.HasPrefix(k, "key=") {
+		k = k[4:]
+	}
+
+	if k == "" {
+		k = u.Query().Get("k")
+	}
+	if k == "" {
+		k = u.Query().Get("key")
+	}
+	if k == "" && keyFlag != "" {
+		k = keyFlag
+	}
+
+	var keyBytes []byte
+	if k != "" {
+		var decodeErr error
+		keyBytes, decodeErr = decodeBase64Key(k)
+		if decodeErr != nil {
+			return fmt.Errorf("invalid encryption key: %w", decodeErr)
+		}
 	}
 
 	metaURL := backend + "/api/meta"
@@ -890,15 +952,13 @@ func downloadFile(code string) error {
 	}
 
 	var r io.Reader = respDL.Body
-	if k != "" {
-		keyBytes, err := base64.URLEncoding.DecodeString(k)
-		if err == nil && len(keyBytes) == 32 {
-			r, err = relay.NewDecryptingReader(respDL.Body, keyBytes)
-			if err != nil {
-				return fmt.Errorf("failed to initialize decryptor: %w", err)
-			}
-			fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
+	if len(keyBytes) == 32 {
+		var errDec error
+		r, errDec = relay.NewDecryptingReader(respDL.Body, keyBytes)
+		if errDec != nil {
+			return fmt.Errorf("failed to initialize decryptor: %w", errDec)
 		}
+		fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
 	}
 
 	cleanBase := filepath.Base(filepath.Clean(meta.Name))

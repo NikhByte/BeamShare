@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/beamshare/beam/internal/relay"
 	"github.com/beamshare/beam/internal/server"
 )
 
@@ -110,5 +115,86 @@ func TestDownloadFile_Relay(t *testing.T) {
 	err := downloadFile(urlWithSession)
 	if err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
+	}
+}
+
+func TestDownloadFile_InvalidKey(t *testing.T) {
+	requestsCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsCount++
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	// 1. Invalid base64 string
+	invalidB64URL := "http://example.com/?backend=" + ts.URL + "#k=invalid!base64!key!"
+	err := downloadFile(invalidB64URL)
+	if err == nil {
+		t.Fatal("expected error for malformed base64 key, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid base64 key encoding") {
+		t.Fatalf("expected base64 encoding error, got: %v", err)
+	}
+
+	// 2. Non-32-byte decoded key (16 bytes)
+	shortKey := make([]byte, 16)
+	shortKeyB64 := base64.URLEncoding.EncodeToString(shortKey)
+	shortKeyURL := "http://example.com/?backend=" + ts.URL + "#k=" + shortKeyB64
+	err = downloadFile(shortKeyURL)
+	if err == nil {
+		t.Fatal("expected error for 16-byte key, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid encryption key length: expected 32 bytes, got 16") {
+		t.Fatalf("expected 32-byte length error, got: %v", err)
+	}
+
+	if requestsCount != 0 {
+		t.Fatalf("expected 0 HTTP requests when key is invalid, got %d", requestsCount)
+	}
+}
+
+func TestDownloadFile_ValidEncrypted(t *testing.T) {
+	validKey := make([]byte, 32)
+	for i := range validKey {
+		validKey[i] = byte(i + 1)
+	}
+	validKeyB64 := base64.URLEncoding.EncodeToString(validKey)
+
+	plainContent := []byte("Encrypted Relay Stream Payload Test!")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+		meta := server.FileMeta{
+			Name: "test_encrypted.txt",
+			Size: int64(len(plainContent)),
+		}
+		json.NewEncoder(w).Encode(meta)
+	})
+	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+		encReader, err := relay.NewEncryptingReader(bytes.NewReader(plainContent), validKey)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		io.Copy(w, encReader)
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	defer os.Remove("received_test_encrypted.txt")
+
+	encryptedURL := "http://example.com/?backend=" + ts.URL + "#k=" + validKeyB64
+	err := downloadFile(encryptedURL)
+	if err != nil {
+		t.Fatalf("downloadFile failed for valid key: %v", err)
+	}
+
+	data, err := os.ReadFile("received_test_encrypted.txt")
+	if err != nil {
+		t.Fatalf("failed to read received file: %v", err)
+	}
+	if !bytes.Equal(data, plainContent) {
+		t.Fatalf("expected decrypted content '%s', got '%s'", string(plainContent), string(data))
 	}
 }
