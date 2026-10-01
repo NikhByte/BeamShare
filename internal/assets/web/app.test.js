@@ -23,6 +23,16 @@ describe('Gaze Web Receiver Test Suite', () => {
     window = dom.window;
     document = window.document;
 
+    window.HTMLCanvasElement.prototype.getContext = function() {
+      return {
+        fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
+        createImageData: () => [], setTransform: () => {}, drawImage: () => {}, save: () => {}, fillText: () => {},
+        restore: () => {}, beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, closePath: () => {}, stroke: () => {},
+        translate: () => {}, scale: () => {}, rotate: () => {}, arc: () => {}, fill: () => {}, measureText: () => ({ width: 0 }),
+        transform: () => {}, rect: () => {}, clip: () => {}
+      };
+    };
+
     // Set up mock indexedDB to prevent unhandled rejection in JSDOM
     window.indexedDB = {
       open: () => {
@@ -71,6 +81,8 @@ describe('Gaze Web Receiver Test Suite', () => {
     // Set up global environment for app.js
     global.window = window;
     global.document = document;
+    global.HTMLCanvasElement = window.HTMLCanvasElement;
+    global.HTMLImageElement = window.HTMLImageElement;
     global.navigator = window.navigator;
     global.location = window.location;
     global.URLSearchParams = window.URLSearchParams;
@@ -80,6 +92,18 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.atob = global.atob;
     window.btoa = global.btoa;
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
+    const QRious = require('./qrious.min.js');
+    window.QRious = QRious;
+    global.QRious = QRious;
+    if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
+      window.HTMLCanvasElement.prototype.getContext = () => ({
+        fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
+        createImageData: () => [], setTransform: () => {}, drawImage: () => {}, save: () => {}, fillText: () => {},
+        restore: () => {}, beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, closePath: () => {}, stroke: () => {},
+        translate: () => {}, scale: () => {}, rotate: () => {}, arc: () => {}, fill: () => {}, measureText: () => ({ width: 0 }),
+        transform: () => {}, rect: () => {}, clip: () => {}
+      });
+    }
     global.pako = pako;
     window.pako = pako;
     window.__BEAM_TEST_ENV__ = true;
@@ -357,12 +381,28 @@ describe('Gaze Web Sender Test Suite', () => {
     window = dom.window;
     document = window.document;
 
+    window.HTMLCanvasElement.prototype.toDataURL = function() {
+      return 'data:image/png;base64,mock';
+    };
+
+    window.HTMLCanvasElement.prototype.getContext = function() {
+      return {
+        fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
+        createImageData: () => [], setTransform: () => {}, drawImage: () => {}, save: () => {}, fillText: () => {},
+        restore: () => {}, beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, closePath: () => {}, stroke: () => {},
+        translate: () => {}, scale: () => {}, rotate: () => {}, arc: () => {}, fill: () => {}, measureText: () => ({ width: 0 }),
+        transform: () => {}, rect: () => {}, clip: () => {}
+      };
+    };
+
     // Node's WebCrypto
     const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
 
     global.window = window;
     global.document = document;
+    global.HTMLCanvasElement = window.HTMLCanvasElement;
+    global.HTMLImageElement = window.HTMLImageElement;
     global.crypto = window.crypto;
     global.navigator = window.navigator;
     global.location = window.location;
@@ -372,6 +412,40 @@ describe('Gaze Web Sender Test Suite', () => {
     global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
     window.atob = global.atob;
     window.btoa = global.btoa;
+
+    const QRious = require('./qrious.min.js');
+    window.QRious = QRious;
+    global.QRious = QRious;
+
+    if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
+      window.HTMLCanvasElement.prototype.getContext = () => ({
+        fillRect: () => {},
+        clearRect: () => {},
+        getImageData: () => ({ data: [] }),
+        putImageData: () => {},
+        createImageData: () => [],
+        setTransform: () => {},
+        drawImage: () => {},
+        save: () => {},
+        fillText: () => {},
+        restore: () => {},
+        beginPath: () => {},
+        moveTo: () => {},
+        lineTo: () => {},
+        closePath: () => {},
+        stroke: () => {},
+        translate: () => {},
+        scale: () => {},
+        rotate: () => {},
+        arc: () => {},
+        fill: () => {},
+        measureText: () => ({ width: 0 }),
+        transform: () => {},
+        rect: () => {},
+        clip: () => {},
+      });
+    }
+
     global.fetch = async (url) => {
       if (url.includes('/poll')) {
           return { ok: false, status: 404 };
@@ -416,6 +490,27 @@ describe('Gaze Web Sender Test Suite', () => {
 
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
+  });
+
+  test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
+    let externalCallMade = false;
+    const origFetch = global.fetch;
+    global.fetch = async (url, opts) => {
+      if (typeof url === 'string' && (url.includes('qrserver.com') || url.includes('/api/qr'))) {
+        externalCallMade = true;
+      }
+      return origFetch(url, opts);
+    };
+
+    await app.startSenderSharing();
+
+    assert.equal(externalCallMade, false, 'No external QR API requests should be made');
+
+    const sendCanvas = document.getElementById('send-qr-canvas');
+    assert.notEqual(sendCanvas, null);
+
+    const urlInput = document.getElementById('send-url-input');
+    assert.ok(urlInput.value.includes('#k='));
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
