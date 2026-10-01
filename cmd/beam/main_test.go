@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
-
 	"reflect"
 	"testing"
+	"time"
+
 	"github.com/beamshare/beam/internal/server"
+	"github.com/beamshare/beam/internal/signaling"
+	"github.com/pion/webrtc/v3"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -110,5 +114,154 @@ func TestDownloadFile_Relay(t *testing.T) {
 	err := downloadFile(urlWithSession)
 	if err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
+	}
+}
+
+func TestWaitBufferedAmount_BelowThreshold(t *testing.T) {
+	api := webrtc.NewAPI()
+	pc1, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("failed to create PeerConnection: %v", err)
+	}
+	defer pc1.Close()
+
+	dc, err := pc1.CreateDataChannel("test", nil)
+	if err != nil {
+		t.Fatalf("failed to create DataChannel: %v", err)
+	}
+
+	lowChan := make(chan struct{}, 1)
+
+	done := make(chan struct{})
+	go func() {
+		waitBufferedAmount(dc, lowChan, 1024*1024, 512*1024)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success: returned immediately without blocking
+	case <-time.After(1 * time.Second):
+		t.Fatal("waitBufferedAmount timed out on empty buffer")
+	}
+}
+
+func TestWaitBufferedAmount_ClosedChannel(t *testing.T) {
+	api := webrtc.NewAPI()
+	pc1, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("failed to create PeerConnection: %v", err)
+	}
+	defer pc1.Close()
+
+	dc, err := pc1.CreateDataChannel("test", nil)
+	if err != nil {
+		t.Fatalf("failed to create DataChannel: %v", err)
+	}
+
+	lowChan := make(chan struct{}, 1)
+
+	done := make(chan struct{})
+	go func() {
+		waitBufferedAmount(dc, lowChan, 0, 0)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success: returned immediately for non-open channel
+	case <-time.After(1 * time.Second):
+		t.Fatal("waitBufferedAmount timed out on non-open DataChannel")
+	}
+}
+
+func TestWaitBufferedAmount_SignalDrivenAndPollingFallback(t *testing.T) {
+	txDCReady := make(chan struct{})
+	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 10*time.Second)
+	if err != nil {
+		t.Fatalf("failed to create sender session: %v", err)
+	}
+	defer senderSession.Close()
+
+	senderSession.OnOpen = func(dc *webrtc.DataChannel) {
+		close(txDCReady)
+	}
+
+	rxPC, err := signaling.NewWebRTCAPI().NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("failed to create rxPC: %v", err)
+	}
+	defer rxPC.Close()
+
+	rxDataChannelCh := make(chan *webrtc.DataChannel, 1)
+	rxPC.OnDataChannel(func(dc *webrtc.DataChannel) {
+		rxDataChannelCh <- dc
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = senderSession.CreateOffer(ctx)
+	if err != nil {
+		t.Fatalf("failed to create offer: %v", err)
+	}
+
+	err = rxPC.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeOffer,
+		SDP:  senderSession.RawOffer(),
+	})
+	if err != nil {
+		t.Fatalf("failed to set remote description: %v", err)
+	}
+
+	answer, err := rxPC.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("failed to create answer: %v", err)
+	}
+
+	err = rxPC.SetLocalDescription(answer)
+	if err != nil {
+		t.Fatalf("failed to set local description: %v", err)
+	}
+
+	answerBytes, _ := json.Marshal(answer)
+	err = senderSession.ProvideAnswer(string(answerBytes))
+	if err != nil {
+		t.Fatalf("failed to provide answer: %v", err)
+	}
+
+	select {
+	case <-txDCReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for sender DataChannel ready")
+	}
+
+	txDC := senderSession.DataChannel()
+	if txDC == nil {
+		t.Fatal("sender DataChannel is nil")
+	}
+
+	lowChan := make(chan struct{}, 1)
+	txDC.OnBufferedAmountLow(func() {
+		select {
+		case lowChan <- struct{}{}:
+		default:
+		}
+	})
+
+	data := make([]byte, 100*1024)
+	_ = txDC.Send(data)
+
+	done := make(chan struct{})
+	go func() {
+		waitBufferedAmount(txDC, lowChan, 0, 0)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success
+	case <-time.After(3 * time.Second):
+		t.Fatal("waitBufferedAmount timed out waiting for 0 buffer flush")
 	}
 }

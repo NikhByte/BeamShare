@@ -550,9 +550,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 								for {
 									// Backpressure check: wait if buffered amount > 1MB
-									if dc.BufferedAmount() > 1024*1024 {
-										<-bufferedAmountLowChan
-									}
+									waitBufferedAmount(dc, bufferedAmountLowChan, 1024*1024, 512*1024)
 
 									n, err := file.Read(buffer)
 									if n > 0 {
@@ -574,10 +572,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								}
 
 								// Wait for buffer to clear before sending EOF
-								dc.SetBufferedAmountLowThreshold(0)
-								if dc.BufferedAmount() > 0 {
-									<-bufferedAmountLowChan
-								}
+								waitBufferedAmount(dc, bufferedAmountLowChan, 0, 0)
 								dc.SendText("EOF")
 
 								elapsed := time.Since(start)
@@ -942,4 +937,17 @@ func downloadFile(code string) error {
 
 	fmt.Printf("\n\n  ✅ Saved to %s\n", outName)
 	return nil
+}
+
+func waitBufferedAmount(dc *webrtc.DataChannel, bufferedAmountLowChan <-chan struct{}, targetLimit uint64, lowThreshold uint64) {
+	dc.SetBufferedAmountLowThreshold(lowThreshold)
+	for dc.BufferedAmount() > targetLimit {
+		if dc.ReadyState() != webrtc.DataChannelStateOpen {
+			return
+		}
+		select {
+		case <-bufferedAmountLowChan:
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
