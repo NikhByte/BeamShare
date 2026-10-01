@@ -405,7 +405,8 @@ describe('Gaze Web Sender Test Suite', () => {
     await app.startSenderSharing();
 
     const urlInput = document.getElementById('send-url-input');
-    const hash = new URL(urlInput.value || "http://localhost/").hash;
+    const fullUrl = urlInput.value || "http://localhost/";
+    const hash = new URL(fullUrl).hash;
 
     assert.equal(hash.startsWith('#k='), true);
 
@@ -416,6 +417,25 @@ describe('Gaze Web Sender Test Suite', () => {
 
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
+
+    // Verify send-qr-img src uses local client-side Data URL without third-party calls
+    const sendQrImg = document.getElementById('send-qr-img');
+    assert.notEqual(sendQrImg, null);
+    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml;charset=utf-8,'), true);
+    assert.equal(sendQrImg.src.includes('api.qrserver.com'), false);
+  });
+
+  test('generateQRCodeDataURL produces local SVG Data URL encoding complete share link with #k fragment', () => {
+    const testUrl = 'http://localhost:8080/?s=test-session&backend=http%3A%2F%2Flocalhost%3A8080&mode=webrtc#k=4Kz_test_key_base64url';
+    const dataUrl = app.generateQRCodeDataURL(testUrl);
+
+    assert.equal(dataUrl.startsWith('data:image/svg+xml;charset=utf-8,'), true);
+    assert.equal(dataUrl.includes('api.qrserver.com'), false);
+
+    const svgStr = decodeURIComponent(dataUrl.replace('data:image/svg+xml;charset=utf-8,', ''));
+    assert.equal(svgStr.includes('<svg'), true);
+    assert.equal(svgStr.includes('viewBox='), true);
+    assert.equal(svgStr.includes('<path fill="#000000"'), true);
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
