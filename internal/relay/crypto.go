@@ -5,7 +5,18 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
+)
+
+const (
+	// MaxPlaintextChunkSize defines the maximum size of unencrypted plaintext chunks (64KB).
+	MaxPlaintextChunkSize = 65536
+)
+
+var (
+	// ErrFrameTooLarge is returned when an incoming encrypted frame length header exceeds maximum allowed threshold.
+	ErrFrameTooLarge = errors.New("encrypted frame size exceeds maximum limit")
 )
 
 type EncryptingReader struct {
@@ -101,14 +112,20 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 		return 0, err
 	}
 
+	nonceSize := dr.gcm.NonceSize()
+	minFrameSize := uint32(nonceSize)
+	maxFrameSize := uint32(MaxPlaintextChunkSize + nonceSize + dr.gcm.Overhead())
+
+	if length < minFrameSize {
+		return 0, io.ErrUnexpectedEOF
+	}
+	if length > maxFrameSize {
+		return 0, ErrFrameTooLarge
+	}
+
 	frameData := make([]byte, length)
 	if _, err := io.ReadFull(dr.r, frameData); err != nil {
 		return 0, err
-	}
-
-	nonceSize := dr.gcm.NonceSize()
-	if len(frameData) < nonceSize {
-		return 0, io.ErrUnexpectedEOF
 	}
 
 	nonce := frameData[:nonceSize]
