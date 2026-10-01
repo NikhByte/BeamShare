@@ -84,7 +84,13 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.pako = pako;
     window.__BEAM_TEST_ENV__ = true;
 
-    // Load app.js
+    // Load qrcode.min.js and app.js
+    delete require.cache[require.resolve('./qrcode.min.js')];
+    const qrcodeLib1 = require('./qrcode.min.js');
+    global.generateQRCodeSVGDataURL = qrcodeLib1.generateQRCodeSVGDataURL;
+    window.generateQRCodeSVGDataURL = qrcodeLib1.generateQRCodeSVGDataURL;
+    window.qrcode = qrcodeLib1;
+
     delete require.cache[require.resolve('./app.js')];
     app = require('./app.js');
   });
@@ -393,6 +399,12 @@ describe('Gaze Web Sender Test Suite', () => {
     global.RTCPeerConnection = RTCPeerConnection;
     window.__BEAM_TEST_ENV__ = true;
 
+    delete require.cache[require.resolve('./qrcode.min.js')];
+    const qrcodeLib2 = require('./qrcode.min.js');
+    global.generateQRCodeSVGDataURL = qrcodeLib2.generateQRCodeSVGDataURL;
+    window.generateQRCodeSVGDataURL = qrcodeLib2.generateQRCodeSVGDataURL;
+    window.qrcode = qrcodeLib2;
+
     delete require.cache[require.resolve('./app.js')];
     app = require('./app.js');
 
@@ -416,6 +428,12 @@ describe('Gaze Web Sender Test Suite', () => {
 
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
+
+    // Verify pure client-side QR generation without external network calls
+    const sendQrImg = document.getElementById('send-qr-img');
+    assert.ok(sendQrImg.src.startsWith('data:image/svg+xml'), 'send-qr-img src must be a client-side SVG Data URL');
+    assert.equal(sendQrImg.src.includes('api.qrserver.com'), false, 'send-qr-img src must not contain api.qrserver.com');
+    assert.ok(sendQrImg.src.length > 500, 'send-qr-img src must contain a valid SVG Data URL');
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
