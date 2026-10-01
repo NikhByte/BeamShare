@@ -107,8 +107,14 @@ func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err er
 }
 
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
-	if pr == nil || s.DataPipeR == pr {
+	prHandled := false
+	pwHandled := false
+
+	if (pr == nil && pw == nil) || (pr != nil && s.DataPipeR == pr) || (pw != nil && s.DataPipeW == pw) {
 		if s.DataPipeW != nil {
+			if s.DataPipeW == pw {
+				pwHandled = true
+			}
 			if err != nil {
 				s.DataPipeW.CloseWithError(err)
 			} else {
@@ -117,6 +123,9 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			s.DataPipeW = nil
 		}
 		if s.DataPipeR != nil {
+			if s.DataPipeR == pr {
+				prHandled = true
+			}
 			if err != nil {
 				s.DataPipeR.CloseWithError(err)
 			} else {
@@ -124,20 +133,45 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			}
 			s.DataPipeR = nil
 		}
-	} else {
-		if pw != nil {
-			if err != nil {
-				pw.CloseWithError(err)
-			} else {
-				pw.Close()
+	}
+
+	if (pr == nil && pw == nil) || (pr != nil && s.UploadPipeR == pr) || (pw != nil && s.UploadPipeW == pw) {
+		if s.UploadPipeW != nil {
+			if s.UploadPipeW == pw {
+				pwHandled = true
 			}
+			if err != nil {
+				s.UploadPipeW.CloseWithError(err)
+			} else {
+				s.UploadPipeW.Close()
+			}
+			s.UploadPipeW = nil
 		}
-		if pr != nil {
-			if err != nil {
-				pr.CloseWithError(err)
-			} else {
-				pr.Close()
+		if s.UploadPipeR != nil {
+			if s.UploadPipeR == pr {
+				prHandled = true
 			}
+			if err != nil {
+				s.UploadPipeR.CloseWithError(err)
+			} else {
+				s.UploadPipeR.Close()
+			}
+			s.UploadPipeR = nil
+		}
+	}
+
+	if pr != nil && !prHandled {
+		if err != nil {
+			pr.CloseWithError(err)
+		} else {
+			pr.Close()
+		}
+	}
+	if pw != nil && !pwHandled {
+		if err != nil {
+			pw.CloseWithError(err)
+		} else {
+			pw.Close()
 		}
 	}
 }
@@ -1059,10 +1093,40 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		if part.FormName() == "file" {
 			sess.mu.Lock()
+			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
+				sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
+			}
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
 			sess.mu.Unlock()
+
+			var uploadErr error
+			defer func() {
+				if uploadErr != nil {
+					sess.ClosePipesIfMatch(pr, pw, uploadErr)
+				}
+			}()
+
+			done := make(chan struct{})
+			defer close(done)
+
+			go func() {
+				select {
+				case <-done:
+					return
+				case <-r.Context().Done():
+					select {
+					case <-done:
+						return
+					default:
+						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("upload context cancelled: %w", r.Context().Err()))
+						if r.Body != nil {
+							r.Body.Close()
+						}
+					}
+				}
+			}()
 
 			// Notify sender
 			select {
@@ -1072,8 +1136,19 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 			// Stream data to pipe
 			_, err = io.Copy(pw, part)
-			pw.CloseWithError(err)
+
+			if err != nil {
+				uploadErr = err
+				if r.Body != nil {
+					r.Body.Close()
+				}
+				sess.ClosePipesIfMatch(pr, pw, err)
+				http.Error(w, "upload streaming error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+
 			part.Close()
+			pw.Close()
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})
@@ -1093,6 +1168,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	sess.mu.Lock()
 	pr := sess.UploadPipeR
+	pw := sess.UploadPipeW
 	sess.mu.Unlock()
 
 	if pr == nil {
@@ -1101,5 +1177,28 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	io.Copy(w, pr)
+
+	var pullErr error
+	defer func() {
+		sess.ClosePipesIfMatch(pr, pw, pullErr)
+	}()
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-r.Context().Done():
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("pull context cancelled: %w", r.Context().Err()))
+			}
+		}
+	}()
+
+	_, pullErr = io.Copy(w, pr)
 }
