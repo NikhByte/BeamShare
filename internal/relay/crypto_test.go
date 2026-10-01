@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 )
@@ -217,7 +218,7 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected error for frame size %d exceeding MaxFrameSize, got nil", tc.claimLength)
 			}
-			if err != ErrFrameTooLarge {
+			if !errors.Is(err, ErrFrameTooLarge) {
 				t.Fatalf("expected ErrFrameTooLarge (%v), got %v", ErrFrameTooLarge, err)
 			}
 		})
