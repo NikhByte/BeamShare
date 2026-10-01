@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 )
@@ -180,5 +181,58 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 
 	if bytes.Equal(nonce1, nonce2) {
 		t.Fatal("consecutive frames reused the same nonce")
+	}
+}
+
+func TestMaxFrameSizeValidation(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		lengthHeader uint32
+		wantErr     error
+	}{
+		{
+			name:         "frame size 65565 exceeds limit by 1",
+			lengthHeader: maxFrameSize + 1,
+			wantErr:      ErrFrameTooLarge,
+		},
+		{
+			name:         "large frame size 4GB",
+			lengthHeader: 0xFFFFFFFF,
+			wantErr:      ErrFrameTooLarge,
+		},
+		{
+			name:         "frame size exactly maxFrameSize",
+			lengthHeader: maxFrameSize,
+			wantErr:      nil, // Should pass frame size validation check and not return ErrFrameTooLarge
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tt.lengthHeader)
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if tt.wantErr == ErrFrameTooLarge {
+				if !errors.Is(err, ErrFrameTooLarge) {
+					t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+				}
+			} else {
+				if errors.Is(err, ErrFrameTooLarge) {
+					t.Fatalf("did not expect ErrFrameTooLarge, got %v", err)
+				}
+			}
+		})
 	}
 }
