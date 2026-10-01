@@ -1029,6 +1029,19 @@ async function getSWPipe(fileMeta) {
       return null;
     }
 
+    if (!navigator.serviceWorker.controller) {
+      await Promise.race([
+        new Promise((resolve) => navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true })),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('SW controller timeout')), 500))
+      ]).catch(() => {});
+    }
+
+    if (!navigator.serviceWorker.controller) {
+      console.warn("Service worker active but not controlling page yet, falling back to storage/RAM.");
+      return null;
+    }
+
+    const sw = navigator.serviceWorker.controller;
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
     const channel = new MessageChannel();
     const port = channel.port1;
