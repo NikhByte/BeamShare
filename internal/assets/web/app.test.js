@@ -537,4 +537,91 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('waitForBufferedAmountLow resolves immediately if bufferedAmount is below or equal to threshold', async () => {
+    const mockChannel = {
+      readyState: 'open',
+      bufferedAmount: 100,
+      bufferedAmountLowThreshold: 0
+    };
+    await app.waitForBufferedAmountLow(mockChannel, 500);
+    assert.equal(mockChannel.bufferedAmountLowThreshold, 500);
+  });
+
+  test('waitForBufferedAmountLow resolves via bufferedamountlow event', async () => {
+    const listeners = {};
+    const mockChannel = {
+      readyState: 'open',
+      bufferedAmount: 1000,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: (type, fn) => { listeners[type] = fn; },
+      removeEventListener: (type) => { delete listeners[type]; }
+    };
+
+    const waitPromise = app.waitForBufferedAmountLow(mockChannel, 500);
+    assert.equal(mockChannel.bufferedAmountLowThreshold, 500);
+    assert.equal(typeof listeners['bufferedamountlow'], 'function');
+
+    mockChannel.bufferedAmount = 400;
+    listeners['bufferedamountlow']();
+
+    await waitPromise;
+    assert.equal(listeners['bufferedamountlow'], undefined, 'listeners should be cleaned up');
+  });
+
+  test('waitForBufferedAmountLow resolves via polling fallback if event is missed', async () => {
+    const listeners = {};
+    const mockChannel = {
+      readyState: 'open',
+      bufferedAmount: 1000,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: (type, fn) => { listeners[type] = fn; },
+      removeEventListener: (type) => { delete listeners[type]; }
+    };
+
+    const waitPromise = app.waitForBufferedAmountLow(mockChannel, 500);
+    assert.equal(mockChannel.bufferedAmountLowThreshold, 500);
+
+    setTimeout(() => {
+      mockChannel.bufferedAmount = 200;
+    }, 60);
+
+    await waitPromise;
+    assert.equal(listeners['bufferedamountlow'], undefined, 'listeners should be cleaned up');
+  });
+
+  test('waitForBufferedAmountLow rejects if dataChannel readyState is not open', async () => {
+    const mockChannel = {
+      readyState: 'closed',
+      bufferedAmount: 1000,
+      bufferedAmountLowThreshold: 0
+    };
+
+    await assert.rejects(
+      async () => await app.waitForBufferedAmountLow(mockChannel, 500),
+      { message: "Data channel is no longer open" }
+    );
+  });
+
+  test('waitForBufferedAmountLow rejects when close event fires during wait', async () => {
+    const listeners = {};
+    const mockChannel = {
+      readyState: 'open',
+      bufferedAmount: 1000,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: (type, fn) => { listeners[type] = fn; },
+      removeEventListener: (type) => { delete listeners[type]; }
+    };
+
+    const waitPromise = app.waitForBufferedAmountLow(mockChannel, 500);
+
+    mockChannel.readyState = 'closed';
+    listeners['close']();
+
+    await assert.rejects(
+      async () => await waitPromise,
+      { message: "Data channel is no longer open" }
+    );
+    assert.equal(listeners['bufferedamountlow'], undefined, 'listeners should be cleaned up');
+  });
 });
