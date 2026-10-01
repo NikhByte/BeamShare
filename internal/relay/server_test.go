@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -259,6 +260,257 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestSession_ClosePipesClosesUploadPipes(t *testing.T) {
+	sess := &Session{ID: "test-pipes"}
+	upr, upw := io.Pipe()
+	dpr, dpw := io.Pipe()
+
+	sess.UploadPipeR = upr
+	sess.UploadPipeW = upw
+	sess.DataPipeR = dpr
+	sess.DataPipeW = dpw
+
+	expectedErr := fmt.Errorf("session closed test error")
+	sess.ClosePipes(expectedErr)
+
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	assert.Nil(t, sess.DataPipeR)
+	assert.Nil(t, sess.DataPipeW)
+
+	buf := make([]byte, 10)
+	_, err := upr.Read(buf)
+	assert.Error(t, err)
+
+	_, err = upw.Write([]byte("hello"))
+	assert.Error(t, err)
+}
+
+func TestServer_UploadPipeCleanupOnSessionExpiration(t *testing.T) {
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sessID, err := client.Register(testCtx)
+	require.NoError(t, err)
+
+	sess := srv.GetSession(sessID)
+	require.NotNil(t, sess)
+
+	// Create an upload pipe on the session
+	upr, upw := io.Pipe()
+	sess.mu.Lock()
+	sess.UploadPipeR = upr
+	sess.UploadPipeW = upw
+	sess.mu.Unlock()
+
+	writerDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			_, writeErr := upw.Write(buf)
+			if writeErr != nil {
+				writerDone <- writeErr
+				return
+			}
+		}
+	}()
+
+	// Wait for sweeper to clean up expired session
+	assert.Eventually(t, func() bool {
+		return srv.GetSession(sessID) == nil
+	}, 2*time.Second, 10*time.Millisecond, "Session did not expire in time")
+
+	select {
+	case writeErr := <-writerDone:
+		assert.Error(t, writeErr, "Blocked upload writer should fail when session expires")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Writer goroutine did not unblock on session expiration")
+	}
+
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+}
+
+func TestServer_UploadContextCancellation(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sessID, err := client.Register(testCtx)
+	require.NoError(t, err)
+
+	pr, pw := io.Pipe()
+
+	httpClient := newTestHTTPClient()
+
+	uploadCtx, uploadCancel := context.WithCancel(testCtx)
+
+	go func() {
+		<-uploadCtx.Done()
+		pw.CloseWithError(uploadCtx.Err())
+		httpClient.CloseIdleConnections()
+	}()
+
+	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPost, ts.URL+"/api/upload?s="+sessID, pr)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW")
+	req.Close = true
+
+	uploadDone := make(chan error, 1)
+	go func() {
+		resp, reqErr := httpClient.Do(req)
+		if reqErr != nil {
+			uploadDone <- reqErr
+			return
+		}
+		resp.Body.Close()
+		uploadDone <- nil
+	}()
+
+	// Write initial header bytes of multipart body
+	go func() {
+		bodyHeader := "------WebKitFormBoundary7MA4YWxkTrZu0gW\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\nhello "
+		pw.Write([]byte(bodyHeader))
+	}()
+
+	// Wait briefly for handleUpload to initialize upload pipes
+	time.Sleep(50 * time.Millisecond)
+
+	sess := srv.GetSession(sessID)
+	require.NotNil(t, sess)
+
+	// Cancel upload context
+	uploadCancel()
+	ts.CloseClientConnections()
+
+	select {
+	case <-uploadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload handler did not complete after context cancellation")
+	}
+
+	assert.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR == nil && sess.UploadPipeW == nil
+	}, 3*time.Second, 10*time.Millisecond)
+}
+
+func TestServer_PullContextCancellation(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sessID, err := client.Register(testCtx)
+	require.NoError(t, err)
+
+	pr, pw := io.Pipe()
+
+	go func() {
+		<-testCtx.Done()
+		pw.CloseWithError(testCtx.Err())
+	}()
+
+	httpClient := newTestHTTPClient()
+
+	// Start upload request in background
+	reqUpload, err := http.NewRequestWithContext(testCtx, http.MethodPost, ts.URL+"/api/upload?s="+sessID, pr)
+	require.NoError(t, err)
+	reqUpload.Header.Set("Content-Type", "multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW")
+
+	go func() {
+		resp, _ := httpClient.Do(reqUpload)
+		if resp != nil {
+			resp.Body.Close()
+		}
+	}()
+
+	// Write multipart header to reach stream copy
+	go func() {
+		bodyHeader := "------WebKitFormBoundary7MA4YWxkTrZu0gW\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\n"
+		pw.Write([]byte(bodyHeader))
+		// Keep writing stream
+		for i := 0; i < 100; i++ {
+			time.Sleep(10 * time.Millisecond)
+			_, writeErr := pw.Write([]byte("data chunk\n"))
+			if writeErr != nil {
+				return
+			}
+		}
+	}()
+
+	// Wait for UploadPipeR to be created
+	var sess *Session
+	assert.Eventually(t, func() bool {
+		sess = srv.GetSession(sessID)
+		if sess == nil {
+			return false
+		}
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	pullCtx, pullCancel := context.WithCancel(testCtx)
+	go func() {
+		<-pullCtx.Done()
+		httpClient.CloseIdleConnections()
+	}()
+	reqPull, err := http.NewRequestWithContext(pullCtx, http.MethodGet, ts.URL+"/relay/pull?session="+sessID, nil)
+	require.NoError(t, err)
+	reqPull.Close = true
+
+	pullDone := make(chan error, 1)
+	go func() {
+		resp, reqErr := httpClient.Do(reqPull)
+		if reqErr != nil {
+			pullDone <- reqErr
+			return
+		}
+		buf := make([]byte, 100)
+		_, readErr := resp.Body.Read(buf)
+		resp.Body.Close()
+		pullDone <- readErr
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel pull context
+	pullCancel()
+	ts.CloseClientConnections()
+
+	select {
+	case <-pullDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Pull handler did not complete after context cancellation")
+	}
+
+	assert.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR == nil && sess.UploadPipeW == nil
+	}, 3*time.Second, 10*time.Millisecond)
 }
 
 
