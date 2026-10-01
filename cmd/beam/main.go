@@ -403,14 +403,20 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								fmt.Println("  ✅ Relay Transfer Complete!")
 							}
 						} else if cmd.Action == "upload" {
-							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", cmd.Filename)
+							cleanBase := filepath.Base(filepath.Clean(strings.ReplaceAll(cmd.Filename, "\\", "/")))
+							cleanBase = strings.Trim(cleanBase, "\x00./\\")
+							if cleanBase == "" {
+								cleanBase = "upload.bin"
+							}
+							outName := "received_" + cleanBase
+
+							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", cleanBase)
 							rc, err := relClient.DownloadData()
 							if err != nil {
 								fmt.Printf("  Error downloading from relay: %v\n", err)
 								continue
 							}
 
-							outName := "received_" + cmd.Filename
 							outFile, err := os.Create(outName)
 							if err != nil {
 								fmt.Printf("  Error creating file: %v\n", err)
@@ -433,7 +439,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									elapsed.Seconds(),
 									ui.FormatBytes(int64(speed)),
 								)
-								srv.UpdateSharedFile(outName, cmd.Filename, copied)
+								srv.UpdateSharedFile(outName, cleanBase, copied)
 							}
 						}
 					}
