@@ -1865,6 +1865,58 @@ async function startWebRTC() {
   }
 }
 
+// ── WebRTC Flow Control Helper ───────────────────────────────────────────────
+async function waitForBufferLow(dc, targetThreshold = 0) {
+  if (!dc) return;
+  dc.bufferedAmountLowThreshold = targetThreshold;
+  if (dc.readyState !== 'open' || dc.bufferedAmount <= targetThreshold) {
+    return;
+  }
+
+  return new Promise((resolve) => {
+    let timer = null;
+
+    const cleanup = () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      dc.removeEventListener('bufferedamountlow', onLow);
+      dc.removeEventListener('close', onClose);
+      dc.removeEventListener('error', onClose);
+    };
+
+    const onLow = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+
+    dc.addEventListener('bufferedamountlow', onLow);
+    dc.addEventListener('close', onClose);
+    dc.addEventListener('error', onClose);
+
+    // Immediate post-registration buffer level re-check
+    if (dc.bufferedAmount <= targetThreshold || dc.readyState !== 'open') {
+      cleanup();
+      resolve();
+      return;
+    }
+
+    // Fallback polling safety net (30ms interval)
+    timer = setInterval(() => {
+      if (dc.bufferedAmount <= targetThreshold || dc.readyState !== 'open') {
+        cleanup();
+        resolve();
+      }
+    }, 30);
+  });
+}
+
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
 async function handleUploadFile(e) {
   const file = e.target.files[0];
@@ -1891,11 +1943,8 @@ async function handleUploadFile(e) {
         reader.readAsArrayBuffer(chunkBlob);
       });
 
-      webrtcDataChannel.bufferedAmountLowThreshold = 512 * 1024;
       if (webrtcDataChannel.bufferedAmount > 1024 * 1024) {
-        await new Promise(resolve => {
-          webrtcDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-        });
+        await waitForBufferLow(webrtcDataChannel, 512 * 1024);
       }
       webrtcDataChannel.send(chunkBuffer);
       offset += chunkBuffer.byteLength;
@@ -1905,11 +1954,8 @@ async function handleUploadFile(e) {
       updateSpeed(offset);
     }
 
-    webrtcDataChannel.bufferedAmountLowThreshold = 0;
     if (webrtcDataChannel.bufferedAmount > 0) {
-      await new Promise(resolve => {
-        webrtcDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-      });
+      await waitForBufferLow(webrtcDataChannel, 0);
     }
     webrtcDataChannel.send("UPLOAD_EOF");
     showDone(file.name, file.size, "WebRTC P2P Upload");
@@ -2305,13 +2351,10 @@ async function streamFileToDataChannel(initialOffset) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    senderDataChannel.bufferedAmountLowThreshold = 512 * 1024;
     while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
       if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
       if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await new Promise(resolve => {
-          senderDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-        });
+        await waitForBufferLow(senderDataChannel, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -2351,11 +2394,8 @@ async function streamFileToDataChannel(initialOffset) {
 
   if (senderAborted) return;
 
-  senderDataChannel.bufferedAmountLowThreshold = 0;
   if (senderDataChannel.bufferedAmount > 0) {
-    await new Promise(resolve => {
-      senderDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-    });
+    await waitForBufferLow(senderDataChannel, 0);
   }
   senderDataChannel.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
@@ -2591,6 +2631,7 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    waitForBufferLow
   };
 }
