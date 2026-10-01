@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
 const pako = require('pako');
+const qrcode = require('./qrcode.min.js');
 
 // Read index.html for DOM fixture
 const htmlPath = path.join(__dirname, 'index.html');
@@ -82,6 +83,8 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
     global.pako = pako;
     window.pako = pako;
+    global.qrcode = qrcode;
+    window.qrcode = qrcode;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load app.js
@@ -416,6 +419,13 @@ describe('Gaze Web Sender Test Suite', () => {
 
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
+
+    // Verify QR code is generated locally in browser JS without external HTTP calls
+    await new Promise(r => setTimeout(r, 10));
+    const qrImg = document.getElementById('send-qr-img');
+    assert.ok(qrImg.src.startsWith('data:image/svg+xml'));
+    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
+    assert.equal(qrImg.src.includes('/api/qr'), false);
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
@@ -536,5 +546,27 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput(''), null);
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
+  });
+
+  test('Client-side QR code generation renders SVG locally without external network requests', async () => {
+    const testURL = "http://localhost:8080/?s=test-session#k=SecretKey1234567890";
+    
+    // Test generateQRCodeSVG helper
+    const svgStr = app.generateQRCodeSVG(testURL);
+    assert.ok(svgStr.includes('<svg'));
+    assert.ok(svgStr.includes('</svg>'));
+
+    // Test renderQRCode helper on DOM element
+    const imgEl = document.getElementById('send-qr-img');
+    app.renderQRCode(imgEl, testURL);
+
+    await new Promise(r => setTimeout(r, 10));
+    assert.ok(imgEl.src.startsWith('data:image/svg+xml;charset=utf-8,'));
+    assert.equal(imgEl.src.includes('api.qrserver.com'), false);
+    assert.equal(imgEl.src.includes('/api/qr'), false);
+
+    // Verify encoded content decodes back to the test URL
+    const decodedSVG = decodeURIComponent(imgEl.src.replace('data:image/svg+xml;charset=utf-8,', ''));
+    assert.ok(decodedSVG.includes('<svg'));
   });
 });
