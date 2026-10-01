@@ -70,6 +70,13 @@ func filterInterfaces(ifaces []net.Interface, getAddrs func(net.Interface) ([]ne
 				ip = v.IP
 			case *net.IPAddr:
 				ip = v.IP
+			default:
+				ipStr := a.String()
+				if host, _, err := net.ParseCIDR(ipStr); err == nil {
+					ip = host
+				} else {
+					ip = net.ParseIP(ipStr)
+				}
 			}
 			if ip != nil && !ip.IsUnspecified() {
 				hasIP = true

@@ -54,6 +54,11 @@ func TestBroadcaster_MockStartStop(t *testing.T) {
 	}
 
 	b := NewWithRegister("testbeam", 9090, mockRegisterFunc)
+	b.interfacesFunc = func() ([]net.Interface, error) {
+		return []net.Interface{
+			{Index: 1, Name: "eth0", Flags: net.FlagUp | net.FlagMulticast},
+		}, nil
+	}
 	err := b.Start()
 	if err != nil {
 		t.Fatalf("unexpected error starting broadcaster: %v", err)
@@ -139,6 +144,11 @@ func TestBroadcaster_MockRegisterError(t *testing.T) {
 	}
 
 	b := NewWithRegister("failbeam", 8080, mockRegisterFunc)
+	b.interfacesFunc = func() ([]net.Interface, error) {
+		return []net.Interface{
+			{Index: 1, Name: "eth0", Flags: net.FlagUp | net.FlagMulticast},
+		}, nil
+	}
 	err := b.Start()
 	if err == nil {
 		t.Fatalf("expected error on start, got nil")
