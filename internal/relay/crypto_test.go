@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 )
@@ -180,5 +181,42 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 
 	if bytes.Equal(nonce1, nonce2) {
 		t.Fatal("consecutive frames reused the same nonce")
+	}
+}
+
+func TestOversizedFrameHeader(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name   string
+		length uint32
+	}{
+		{"MaxFrameSize+1", MaxFrameSize + 1},
+		{"100KB Frame", 100 * 1024},
+		{"4GB Frame (0xFFFFFFFF)", 0xFFFFFFFF},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tc.length)
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if err == nil {
+				t.Fatalf("expected error for oversized frame length %d, got nil", tc.length)
+			}
+			if !errors.Is(err, ErrFrameTooLarge) {
+				t.Fatalf("expected ErrFrameTooLarge error, got: %v", err)
+			}
+		})
 	}
 }
