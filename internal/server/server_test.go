@@ -50,8 +50,10 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 	srv, err := New("", 10*1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
+
+	token := srv.Token()
 
 	t.Run("Upload large file", func(t *testing.T) {
 		bodyReader, bodyWriter := io.Pipe()
@@ -68,7 +70,7 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 			require.NoError(t, err)
 		}()
 
-		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload", bodyReader)
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?token="+token, bodyReader)
 		require.NoError(t, err)
 		req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -93,7 +95,7 @@ func TestUploadDownloadLargeFile(t *testing.T) {
 		srv.UpdateSharedFile(outName, "large_test.bin", int64(fileSize))
 
 		t.Run("Download large file", func(t *testing.T) {
-			resp, err := http.Get(ts.URL + "/api/download")
+			resp, err := http.Get(ts.URL + "/api/download?token=" + token)
 			require.NoError(t, err)
 			defer resp.Body.Close()
 
@@ -112,7 +114,7 @@ func TestUploadInterruptedFile(t *testing.T) {
 	srv, err := New("", 10*1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
 	bodyReader, bodyWriter := io.Pipe()
@@ -129,7 +131,7 @@ func TestUploadInterruptedFile(t *testing.T) {
 		_ = bodyWriter.CloseWithError(fmt.Errorf("connection reset by peer"))
 	}()
 
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload", bodyReader)
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?token="+srv.Token(), bodyReader)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -167,17 +169,6 @@ func TestWriteLive_Truncation(t *testing.T) {
 
 	backlog := srv.GetLiveBacklog()
 
-	// We expect the first part (which is 'A's) to be truncated because it exceeds 1MB.
-	// Actually, wait, let's look at the logic.
-	// len(liveData) = 1048576 + 12 = 1048588
-	// maxLiveBacklog = 1048576
-	// truncateIdx = 1048588 - 1048576 = 12
-	// It searches for \n in liveData[12:].
-	// Since part1 ends at 1048575, \n is at 1048575.
-	// So it finds \n and slices after it.
-	// This means the kept backlog will just be part2!
-
-	// Let's verify.
 	assert.Equal(t, part2, backlog)
 }
 
@@ -185,7 +176,7 @@ func TestUploadPathTraversalAndPermissions(t *testing.T) {
 	srv, err := New("", 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
 	traversalFilenames := []struct {
@@ -216,7 +207,7 @@ func TestUploadPathTraversalAndPermissions(t *testing.T) {
 				require.NoError(t, err)
 			}()
 
-			req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload", bodyReader)
+			req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?token="+srv.Token(), bodyReader)
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -241,13 +232,13 @@ func TestLiveStream_ClientCleanupOnUpdateSharedFile(t *testing.T) {
 	srv, err := New("", 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/live/stream", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/live/stream?token="+srv.Token(), nil)
 	require.NoError(t, err)
 
 	resp, err := http.DefaultClient.Do(req)
@@ -295,12 +286,14 @@ func TestDownload_HTTPRangeRequests(t *testing.T) {
 	srv, err := New(filePath, 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
+
+	token := srv.Token()
 
 	// 1. Full Download without Range header
 	t.Run("Full Download", func(t *testing.T) {
-		resp, err := http.Get(ts.URL + "/api/download")
+		resp, err := http.Get(ts.URL + "/api/download?token=" + token)
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
@@ -315,7 +308,7 @@ func TestDownload_HTTPRangeRequests(t *testing.T) {
 
 	// 2. Initial Range: bytes=0-9
 	t.Run("Initial Range bytes=0-9", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download", nil)
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?token="+token, nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=0-9")
 
@@ -334,7 +327,7 @@ func TestDownload_HTTPRangeRequests(t *testing.T) {
 
 	// 3. Open-ended Resumption Range: bytes=20-
 	t.Run("Resume Range bytes=20-", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download", nil)
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?token="+token, nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=20-")
 
@@ -354,7 +347,7 @@ func TestDownload_HTTPRangeRequests(t *testing.T) {
 
 	// 4. Suffix Range: bytes=-10 (last 10 bytes)
 	t.Run("Suffix Range bytes=-10", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download", nil)
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?token="+token, nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=-10")
 
@@ -373,7 +366,7 @@ func TestDownload_HTTPRangeRequests(t *testing.T) {
 
 	// 5. Unsatisfiable Range: bytes=5000-6000
 	t.Run("Unsatisfiable Range", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download", nil)
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/download?token="+token, nil)
 		require.NoError(t, err)
 		req.Header.Set("Range", "bytes=5000-6000")
 
@@ -387,7 +380,7 @@ func TestDownload_HTTPRangeRequests(t *testing.T) {
 
 	// 6. Preflight CORS OPTIONS
 	t.Run("CORS Preflight", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodOptions, ts.URL+"/api/download", nil)
+		req, err := http.NewRequest(http.MethodOptions, ts.URL+"/api/download?token="+token, nil)
 		require.NoError(t, err)
 
 		resp, err := http.DefaultClient.Do(req)
@@ -403,7 +396,7 @@ func TestServer_CacheControlHeaders(t *testing.T) {
 	srv, err := New("", 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
 	// Root HTML page must have Cache-Control: no-cache
@@ -426,8 +419,10 @@ func TestPNAHeaders(t *testing.T) {
 	srv, err := New("", 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
+
+	token := srv.Token()
 
 	endpoints := []struct {
 		path   string
@@ -441,8 +436,19 @@ func TestPNAHeaders(t *testing.T) {
 	}
 
 	for _, ep := range endpoints {
+		authenticatedPath := ep.path
+		if filepath.Ext(ep.path) != "" || len(ep.path) > 0 {
+			if len(ep.path) > 0 && ep.path[len(ep.path)-1] != '/' {
+				if bytes.Contains([]byte(ep.path), []byte("?")) {
+					authenticatedPath += "&token=" + token
+				} else {
+					authenticatedPath += "?token=" + token
+				}
+			}
+		}
+
 		t.Run(fmt.Sprintf("OPTIONS %s", ep.path), func(t *testing.T) {
-			req, err := http.NewRequest(http.MethodOptions, ts.URL+ep.path, nil)
+			req, err := http.NewRequest(http.MethodOptions, ts.URL+authenticatedPath, nil)
 			require.NoError(t, err)
 
 			resp, err := http.DefaultClient.Do(req)
@@ -455,15 +461,14 @@ func TestPNAHeaders(t *testing.T) {
 		t.Run(fmt.Sprintf("%s %s", ep.method, ep.path), func(t *testing.T) {
 			var req *http.Request
 			if ep.method == http.MethodPost {
-				// Upload requires multipart form data, so we'll construct a basic one just to get headers back
 				var b bytes.Buffer
 				writer := multipart.NewWriter(&b)
 				writer.Close() // empty form
-				req, err = http.NewRequest(http.MethodPost, ts.URL+ep.path, &b)
+				req, err = http.NewRequest(http.MethodPost, ts.URL+authenticatedPath, &b)
 				require.NoError(t, err)
 				req.Header.Set("Content-Type", writer.FormDataContentType())
 			} else {
-				req, err = http.NewRequest(ep.method, ts.URL+ep.path, nil)
+				req, err = http.NewRequest(ep.method, ts.URL+authenticatedPath, nil)
 				require.NoError(t, err)
 			}
 
@@ -480,7 +485,7 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 	srv, err := New("", 1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
 	const numSubscribers = 30
@@ -497,7 +502,7 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 		wg.Add(1)
 		go func(subIdx int) {
 			defer wg.Done()
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/live/stream", nil)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/live/stream?token="+srv.Token(), nil)
 			if err != nil {
 				return
 			}
@@ -556,3 +561,131 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 }
 
+func TestAuthMiddleware(t *testing.T) {
+	srv, err := New("", 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	token := srv.Token()
+	require.NotEmpty(t, token)
+	assert.Len(t, token, 64)
+
+	// 1. Unauthenticated requests receive 401 Unauthorized and zero CORS/PNA headers
+	apiEndpoints := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/meta"},
+		{http.MethodGet, "/api/download"},
+		{http.MethodPost, "/api/upload"},
+		{http.MethodGet, "/api/live/stream"},
+		{http.MethodGet, "/api/qr?url=test"},
+	}
+
+	for _, ep := range apiEndpoints {
+		t.Run("Unauthenticated "+ep.method+" "+ep.path, func(t *testing.T) {
+			req, err := http.NewRequest(ep.method, ts.URL+ep.path, nil)
+			require.NoError(t, err)
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+			assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"))
+			assert.Empty(t, resp.Header.Get("Access-Control-Allow-Private-Network"))
+		})
+
+		t.Run("Unauthenticated OPTIONS "+ep.path, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodOptions, ts.URL+ep.path, nil)
+			require.NoError(t, err)
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+			assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"))
+			assert.Empty(t, resp.Header.Get("Access-Control-Allow-Private-Network"))
+		})
+	}
+
+	// 2. Token via Query Parameter ?token=
+	t.Run("Auth via ?token=", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/meta?token="+token, nil)
+		require.NoError(t, err)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "*", resp.Header.Get("Access-Control-Allow-Origin"))
+		assert.Equal(t, "true", resp.Header.Get("Access-Control-Allow-Private-Network"))
+	})
+
+	// 3. Token via Query Parameter ?s=
+	t.Run("Auth via ?s=", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/meta?s="+token, nil)
+		require.NoError(t, err)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	// 4. Token via Header X-Beam-Token
+	t.Run("Auth via X-Beam-Token header", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/meta", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-Beam-Token", token)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	// 5. Token via Authorization: Bearer <token>
+	t.Run("Auth via Authorization Bearer header", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/meta", nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	// 6. Invalid token returns 401 Unauthorized
+	t.Run("Invalid Token", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/meta?token=invalidtoken123", nil)
+		require.NoError(t, err)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
+
+	// 7. Static endpoints accessible without token
+	t.Run("Static endpoints public", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/")
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		respSW, err := http.Get(ts.URL + "/sw.js")
+		require.NoError(t, err)
+		respSW.Body.Close()
+		assert.Equal(t, http.StatusOK, respSW.StatusCode)
+	})
+}
