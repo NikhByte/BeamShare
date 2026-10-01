@@ -198,10 +198,13 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
 
-      const [download] = await Promise.all([
-        page.waitForEvent('download', { timeout: 30000 }),
-        page.click('#btn-download'),
-      ]);
+      await page.unroute('**/api/signal/**');
+
+      const downloadPromise = page.waitForEvent('download', { timeout: 30000 });
+
+      await page.click('#btn-download');
+
+      const download = await downloadPromise;
 
       await expect(page.locator('#state-done')).toBeVisible({ timeout: 45000 });
 
