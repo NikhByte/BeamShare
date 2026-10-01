@@ -451,6 +451,25 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 			// Hook up data channel handler
 			session.OnOpen = func(dc *webrtc.DataChannel) {
+				removeDC := func() {
+					channelsMu.Lock()
+					defer channelsMu.Unlock()
+					for i, ch := range activeChannels {
+						if ch == dc {
+							activeChannels = append(activeChannels[:i], activeChannels[i+1:]...)
+							break
+						}
+					}
+				}
+
+				dc.OnClose(func() {
+					removeDC()
+				})
+
+				dc.OnError(func(err error) {
+					removeDC()
+				})
+
 				// Upload state variables for incoming files from receiver
 				var (
 					uploadFile *os.File
@@ -649,9 +668,17 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 					// Broadcast to WebRTC data channels
 					channelsMu.Lock()
+					var validChannels []*webrtc.DataChannel
 					for _, dc := range activeChannels {
-						dc.SendText(string(chunk))
+						if dc.ReadyState() != webrtc.DataChannelStateOpen {
+							continue
+						}
+						if err := dc.SendText(string(chunk)); err != nil {
+							continue
+						}
+						validChannels = append(validChannels, dc)
 					}
+					activeChannels = validChannels
 					channelsMu.Unlock()
 				}
 				if err != nil {
@@ -661,8 +688,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					channelsMu.Lock()
 					liveFinished = true
 					for _, dc := range activeChannels {
-						dc.SendText("EOF")
-						dc.Close()
+						if dc.ReadyState() == webrtc.DataChannelStateOpen {
+							dc.SendText("EOF")
+							dc.Close()
+						}
 					}
 					activeChannels = nil
 					channelsMu.Unlock()
