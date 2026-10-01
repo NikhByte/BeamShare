@@ -895,6 +895,61 @@ function checkRamWarning(size) {
   });
 }
 
+// ── QR Code Rendering & Scanning ─────────────────────────────────────────────
+
+/**
+ * Generate a QR code SVG string locally using browser client JavaScript.
+ * Prohibits external network requests to third-party QR generation services.
+ * @param {string} text - The URL or string to encode
+ * @returns {string} SVG tag string
+ */
+function generateQRCodeSVG(text) {
+  if (!text) return '';
+  const qrcodeFn = typeof window !== 'undefined' && window.qrcode ? window.qrcode : (typeof qrcode !== 'undefined' ? qrcode : null);
+  if (!qrcodeFn) {
+    console.warn("QR code generation library (qrcode) is not available.");
+    return '';
+  }
+  const qr = qrcodeFn(0, 'M');
+  qr.addData(text);
+  qr.make();
+  return qr.createSvgTag({ scalable: true });
+}
+
+/**
+ * Render a QR code locally into an image element using browser client JavaScript.
+ * Prohibits external network requests to third-party QR generation services.
+ * Executes asynchronously using setTimeout to avoid blocking UI rendering.
+ * @param {string|HTMLElement} elementOrId - The target image element or element ID
+ * @param {string} text - The URL or string to encode
+ */
+function renderQRCode(elementOrId, text) {
+  const imgEl = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
+  if (!imgEl) return;
+
+  if (!text) {
+    imgEl.src = '';
+    return;
+  }
+
+  const generate = () => {
+    try {
+      const svgTag = generateQRCodeSVG(text);
+      if (svgTag) {
+        imgEl.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svgTag);
+      }
+    } catch (err) {
+      console.error("Local QR code generation failed:", err);
+    }
+  };
+
+  if (typeof setTimeout !== 'undefined') {
+    setTimeout(generate, 0);
+  } else {
+    generate();
+  }
+}
+
 // ── QR Scanning ───────────────────────────────────────────────────────────────
 let qrStream = null;
 let qrScanFrame = null;
@@ -1991,11 +2046,8 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR PNG dynamically from the server's newly added QR API
-    const qrImg = document.getElementById('done-qr-img');
-    if (qrImg) {
-      qrImg.src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareLink);
-    }
+    // Render QR code locally via client-side JavaScript
+    renderQRCode('done-qr-img', shareLink);
     
     if (doneShare) doneShare.classList.remove('hidden');
   } else {
@@ -2172,7 +2224,7 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
+    renderQRCode('send-qr-img', shareURL.href);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -2591,6 +2643,8 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    generateQRCodeSVG,
+    renderQRCode
   };
 }
