@@ -17,8 +17,6 @@ import (
 	"github.com/beamshare/beam/internal/assets"
 )
 
-const maxDownloadQueueSize = 100
-
 type DownloadRequest struct {
 	Offset int64  `json:"offset,omitempty"`
 	Range  string `json:"range,omitempty"`
@@ -45,19 +43,15 @@ type Session struct {
 	expiresAt time.Time
 	mu        sync.Mutex
 
-	downloadQueue  []DownloadRequest
-	downloadNotify chan struct{}
+	pendingDownload *DownloadRequest
+	downloadNotify  chan struct{}
 }
 
 func (s *Session) EnqueueDownload(req DownloadRequest) bool {
 	s.mu.Lock()
-	if len(s.downloadQueue) >= maxDownloadQueueSize {
-		s.mu.Unlock()
-		return false
-	}
-	s.downloadQueue = append(s.downloadQueue, req)
-	s.mu.Unlock()
-
+	defer s.mu.Unlock()
+	reqCopy := req
+	s.pendingDownload = &reqCopy
 	select {
 	case s.downloadNotify <- struct{}{}:
 	default:
@@ -68,32 +62,35 @@ func (s *Session) EnqueueDownload(req DownloadRequest) bool {
 func (s *Session) DequeueDownload() (DownloadRequest, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.downloadQueue) == 0 {
+	if s.pendingDownload == nil {
 		return DownloadRequest{}, false
 	}
-	req := s.downloadQueue[0]
-	s.downloadQueue = s.downloadQueue[1:]
+	req := *s.pendingDownload
+	s.pendingDownload = nil
+	select {
+	case <-s.downloadNotify:
+	default:
+	}
 	return req, true
 }
 
 func (s *Session) ClearDownloadQueue() {
 	s.mu.Lock()
-	s.downloadQueue = nil
-	s.mu.Unlock()
-
-	for {
-		select {
-		case <-s.downloadNotify:
-		default:
-			return
-		}
+	defer s.mu.Unlock()
+	s.pendingDownload = nil
+	select {
+	case <-s.downloadNotify:
+	default:
 	}
 }
 
 func (s *Session) DownloadQueueLen() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.downloadQueue)
+	if s.pendingDownload != nil {
+		return 1
+	}
+	return 0
 }
 
 func (s *Session) ClosePipes(err error) {
@@ -354,7 +351,7 @@ func (s *Server) createSession() *Session {
 	sess := &Session{
 		ID:             id,
 		AnswerReady:    make(chan string, 1),
-		downloadNotify: make(chan struct{}, maxDownloadQueueSize),
+		downloadNotify: make(chan struct{}, 1),
 		UploadReq:      make(chan string, 1),
 		expiresAt:      time.Now().Add(s.sessionTTL),
 	}
@@ -494,10 +491,6 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if dlReq, ok := sess.DequeueDownload(); ok {
-		select {
-		case <-sess.downloadNotify:
-		default:
-		}
 		respondWithDownload(w, dlReq)
 		return
 	}
