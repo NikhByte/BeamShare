@@ -3,6 +3,8 @@ package relay
 import (
 	"context"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -259,6 +261,407 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestServer_UploadPipeTeardownOnSessionExpiration(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer testCancel()
+
+	sessID, err := client.Register(testCtx)
+	require.NoError(t, err)
+
+	bodyReader, bodyWriter := io.Pipe()
+	mw := multipart.NewWriter(bodyWriter)
+
+	uploadErrCh := make(chan error, 1)
+
+	go func() {
+		defer bodyWriter.Close()
+		pw, err := mw.CreateFormFile("file", "test.bin")
+		if err != nil {
+			return
+		}
+		buf := make([]byte, 1024)
+		for {
+			select {
+			case <-testCtx.Done():
+				return
+			default:
+				_, errWrite := pw.Write(buf)
+				if errWrite != nil {
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}()
+
+	httpClient := newTestHTTPClient()
+	go func() {
+		req, err := http.NewRequestWithContext(testCtx, http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyReader)
+		if err != nil {
+			uploadErrCh <- err
+			return
+		}
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.Close = true
+		resp, err := httpClient.Do(req)
+		bodyWriter.Close()
+		if err != nil {
+			uploadErrCh <- err
+			return
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			uploadErrCh <- fmt.Errorf("unexpected status %d", resp.StatusCode)
+			return
+		}
+		uploadErrCh <- nil
+	}()
+
+	sess := srv.getSession(sessID)
+	require.NotNil(t, sess)
+
+	require.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil && sess.UploadPipeW != nil
+	}, 3*time.Second, 10*time.Millisecond, "Upload pipe not set")
+
+	// Expire session and sweep
+	sess.mu.Lock()
+	sess.expiresAt = time.Now().Add(-1 * time.Hour)
+	sess.mu.Unlock()
+
+	srv.SweepExpiredSessions()
+	bodyWriter.Close()
+
+	select {
+	case err := <-uploadErrCh:
+		t.Logf("Upload handler terminated as expected: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Upload handler did not terminate after session expiration")
+	}
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+}
+
+func TestServer_UploadAndPullContextCancellation(t *testing.T) {
+	t.Run("Upload_Context_Cancelled", func(t *testing.T) {
+		srv := NewServer()
+		defer srv.Stop()
+
+		ts := httptest.NewServer(srv)
+		defer ts.Close()
+
+		client := NewClient(ts.URL)
+		testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer testCancel()
+
+		sessID, err := client.Register(testCtx)
+		require.NoError(t, err)
+
+		bodyReader, bodyWriter := io.Pipe()
+		mw := multipart.NewWriter(bodyWriter)
+
+		go func() {
+			defer bodyWriter.Close()
+			pw, err := mw.CreateFormFile("file", "test.bin")
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 1024)
+			for {
+				_, errWrite := pw.Write(buf)
+				if errWrite != nil {
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}()
+
+		uploadCtx, uploadCancel := context.WithCancel(testCtx)
+		req, err := http.NewRequestWithContext(uploadCtx, http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyReader)
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.Close = true
+
+		go func() {
+			<-uploadCtx.Done()
+			bodyWriter.CloseWithError(uploadCtx.Err())
+		}()
+
+		uploadErrCh := make(chan error, 1)
+		httpClient := newTestHTTPClient()
+		go func() {
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				uploadErrCh <- err
+				return
+			}
+			resp.Body.Close()
+			uploadErrCh <- nil
+		}()
+
+		sess := srv.getSession(sessID)
+		require.NotNil(t, sess)
+
+		require.Eventually(t, func() bool {
+			sess.mu.Lock()
+			defer sess.mu.Unlock()
+			return sess.UploadPipeR != nil && sess.UploadPipeW != nil
+		}, 3*time.Second, 10*time.Millisecond)
+
+		uploadCancel()
+
+		select {
+		case <-uploadErrCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Upload handler did not exit on context cancellation")
+		}
+
+		require.Eventually(t, func() bool {
+			sess.mu.Lock()
+			defer sess.mu.Unlock()
+			return sess.UploadPipeR == nil && sess.UploadPipeW == nil
+		}, 3*time.Second, 10*time.Millisecond, "Upload pipes were not cleared after upload context cancellation")
+	})
+
+	t.Run("Pull_Context_Cancelled", func(t *testing.T) {
+		srv := NewServer()
+		defer srv.Stop()
+
+		ts := httptest.NewServer(srv)
+		defer ts.Close()
+
+		client := NewClient(ts.URL)
+		testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer testCancel()
+
+		sessID, err := client.Register(testCtx)
+		require.NoError(t, err)
+
+		bodyReader, bodyWriter := io.Pipe()
+		mw := multipart.NewWriter(bodyWriter)
+
+		go func() {
+			defer bodyWriter.Close()
+			pw, err := mw.CreateFormFile("file", "test.bin")
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 1024)
+			for {
+				_, errWrite := pw.Write(buf)
+				if errWrite != nil {
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}()
+
+		pullCtx, pullCancel := context.WithCancel(testCtx)
+
+		go func() {
+			select {
+			case <-pullCtx.Done():
+			case <-testCtx.Done():
+			}
+			bodyWriter.CloseWithError(fmt.Errorf("cancelled"))
+		}()
+
+		reqUpload, err := http.NewRequestWithContext(testCtx, http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyReader)
+		require.NoError(t, err)
+		reqUpload.Header.Set("Content-Type", mw.FormDataContentType())
+		reqUpload.Close = true
+
+		uploadErrCh := make(chan error, 1)
+		httpClient := newTestHTTPClient()
+		go func() {
+			resp, err := httpClient.Do(reqUpload)
+			if err != nil {
+				uploadErrCh <- err
+				return
+			}
+			resp.Body.Close()
+			uploadErrCh <- nil
+		}()
+
+		sess := srv.getSession(sessID)
+		require.NotNil(t, sess)
+
+		require.Eventually(t, func() bool {
+			sess.mu.Lock()
+			defer sess.mu.Unlock()
+			return sess.UploadPipeR != nil && sess.UploadPipeW != nil
+		}, 3*time.Second, 10*time.Millisecond)
+
+		reqPull, err := http.NewRequestWithContext(pullCtx, http.MethodGet, ts.URL+"/relay/pull?session="+sessID, nil)
+		require.NoError(t, err)
+
+		pullErrCh := make(chan error, 1)
+		go func() {
+			resp, err := httpClient.Do(reqPull)
+			if err != nil {
+				pullErrCh <- err
+				return
+			}
+			defer resp.Body.Close()
+			buf := make([]byte, 1024)
+			for {
+				_, errRead := resp.Body.Read(buf)
+				if errRead != nil {
+					pullErrCh <- errRead
+					return
+				}
+			}
+		}()
+
+		time.Sleep(50 * time.Millisecond)
+		pullCancel()
+
+		select {
+		case <-pullErrCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Pull handler did not exit on context cancellation")
+		}
+
+		select {
+		case <-uploadErrCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Upload handler did not exit after pull context cancellation")
+		}
+
+		require.Eventually(t, func() bool {
+			sess.mu.Lock()
+			defer sess.mu.Unlock()
+			return sess.UploadPipeR == nil && sess.UploadPipeW == nil
+		}, 3*time.Second, 10*time.Millisecond, "Upload pipes were not cleared after pull context cancellation")
+	})
+}
+
+func TestServer_RepeatedUploadRequestsClosePreviousPipes(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer testCancel()
+
+	sessID, err := client.Register(testCtx)
+	require.NoError(t, err)
+
+	bodyReader1, bodyWriter1 := io.Pipe()
+	mw1 := multipart.NewWriter(bodyWriter1)
+
+	go func() {
+		defer bodyWriter1.Close()
+		pw, err := mw1.CreateFormFile("file", "file1.bin")
+		if err != nil {
+			return
+		}
+		buf := make([]byte, 1024)
+		for {
+			select {
+			case <-testCtx.Done():
+				return
+			default:
+				_, errWrite := pw.Write(buf)
+				if errWrite != nil {
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}()
+
+	req1, err := http.NewRequestWithContext(testCtx, http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyReader1)
+	require.NoError(t, err)
+	req1.Header.Set("Content-Type", mw1.FormDataContentType())
+	req1.Close = true
+
+	httpClient := newTestHTTPClient()
+	uploadErrCh1 := make(chan error, 1)
+	go func() {
+		resp, err := httpClient.Do(req1)
+		bodyWriter1.Close()
+		if err != nil {
+			uploadErrCh1 <- err
+			return
+		}
+		resp.Body.Close()
+		uploadErrCh1 <- nil
+	}()
+
+	sess := srv.getSession(sessID)
+	require.NotNil(t, sess)
+
+	var firstPipeR *io.PipeReader
+	require.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		firstPipeR = sess.UploadPipeR
+		return sess.UploadPipeR != nil && sess.UploadPipeW != nil
+	}, 3*time.Second, 10*time.Millisecond)
+
+	bodyReader2, bodyWriter2 := io.Pipe()
+	mw2 := multipart.NewWriter(bodyWriter2)
+	bodyWriter1.Close()
+
+	go func() {
+		defer bodyWriter2.Close()
+		pw, err := mw2.CreateFormFile("file", "file2.bin")
+		if err != nil {
+			return
+		}
+		pw.Write([]byte("short file content"))
+		mw2.Close()
+	}()
+
+	uploadCtx2, uploadCancel2 := context.WithCancel(testCtx)
+	req2, err := http.NewRequestWithContext(uploadCtx2, http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyReader2)
+	require.NoError(t, err)
+	req2.Header.Set("Content-Type", mw2.FormDataContentType())
+	req2.Close = true
+
+	uploadErrCh2 := make(chan error, 1)
+	go func() {
+		resp, err := httpClient.Do(req2)
+		bodyWriter2.Close()
+		if err != nil {
+			uploadErrCh2 <- err
+			return
+		}
+		resp.Body.Close()
+		uploadErrCh2 <- nil
+	}()
+
+	select {
+	case <-uploadErrCh1:
+	case <-time.After(3 * time.Second):
+		t.Fatal("First upload did not terminate when replaced by second upload")
+	}
+
+	require.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil && sess.UploadPipeR != firstPipeR
+	}, 3*time.Second, 10*time.Millisecond, "Upload pipe was not replaced")
+
+	uploadCancel2()
 }
 
 
