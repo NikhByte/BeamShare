@@ -405,7 +405,8 @@ describe('Gaze Web Sender Test Suite', () => {
     await app.startSenderSharing();
 
     const urlInput = document.getElementById('send-url-input');
-    const hash = new URL(urlInput.value || "http://localhost/").hash;
+    const shareUrlVal = urlInput.value || "http://localhost/";
+    const hash = new URL(shareUrlVal).hash;
 
     assert.equal(hash.startsWith('#k='), true);
 
@@ -416,6 +417,38 @@ describe('Gaze Web Sender Test Suite', () => {
 
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
+
+    // Verify local QR code rendering on send-qr-img
+    const sendQrImg = document.getElementById('send-qr-img');
+    assert.notEqual(sendQrImg, null);
+    assert.equal(sendQrImg.src.includes('api.qrserver.com'), false);
+    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml'), true);
+
+    // Verify encoded URL in SVG contains the full share URL and key hash
+    const decodedSvg = decodeURIComponent(sendQrImg.src);
+    assert.equal(sendQrImg.src.length > 100, true);
+  });
+
+  test('renderQRCode generates local SVG Data URL with decryption key hash and handles errors gracefully', () => {
+    const img = document.createElement('img');
+    const fullShareUrl = "http://localhost:8080/?s=test-session&backend=http%3A%2F%2Flocalhost%3A8080&mode=webrtc#k=47d1a2b9f3e841209a8c7b6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f";
+
+    app.renderQRCode(img, fullShareUrl);
+
+    assert.equal(img.src.startsWith('data:image/svg+xml'), true);
+    assert.equal(img.src.includes('api.qrserver.com'), false);
+    assert.equal(img.alt, "QR Code for share URL");
+
+    // Test div container rendering
+    const div = document.createElement('div');
+    app.renderQRCode(div, fullShareUrl);
+    assert.equal(div.innerHTML.includes('<svg'), true);
+
+    // Test error fallback
+    const errImg = document.createElement('img');
+    app.renderQRCode(errImg, "");
+    assert.equal(errImg.alt, "No URL provided for QR code");
+    assert.equal(errImg.src.startsWith('data:image/svg+xml'), true);
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
