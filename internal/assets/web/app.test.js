@@ -537,4 +537,16 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('Session Bearer token extraction and URL/header formatting', () => {
+    window.history.replaceState({}, '', 'http://localhost:8080/?token=testtoken123');
+    assert.equal(app.getSessionToken(), 'testtoken123');
+
+    const headers = app.getAuthHeaders({ 'Custom-Header': 'val' });
+    assert.equal(headers['Authorization'], 'Bearer testtoken123');
+    assert.equal(headers['Custom-Header'], 'val');
+
+    const fullPath = app.apiPath('/api/meta');
+    assert.ok(fullPath.includes('token=testtoken123'));
+  });
 });
