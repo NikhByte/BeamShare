@@ -5,8 +5,12 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"io"
 )
+
+// MaxFrameSize is the maximum allowable frame size (64KB payload + 12-byte nonce + 16-byte GCM tag).
+const MaxFrameSize = 65564
 
 type EncryptingReader struct {
 	r     io.Reader
@@ -99,6 +103,10 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 	var length uint32
 	if err := binary.Read(dr.r, binary.BigEndian, &length); err != nil {
 		return 0, err
+	}
+
+	if length == 0 || length > MaxFrameSize {
+		return 0, fmt.Errorf("invalid frame length: %d", length)
 	}
 
 	frameData := make([]byte, length)
