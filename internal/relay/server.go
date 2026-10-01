@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/beamshare/beam/internal/assets"
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 const maxDownloadQueueSize = 100
@@ -1014,8 +1015,31 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 }
 
 func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
-	// A dummy QR API to prevent 404s
-	w.WriteHeader(200)
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Private-Network", "true")
+	urlParam := r.URL.Query().Get("url")
+	if urlParam == "" {
+		http.Error(w, "missing url parameter", http.StatusBadRequest)
+		return
+	}
+
+	pngBytes, err := qrcode.Encode(urlParam, qrcode.Medium, 256)
+	if err != nil {
+		http.Error(w, "failed to generate qr code: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(pngBytes)))
+	w.Write(pngBytes)
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {

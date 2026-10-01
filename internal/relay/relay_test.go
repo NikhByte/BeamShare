@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -978,6 +979,36 @@ func TestRelayClient_ExponentialBackoffCustomConfig(t *testing.T) {
 
 	// Ensure it respects max delay cap
 	assert.Equal(t, 5*time.Second, custom.CalculateBackoff(20))
+}
+
+func TestRelayServer_HandleQR(t *testing.T) {
+	relaySrv := NewServer()
+	ts := httptest.NewServer(relaySrv)
+	defer ts.Close()
+
+	t.Run("valid url with hash fragment", func(t *testing.T) {
+		shareURL := "http://localhost:8080/?s=12345#k=secretdecryptionkey"
+		resp, err := http.Get(ts.URL + "/api/qr?url=" + url.QueryEscape(shareURL))
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "image/png", resp.Header.Get("Content-Type"))
+		assert.Equal(t, "*", resp.Header.Get("Access-Control-Allow-Origin"))
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.True(t, len(body) > 0)
+		assert.Equal(t, []byte("\x89PNG\r\n\x1a\n"), body[:8])
+	})
+
+	t.Run("missing url parameter", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/api/qr")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	})
 }
 
 
