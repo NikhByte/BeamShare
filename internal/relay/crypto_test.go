@@ -182,3 +182,79 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 		t.Fatal("consecutive frames reused the same nonce")
 	}
 }
+
+func TestOversizedFrameRejection(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name   string
+		length uint32
+	}{
+		{"OneByteAboveMax", MaxFrameSize + 1},
+		{"100KBPayload", 100 * 1024},
+		{"HugePayload4GB", 0xFFFFFFFF},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tc.length)
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if err != ErrFrameTooLarge {
+				t.Fatalf("expected ErrFrameTooLarge for length %d, got %v", tc.length, err)
+			}
+		})
+	}
+}
+
+func TestMaxFrameSizeBoundary(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// 64KB plaintext chunk generates exactly MaxFrameSize (65564 bytes) frame
+	plain := make([]byte, 65536)
+	if _, err := io.ReadFull(rand.Reader, plain); err != nil {
+		t.Fatalf("failed to generate random data: %v", err)
+	}
+
+	encReader, err := NewEncryptingReader(bytes.NewReader(plain), key)
+	if err != nil {
+		t.Fatalf("NewEncryptingReader failed: %v", err)
+	}
+
+	encryptedData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("reading encrypted data failed: %v", err)
+	}
+
+	frameLen := binary.BigEndian.Uint32(encryptedData[0:4])
+	if frameLen != MaxFrameSize {
+		t.Fatalf("expected frame payload length to be MaxFrameSize (%d), got %d", MaxFrameSize, frameLen)
+	}
+
+	decReader, err := NewDecryptingReader(bytes.NewReader(encryptedData), key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	decryptedData, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("reading decrypted data failed: %v", err)
+	}
+
+	if !bytes.Equal(decryptedData, plain) {
+		t.Fatal("decrypted 64KB payload does not match original plaintext")
+	}
+}
