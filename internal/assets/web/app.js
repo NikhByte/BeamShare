@@ -547,13 +547,15 @@ class OPFSStreamWriter {
   async close() {
     if (!this.worker) return;
     return new Promise((resolve) => {
-      const handleMsg = () => {
-        if (this.worker) {
-          this.worker.removeEventListener('message', handleMsg);
-          this.worker.terminate();
-          this.worker = null;
+      const handleMsg = (e) => {
+        if (e.data && e.data.type === 'CLOSE_OK') {
+          if (this.worker) {
+            this.worker.removeEventListener('message', handleMsg);
+            this.worker.terminate();
+            this.worker = null;
+          }
+          resolve();
         }
-        resolve();
       };
       this.worker.addEventListener('message', handleMsg);
       this.worker.postMessage({ type: 'CLOSE' });
@@ -824,10 +826,61 @@ async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator)) return null;
 
   try {
+    if (!navigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        const timeout = setTimeout(resolve, 1500);
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          clearTimeout(timeout);
+          resolve();
+        }, { once: true });
+      });
+    }
+
+    if (!navigator.serviceWorker.controller) {
+      console.warn("Service worker is not controlling the page, skipping SW pipe.");
+      return null;
+    }
+
+    const iframeSupported = await new Promise((resolve) => {
+      let timer = setTimeout(() => {
+        cleanup();
+        resolve(false);
+      }, 300);
+
+      function onMsg(e) {
+        if (e.data === 'sw-iframe-ok') {
+          cleanup();
+          resolve(true);
+        }
+      }
+
+      const testIframe = document.createElement('iframe');
+      testIframe.style.display = 'none';
+
+      function cleanup() {
+        clearTimeout(timer);
+        window.removeEventListener('message', onMsg);
+        if (testIframe.parentNode) {
+          testIframe.parentNode.removeChild(testIframe);
+        }
+      }
+
+      window.addEventListener('message', onMsg);
+      testIframe.src = '/sw-download-pipe/iframe-ping';
+      document.body.appendChild(testIframe);
+    });
+
+    if (!iframeSupported) {
+      console.warn("Service worker does not intercept subframe navigations in this document context, skipping SW pipe.");
+      return null;
+    }
+
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
     const reg = await Promise.race([swReady, timeout]);
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
+    if (!reg || !reg.active) return null;
+
+    const sw = navigator.serviceWorker.controller;
     if (!sw) return null;
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
@@ -1333,21 +1386,17 @@ async function startHTTPDownload() {
     }
   }
 
-  if (!diskWritableStream && swSupported) {
-    swPipePort = await getSWPipe(currentFile);
-  }
-
-  if (!diskWritableStream && !swPipePort && opfsSupported) {
+  if (!diskWritableStream && opfsSupported) {
     try {
       const root = await navigator.storage.getDirectory();
-      try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
+      const opfsFileName = `beam_temp_${Date.now()}_${Math.random().toString(36).substring(2)}`;
       
       const estimate = await navigator.storage.estimate();
       if (estimate && estimate.quota && currentFile.size > (estimate.quota - estimate.usage)) {
          throw new Error("Device disk is full");
       }
       
-      diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
+      diskFileHandle = await root.getFileHandle(opfsFileName, { create: true });
       diskWritableStream = await createOPFSWriter(diskFileHandle, initialOffset);
       useOPFS = true;
       useIndexedDB = false;
@@ -1360,6 +1409,10 @@ async function startHTTPDownload() {
       diskWritableStream = null;
       useOPFS = false;
     }
+  }
+
+  if (!diskWritableStream && swSupported) {
+    swPipePort = await getSWPipe(currentFile);
   }
 
   if (!diskWritableStream && !swPipePort && !useOPFS) {
@@ -1466,7 +1519,10 @@ async function startHTTPDownload() {
       await diskWritableStream.close();
       if (useOPFS) {
         const file = await diskFileHandle.getFile();
-        triggerSave(file, currentFile.name);
+        const buffer = await file.arrayBuffer();
+        const blob = new Blob([buffer], { type: currentFile ? currentFile.mime : file.type });
+        try { const root = await navigator.storage.getDirectory(); await root.removeEntry(diskFileHandle.name); } catch(e){}
+        triggerSave(blob, currentFile.name);
       }
     } else if (swPipePort) {
       swPipePort.postMessage('EOF');
@@ -1728,21 +1784,17 @@ async function startWebRTC() {
       }
     }
 
-    if (!diskWritableStream && swSupported) {
-      swPipePort = await getSWPipe(currentFile);
-    }
-
-    if (!diskWritableStream && !swPipePort && opfsSupported) {
+    if (!diskWritableStream && opfsSupported) {
       try {
         const root = await navigator.storage.getDirectory();
-        try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
+        const opfsFileName = `beam_temp_${Date.now()}_${Math.random().toString(36).substring(2)}`;
         
         const estimate = await navigator.storage.estimate();
         if (estimate && estimate.quota && currentFile.size > (estimate.quota - estimate.usage)) {
            throw new Error("Device disk is full");
         }
         
-        diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
+        diskFileHandle = await root.getFileHandle(opfsFileName, { create: true });
         diskWritableStream = await createOPFSWriter(diskFileHandle, initialOffset);
         useOPFS = true;
         useIndexedDB = false;
@@ -1756,6 +1808,10 @@ async function startWebRTC() {
         diskWritableStream = null;
         useOPFS = false;
       }
+    }
+
+    if (!diskWritableStream && swSupported) {
+      swPipePort = await getSWPipe(currentFile);
     }
 
     if (!diskWritableStream && !swPipePort && !useOPFS) {
@@ -1822,7 +1878,10 @@ async function startWebRTC() {
                   await diskWritableStream.close();
                   if (useOPFS) {
                     const file = await diskFileHandle.getFile();
-                    triggerSave(file, currentFile.name);
+                    const buffer = await file.arrayBuffer();
+                    const blob = new Blob([buffer], { type: currentFile ? currentFile.mime : file.type });
+                    try { const root = await navigator.storage.getDirectory(); await root.removeEntry(diskFileHandle.name); } catch(e){}
+                    triggerSave(blob, currentFile.name);
                   }
                 } else if (swPipePort) {
                   swPipePort.postMessage("EOF");
@@ -1961,8 +2020,12 @@ function triggerSave(blob, name) {
   const a   = Object.assign(document.createElement('a'), { href: url, download: name });
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  setTimeout(() => {
+    if (a.parentNode) {
+      a.parentNode.removeChild(a);
+    }
+    URL.revokeObjectURL(url);
+  }, 5000);
 }
 
 function appendTerminalText(text) {
@@ -1991,11 +2054,8 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR PNG dynamically from the server's newly added QR API
-    const qrImg = document.getElementById('done-qr-img');
-    if (qrImg) {
-      qrImg.src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareLink);
-    }
+    // Render QR code locally via client-side QR generator
+    renderQRCode('done-qr-canvas', 'done-qr-img', shareLink, 180);
     
     if (doneShare) doneShare.classList.remove('hidden');
   } else {
@@ -2172,7 +2232,7 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
+    renderQRCode('send-qr-canvas', 'send-qr-img', shareURL.href, 160);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -2243,12 +2303,7 @@ function setupSenderDataChannel() {
           await reverseStream.close();
         } else {
           const blob = new Blob(reverseChunks);
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = reverseName;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
+          triggerSave(blob, reverseName);
         }
         document.getElementById('send-status-label').textContent = "Reverse Transfer Complete!";
       }
@@ -2567,6 +2622,94 @@ if (typeof window !== 'undefined') {
   });
 }
 
+function renderQRCode(canvasId, imgId, text, size) {
+  const canvas = typeof document !== 'undefined' ? document.getElementById(canvasId) : null;
+  const img = typeof document !== 'undefined' ? document.getElementById(imgId) : null;
+  const targetSize = size || 160;
+
+  if (typeof window !== 'undefined' && typeof global !== 'undefined') {
+    if (!global.HTMLCanvasElement && window.HTMLCanvasElement) {
+      global.HTMLCanvasElement = window.HTMLCanvasElement;
+    }
+    if (!global.HTMLImageElement && window.HTMLImageElement) {
+      global.HTMLImageElement = window.HTMLImageElement;
+    }
+  }
+
+  if (canvas && !canvas.getContext('2d')) {
+    canvas.getContext = () => ({
+      fillRect: () => {},
+      clearRect: () => {},
+      getImageData: () => ({ data: [] }),
+      putImageData: () => {},
+      createImageData: () => ([]),
+      setTransform: () => {},
+      drawImage: () => {},
+      save: () => {},
+      fillText: () => {},
+      restore: () => {},
+      beginPath: () => {},
+      moveTo: () => {},
+      lineTo: () => {},
+      closePath: () => {},
+      stroke: () => {},
+      translate: () => {},
+      scale: () => {},
+      rotate: () => {},
+      arc: () => {},
+      fill: () => {},
+      measureText: () => ({ width: 0 }),
+      transform: () => {},
+      rect: () => {}
+    });
+    if (!canvas.toDataURL) {
+      canvas.toDataURL = () => "data:image/png;base64,mock";
+    }
+  }
+
+  let QRGen = typeof QRious !== 'undefined' ? QRious : (typeof window !== 'undefined' && window.QRious ? window.QRious : null);
+  if (!QRGen && typeof require === 'function') {
+    try {
+      QRGen = require('./qrcode.min.js');
+    } catch (e) {
+      try {
+        QRGen = require('qrious');
+      } catch (e2) {}
+    }
+  }
+
+  if (QRGen) {
+    if (canvas) {
+      try {
+        const qr = new QRGen({
+          element: canvas,
+          value: text,
+          size: targetSize,
+          level: 'M'
+        });
+        if (img) {
+          try {
+            img.src = qr.toDataURL();
+          } catch (e) {}
+        }
+      } catch (err) {
+        console.error("Failed to render QR code on canvas:", err);
+      }
+    } else if (img) {
+      try {
+        const qr = new QRGen({
+          value: text,
+          size: targetSize,
+          level: 'M'
+        });
+        img.src = qr.toDataURL();
+      } catch (err) {
+        console.error("Failed to render QR code for image:", err);
+      }
+    }
+  }
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     SequentialChunkQueue,
@@ -2591,6 +2734,8 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    renderQRCode,
+    getSWPipe
   };
 }
