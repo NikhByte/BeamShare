@@ -103,6 +103,7 @@ func New(filePath string, bufferSize int) (*Server, error) {
 	mux.HandleFunc("/sitemap.xml", assets.SitemapXMLHandler)
 	mux.HandleFunc("/api/meta", s.handleMeta)
 	mux.HandleFunc("/api/download", s.handleDownload)
+	mux.HandleFunc("/sw-download-pipe/", s.handleDownload)
 	mux.HandleFunc("/api/upload", s.handleUpload)
 	mux.HandleFunc("/api/qr", s.handleQR)
 
@@ -134,7 +135,7 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/sw-download-pipe/") {
 			var reqToken string
 			authHeader := r.Header.Get("Authorization")
 			if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {

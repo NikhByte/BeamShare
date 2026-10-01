@@ -847,16 +847,16 @@ function setMode(mode, label) {
 
 // ── Service Worker Pipe ───────────────────────────────────────────────────────
 async function getSWPipe(fileMeta) {
-  if (!('serviceWorker' in navigator)) return null;
+  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
 
   try {
     const swReady = navigator.serviceWorker.ready;
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 3000));
     const reg = await Promise.race([swReady, timeout]);
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
+    let sw = navigator.serviceWorker.controller;
     if (!sw) return null;
 
-    const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
+    const swUrl = apiPath(`/sw-download-pipe/${Math.random().toString(36).substring(2)}`);
     const channel = new MessageChannel();
     const port = channel.port1;
 
@@ -1984,11 +1984,15 @@ function renderFileCard(meta) {
 
 function triggerSave(blob, name) {
   const url = URL.createObjectURL(blob);
-  const a   = Object.assign(document.createElement('a'), { href: url, download: name });
+  triggerSaveURL(url, name);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function triggerSaveURL(url, name) {
+  const a = Object.assign(document.createElement('a'), { href: url, download: name });
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  setTimeout(() => a.remove(), 1000);
 }
 
 function appendTerminalText(text) {
