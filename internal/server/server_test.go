@@ -556,3 +556,92 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 }
 
+func TestConcurrentMetaAndDownloadWhileUpdating(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	file1 := filepath.Join(tmpDir, "file1.txt")
+	file2 := filepath.Join(tmpDir, "file2.txt")
+
+	require.NoError(t, os.WriteFile(file1, []byte("content of file 1"), 0644))
+	require.NoError(t, os.WriteFile(file2, []byte("content of file 2 with more bytes"), 0644))
+
+	srv, err := New(file1, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	var wg sync.WaitGroup
+	stopCh := make(chan struct{})
+
+	// Goroutine 1: Rapidly update shared file back and forth
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		toggle := false
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+				if toggle {
+					srv.UpdateSharedFile(file1, "file1.txt", 17)
+				} else {
+					srv.UpdateSharedFile(file2, "file2.txt", 33)
+				}
+				toggle = !toggle
+				time.Sleep(1 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Goroutines 2-6: Concurrent readers querying /api/meta
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client := &http.Client{Timeout: 2 * time.Second}
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					resp, err := client.Get(ts.URL + "/api/meta")
+					if err == nil {
+						assert.Equal(t, http.StatusOK, resp.StatusCode)
+						resp.Body.Close()
+					}
+					time.Sleep(1 * time.Millisecond)
+				}
+			}
+		}()
+	}
+
+	// Goroutines 7-11: Concurrent readers querying /api/download
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client := &http.Client{Timeout: 2 * time.Second}
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					resp, err := client.Get(ts.URL + "/api/download")
+					if err == nil {
+						assert.Equal(t, http.StatusOK, resp.StatusCode)
+						_, _ = io.Copy(io.Discard, resp.Body)
+						resp.Body.Close()
+					}
+					time.Sleep(1 * time.Millisecond)
+				}
+			}
+		}()
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	close(stopCh)
+	wg.Wait()
+}
+

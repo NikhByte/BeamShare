@@ -28,7 +28,7 @@ type Server struct {
 	port         int
 	srv          *http.Server
 	mux          *http.ServeMux
-	mu           sync.Mutex
+	mu           sync.RWMutex
 	downloads    int
 
 	// Phase 5: Live Pipe
@@ -145,8 +145,8 @@ func (s *Server) CloseLive() {
 
 // GetLiveBacklog returns the accumulated stream buffer.
 func (s *Server) GetLiveBacklog() []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.liveBuf != nil {
 		return s.liveBuf.Bytes()
 	}
@@ -193,6 +193,24 @@ func (s *Server) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(assets.ServiceWorkerJS()))
 }
 
+type fileSnapshot struct {
+	filePath   string
+	fileName   string
+	fileSize   int64
+	isLivePipe bool
+}
+
+func (s *Server) fileSnapshot() fileSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return fileSnapshot{
+		filePath:   s.filePath,
+		fileName:   s.fileName,
+		fileSize:   s.fileSize,
+		isLivePipe: s.isLivePipe,
+	}
+}
+
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -204,10 +222,12 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Private-Network", "true")
+
+	snap := s.fileSnapshot()
 	json.NewEncoder(w).Encode(FileMeta{
-		Name: s.fileName,
-		Size: s.fileSize,
-		MIME: guessMIME(s.fileName),
+		Name: snap.fileName,
+		Size: snap.fileSize,
+		MIME: guessMIME(snap.fileName),
 	})
 }
 
@@ -232,21 +252,23 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition, Accept-Ranges")
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	if s.isLivePipe {
-		s.mu.Lock()
+	snap := s.fileSnapshot()
+
+	if snap.isLivePipe {
+		s.mu.RLock()
 		var data []byte
 		if s.liveBuf != nil {
 			data = s.liveBuf.Bytes()
 		}
-		s.mu.Unlock()
+		s.mu.RUnlock()
 
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, s.fileName))
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, snap.fileName))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		http.ServeContent(w, r, s.fileName, time.Time{}, bytes.NewReader(data))
+		http.ServeContent(w, r, snap.fileName, time.Time{}, bytes.NewReader(data))
 		return
 	}
 
-	f, err := os.Open(s.filePath)
+	f, err := os.Open(snap.filePath)
 	if err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
@@ -259,10 +281,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		modTime = stat.ModTime()
 	}
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, s.fileName))
-	w.Header().Set("Content-Type", guessMIME(s.fileName))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, snap.fileName))
+	w.Header().Set("Content-Type", guessMIME(snap.fileName))
 
-	http.ServeContent(w, r, s.fileName, modTime, f)
+	http.ServeContent(w, r, snap.fileName, modTime, f)
 }
 
 func (s *Server) handleLiveStream(w http.ResponseWriter, r *http.Request) {
