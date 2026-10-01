@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -527,8 +528,11 @@ func TestRelay_RangeRequestAndOffsetHandling(t *testing.T) {
 	err = os.WriteFile(filePath, testData, 0644)
 	require.NoError(t, err)
 
+	var uploadWg sync.WaitGroup
+	uploadWg.Add(1)
 	// Upload starting at offset 10 ("abcdefghijklmnopqrstuvwxyz")
 	go func() {
+		defer uploadWg.Done()
 		_ = client.UploadDataAtOffset(context.Background(), filePath, 10)
 	}()
 
@@ -543,6 +547,8 @@ func TestRelay_RangeRequestAndOffsetHandling(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for download response")
 	}
+
+	uploadWg.Wait()
 }
 
 func TestSeekingReader_ZeroLengthBufferAndContext(t *testing.T) {

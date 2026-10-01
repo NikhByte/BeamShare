@@ -537,4 +537,112 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('waitForBufferedAmountLow resolves immediately when buffer is below threshold', async () => {
+    const mockDC = {
+      bufferedAmount: 100,
+      readyState: 'open',
+      bufferedAmountLowThreshold: 0,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    };
+
+    await app.waitForBufferedAmountLow(mockDC, 512 * 1024);
+    assert.equal(mockDC.bufferedAmountLowThreshold, 512 * 1024);
+  });
+
+  test('waitForBufferedAmountLow catches buffer drain occurring during event listener registration', async () => {
+    let listenerAdded = false;
+    let listenerRemoved = false;
+    let listenerFn = null;
+
+    const mockDC = {
+      bufferedAmount: 2 * 1024 * 1024,
+      readyState: 'open',
+      bufferedAmountLowThreshold: 0,
+      addEventListener(event, fn) {
+        if (event === 'bufferedamountlow') {
+          listenerAdded = true;
+          listenerFn = fn;
+          // Simulate buffer draining in background during/upon listener attachment
+          this.bufferedAmount = 100 * 1024;
+        }
+      },
+      removeEventListener(event, fn) {
+        if (event === 'bufferedamountlow' && fn === listenerFn) {
+          listenerRemoved = true;
+        }
+      }
+    };
+
+    await app.waitForBufferedAmountLow(mockDC, 512 * 1024);
+    assert.equal(listenerAdded, true);
+    assert.equal(listenerRemoved, true);
+    assert.equal(mockDC.bufferedAmount, 100 * 1024);
+  });
+
+  test('waitForBufferedAmountLow resolves on bufferedamountlow event and cleans up listener', async () => {
+    let listenerAdded = false;
+    let listenerRemoved = false;
+    let listenerFn = null;
+
+    const mockDC = {
+      bufferedAmount: 2 * 1024 * 1024,
+      readyState: 'open',
+      bufferedAmountLowThreshold: 0,
+      addEventListener(event, fn) {
+        if (event === 'bufferedamountlow') {
+          listenerAdded = true;
+          listenerFn = fn;
+        }
+      },
+      removeEventListener(event, fn) {
+        if (event === 'bufferedamountlow' && fn === listenerFn) {
+          listenerRemoved = true;
+        }
+      }
+    };
+
+    const waitPromise = app.waitForBufferedAmountLow(mockDC, 512 * 1024);
+    assert.equal(listenerAdded, true);
+    assert.equal(listenerRemoved, false);
+
+    // Trigger bufferedamountlow event
+    mockDC.bufferedAmount = 256 * 1024;
+    listenerFn();
+
+    await waitPromise;
+    assert.equal(listenerRemoved, true);
+  });
+
+  test('waitForBufferedAmountLow polling fallback catches state change or channel closure', async () => {
+    let listenerRemoved = false;
+    let listenerFn = null;
+
+    const mockDC = {
+      bufferedAmount: 2 * 1024 * 1024,
+      readyState: 'open',
+      bufferedAmountLowThreshold: 0,
+      addEventListener(event, fn) {
+        if (event === 'bufferedamountlow') {
+          listenerFn = fn;
+        }
+      },
+      removeEventListener(event, fn) {
+        if (event === 'bufferedamountlow' && fn === listenerFn) {
+          listenerRemoved = true;
+        }
+      }
+    };
+
+    const waitPromise = app.waitForBufferedAmountLow(mockDC, 512 * 1024);
+
+    // Simulate buffer drop detected by polling ticker without event firing
+    setTimeout(() => {
+      mockDC.bufferedAmount = 100 * 1024;
+    }, 60);
+
+    await waitPromise;
+    assert.equal(listenerRemoved, true);
+  });
 });
