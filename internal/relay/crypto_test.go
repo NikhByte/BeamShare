@@ -182,3 +182,38 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 		t.Fatal("consecutive frames reused the same nonce")
 	}
 }
+
+func TestOversizedFrameHeader(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		length uint32
+	}{
+		{"1GB frame length header", 1073741824},
+		{"MaxFrameSize + 1 header", MaxFrameSize + 1},
+		{"Zero frame length header", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tt.length)
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if err == nil {
+				t.Fatalf("expected error for frame length %d, got nil", tt.length)
+			}
+		})
+	}
+}
+
