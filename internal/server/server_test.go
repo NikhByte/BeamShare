@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -554,5 +555,74 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 		defer srv.mu.Unlock()
 		return len(srv.liveClients) == 0
 	}, 5*time.Second, 20*time.Millisecond)
+}
+
+func TestConcurrentMetaDownloadUpdateSharedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath1 := filepath.Join(tmpDir, "file1.txt")
+	filePath2 := filepath.Join(tmpDir, "file2.txt")
+	require.NoError(t, os.WriteFile(filePath1, []byte("content1"), 0644))
+	require.NoError(t, os.WriteFile(filePath2, []byte("content2"), 0644))
+
+	srv, err := New(filePath1, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	var wg sync.WaitGroup
+	workers := 10
+	iterations := 50
+
+	// Concurrent handleMeta readers
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				resp, err := http.Get(ts.URL + "/api/meta")
+				if err != nil {
+					continue
+				}
+				var meta FileMeta
+				_ = json.NewDecoder(resp.Body).Decode(&meta)
+				resp.Body.Close()
+			}
+		}()
+	}
+
+	// Concurrent handleDownload readers
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				resp, err := http.Get(ts.URL + "/api/download")
+				if err != nil {
+					continue
+				}
+				_, _ = io.ReadAll(resp.Body)
+				resp.Body.Close()
+			}
+		}()
+	}
+
+	// Concurrent UpdateSharedFile writers
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				if (id+j)%2 == 0 {
+					srv.UpdateSharedFile(filePath1, "file1.txt", 8)
+				} else {
+					srv.UpdateSharedFile(filePath2, "file2.txt", 8)
+				}
+				time.Sleep(1 * time.Millisecond)
+			}
+		}(i)
+	}
+
+	wg.Wait()
 }
 
