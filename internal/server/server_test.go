@@ -556,3 +556,90 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 }
 
+func TestLiveStreamReader_ContinuousStreaming(t *testing.T) {
+	srv, err := New("", 10*1024*1024)
+	require.NoError(t, err)
+
+	srv.WriteLive([]byte("backlog 1\n"))
+
+	reader := srv.NewLiveStreamReader(context.Background(), 0)
+	defer reader.Close()
+
+	buf := make([]byte, 1024)
+
+	// Read initial backlog
+	n, err := reader.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "backlog 1\n", string(buf[:n]))
+
+	// Asynchronously write live chunks
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		srv.WriteLive([]byte("live chunk 2\n"))
+		time.Sleep(20 * time.Millisecond)
+		srv.CloseLive()
+	}()
+
+	// Read live chunk
+	n, err = reader.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "live chunk 2\n", string(buf[:n]))
+
+	// Read EOF after CloseLive
+	_, err = reader.Read(buf)
+	assert.Equal(t, io.EOF, err)
+}
+
+func TestLiveStreamReader_WithOffset(t *testing.T) {
+	srv, err := New("", 10*1024*1024)
+	require.NoError(t, err)
+
+	srv.WriteLive([]byte("0123456789"))
+
+	reader := srv.NewLiveStreamReader(context.Background(), 5)
+	defer reader.Close()
+
+	buf := make([]byte, 1024)
+
+	n, err := reader.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "56789", string(buf[:n]))
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		srv.WriteLive([]byte("next"))
+		srv.CloseLive()
+	}()
+
+	n, err = reader.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "next", string(buf[:n]))
+
+	_, err = reader.Read(buf)
+	assert.Equal(t, io.EOF, err)
+}
+
+func TestLiveStreamReader_CloseAndCleanup(t *testing.T) {
+	srv, err := New("", 10*1024*1024)
+	require.NoError(t, err)
+
+	reader := srv.NewLiveStreamReader(context.Background(), 0)
+
+	srv.mu.Lock()
+	clientCount := len(srv.liveClients)
+	srv.mu.Unlock()
+	assert.Equal(t, 1, clientCount)
+
+	err = reader.Close()
+	require.NoError(t, err)
+
+	srv.mu.Lock()
+	clientCount = len(srv.liveClients)
+	srv.mu.Unlock()
+	assert.Equal(t, 0, clientCount)
+
+	buf := make([]byte, 100)
+	_, err = reader.Read(buf)
+	assert.Equal(t, io.EOF, err)
+}
+
