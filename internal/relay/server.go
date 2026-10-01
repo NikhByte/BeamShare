@@ -107,32 +107,50 @@ func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err er
 }
 
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
-	if pr == nil || s.DataPipeR == pr {
-		if s.DataPipeW != nil {
+	closePair := func(r **io.PipeReader, w **io.PipeWriter) {
+		if *w != nil {
 			if err != nil {
-				s.DataPipeW.CloseWithError(err)
+				(*w).CloseWithError(err)
 			} else {
-				s.DataPipeW.Close()
+				(*w).Close()
 			}
-			s.DataPipeW = nil
-		}
-		if s.DataPipeR != nil {
+			*w = nil
+			*r = nil
+		} else if *r != nil {
 			if err != nil {
-				s.DataPipeR.CloseWithError(err)
+				(*r).CloseWithError(err)
 			} else {
-				s.DataPipeR.Close()
+				(*r).Close()
 			}
-			s.DataPipeR = nil
+			*r = nil
 		}
-	} else {
+	}
+
+	if pr == nil && pw == nil {
+		closePair(&s.DataPipeR, &s.DataPipeW)
+		closePair(&s.UploadPipeR, &s.UploadPipeW)
+		return
+	}
+
+	matched := false
+	if (pr != nil && s.DataPipeR == pr) || (pw != nil && s.DataPipeW == pw) {
+		matched = true
+		closePair(&s.DataPipeR, &s.DataPipeW)
+	}
+
+	if (pr != nil && s.UploadPipeR == pr) || (pw != nil && s.UploadPipeW == pw) {
+		matched = true
+		closePair(&s.UploadPipeR, &s.UploadPipeW)
+	}
+
+	if !matched {
 		if pw != nil {
 			if err != nil {
 				pw.CloseWithError(err)
 			} else {
 				pw.Close()
 			}
-		}
-		if pr != nil {
+		} else if pr != nil {
 			if err != nil {
 				pr.CloseWithError(err)
 			} else {
@@ -871,7 +889,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	sess.mu.Lock()
 	if sess.DataPipeR != nil || sess.DataPipeW != nil {
-		sess.closePipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new download request"))
+		sess.closePipesIfMatchLocked(sess.DataPipeR, sess.DataPipeW, fmt.Errorf("replaced by new download request"))
 	}
 	sess.DataPipeR = pr
 	sess.DataPipeW = pw
@@ -1059,6 +1077,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		if part.FormName() == "file" {
 			sess.mu.Lock()
+			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
+				sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
+			}
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
@@ -1072,8 +1093,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 			// Stream data to pipe
 			_, err = io.Copy(pw, part)
-			pw.CloseWithError(err)
+			sess.ClosePipesIfMatch(pr, pw, err)
 			part.Close()
+
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})

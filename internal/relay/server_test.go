@@ -3,6 +3,8 @@ package relay
 import (
 	"context"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -259,6 +261,108 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestSession_ClosePipesClosesUploadPipes(t *testing.T) {
+	prUpload, pwUpload := io.Pipe()
+	prData, pwData := io.Pipe()
+
+	sess := &Session{
+		ID:          "test-pipes-sess",
+		UploadPipeR: prUpload,
+		UploadPipeW: pwUpload,
+		DataPipeR:   prData,
+		DataPipeW:   pwData,
+	}
+
+	expErr := fmt.Errorf("session expired")
+	sess.ClosePipes(expErr)
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	assert.Nil(t, sess.DataPipeR)
+	assert.Nil(t, sess.DataPipeW)
+	sess.mu.Unlock()
+
+	// Verify reader and writer operations return expected error states
+	buf := make([]byte, 10)
+	_, errRead := prUpload.Read(buf)
+	assert.ErrorContains(t, errRead, "session expired")
+
+	_, errWrite := pwUpload.Write([]byte("data"))
+	assert.Error(t, errWrite)
+
+	_, errReadData := prData.Read(buf)
+	assert.ErrorContains(t, errReadData, "session expired")
+
+	_, errWriteData := pwData.Write([]byte("data"))
+	assert.Error(t, errWriteData)
+}
+
+func TestServer_UploadPipeCleanupOnSessionExpiration(t *testing.T) {
+	// Relay server with short TTL (50ms) and fast cleanup interval (10ms)
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+	sessID := sess.ID
+
+	bodyPr, bodyPw := io.Pipe()
+
+	respStatusCh := make(chan int, 1)
+
+	// Start uploading in goroutine
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyPr)
+		if err != nil {
+			respStatusCh <- -1
+			return
+		}
+
+		writer := multipart.NewWriter(bodyPw)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+
+		go func() {
+			defer bodyPw.Close()
+			part, err := writer.CreateFormFile("file", "test.txt")
+			if err != nil {
+				return
+			}
+			// Write chunk, keep pipe writer open so handler blocks on io.Copy
+			part.Write([]byte("initial chunk data"))
+		}()
+
+		httpClient := &http.Client{}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			respStatusCh <- -1
+			return
+		}
+		resp.Body.Close()
+		respStatusCh <- resp.StatusCode
+	}()
+
+	// Wait for session to expire and sweeper to sweep it
+	assert.Eventually(t, func() bool {
+		return srv.GetSession(sessID) == nil
+	}, 2*time.Second, 10*time.Millisecond, "Session should expire and be swept")
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+
+	// Upload writer should unblock with HTTP 500 error due to session expiration
+	select {
+	case status := <-respStatusCh:
+		assert.Equal(t, http.StatusInternalServerError, status, "Blocked upload request should unblock with HTTP 500 InternalServerError on session expiration")
+	case <-time.After(3 * time.Second):
+		t.Fatal("Upload writer goroutine blocked indefinitely and leaked!")
+	}
 }
 
 
