@@ -537,4 +537,102 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  describe('waitForBufferedAmountLow State-Aware Backpressure Guard', () => {
+    class MockDataChannel {
+      constructor(bufferedAmount = 0, readyState = 'open') {
+        this.bufferedAmount = bufferedAmount;
+        this.bufferedAmountLowThreshold = 0;
+        this.readyState = readyState;
+        this.listeners = {};
+      }
+      addEventListener(event, fn) {
+        if (!this.listeners[event]) this.listeners[event] = [];
+        this.listeners[event].push(fn);
+      }
+      removeEventListener(event, fn) {
+        if (!this.listeners[event]) return;
+        this.listeners[event] = this.listeners[event].filter(cb => cb !== fn);
+      }
+      emit(event) {
+        if (this.listeners[event]) {
+          [...this.listeners[event]].forEach(fn => fn());
+        }
+      }
+    }
+
+    test('resolves immediately when bufferedAmount is below target threshold', async () => {
+      const dc = new MockDataChannel(200 * 1024, 'open');
+      let listenerAdded = false;
+      dc.addEventListener = () => { listenerAdded = true; };
+
+      await app.waitForBufferedAmountLow(dc, 1024 * 1024, 512 * 1024);
+      assert.equal(listenerAdded, false);
+      assert.equal(dc.bufferedAmountLowThreshold, 512 * 1024);
+    });
+
+    test('attaches listener prior to checking and resolves on event', async () => {
+      const dc = new MockDataChannel(1500 * 1024, 'open');
+      let resolved = false;
+      const p = app.waitForBufferedAmountLow(dc, 1024 * 1024, 512 * 1024).then(() => { resolved = true; });
+
+      assert.equal(resolved, false);
+      assert.equal(dc.listeners['bufferedamountlow']?.length, 1);
+
+      dc.bufferedAmount = 400 * 1024;
+      dc.emit('bufferedamountlow');
+
+      await p;
+      assert.equal(resolved, true);
+      assert.equal(dc.listeners['bufferedamountlow']?.length || 0, 0);
+    });
+
+    test('resolves via post-listener double check if buffer drained during listener attachment', async () => {
+      const dc = new MockDataChannel(1500 * 1024, 'open');
+      let listenerCountAtDrain = 0;
+
+      const origAddEventListener = dc.addEventListener.bind(dc);
+      dc.addEventListener = (event, fn) => {
+        origAddEventListener(event, fn);
+        dc.bufferedAmount = 400 * 1024; // Drained right after listener attachment
+        listenerCountAtDrain = dc.listeners['bufferedamountlow']?.length || 0;
+      };
+
+      await app.waitForBufferedAmountLow(dc, 1024 * 1024, 512 * 1024);
+      assert.equal(listenerCountAtDrain, 1);
+      assert.equal(dc.listeners['bufferedamountlow']?.length || 0, 0);
+    });
+
+    test('resolves via fallback timer when event is dropped', async () => {
+      const dc = new MockDataChannel(1500 * 1024, 'open');
+      let resolved = false;
+      const p = app.waitForBufferedAmountLow(dc, 1024 * 1024, 512 * 1024).then(() => { resolved = true; });
+
+      assert.equal(resolved, false);
+      dc.bufferedAmount = 300 * 1024; // Lower buffer without firing event
+
+      await new Promise(r => setTimeout(r, 60));
+      assert.equal(resolved, true);
+      assert.equal(dc.listeners['bufferedamountlow']?.length || 0, 0);
+    });
+
+    test('handles EOF zero-threshold flush', async () => {
+      const dc = new MockDataChannel(50 * 1024, 'open');
+      let resolved = false;
+      const p = app.waitForBufferedAmountLow(dc, 0, 0).then(() => { resolved = true; });
+
+      assert.equal(dc.bufferedAmountLowThreshold, 0);
+      dc.bufferedAmount = 0;
+      dc.emit('bufferedamountlow');
+
+      await p;
+      assert.equal(resolved, true);
+    });
+
+    test('resolves if channel is closed or closing', async () => {
+      const dc = new MockDataChannel(1500 * 1024, 'closed');
+      await app.waitForBufferedAmountLow(dc, 1024 * 1024, 512 * 1024);
+      assert.equal(dc.listeners['bufferedamountlow']?.length || 0, 0);
+    });
+  });
 });
