@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 )
@@ -180,5 +181,92 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 
 	if bytes.Equal(nonce1, nonce2) {
 		t.Fatal("consecutive frames reused the same nonce")
+	}
+}
+
+func TestDecryptingReaderMaxFrameLengthExceeded(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name   string
+		length uint32
+	}{
+		{
+			name:   "Exceeds MaxFrameSize by 1",
+			length: MaxFrameSize + 1,
+		},
+		{
+			name:   "4GB max uint32 header value (0xFFFFFFFF)",
+			length: 0xFFFFFFFF,
+		},
+		{
+			name:   "1GB header value",
+			length: 1024 * 1024 * 1024,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			if err := binary.Write(buf, binary.BigEndian, tc.length); err != nil {
+				t.Fatalf("failed to write frame length header: %v", err)
+			}
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if !errors.Is(err, ErrInvalidFrameLength) {
+				t.Fatalf("expected ErrInvalidFrameLength, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDecryptingReaderZeroAndMaxFrameSize(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// 1. Zero-length frame should not trigger ErrInvalidFrameLength, but fail with io.ErrUnexpectedEOF due to insufficient length for nonce
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.BigEndian, uint32(0)); err != nil {
+		t.Fatalf("failed to write frame length header: %v", err)
+	}
+	decReader, err := NewDecryptingReader(buf, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+	out := make([]byte, 64)
+	_, err = decReader.Read(out)
+	if errors.Is(err, ErrInvalidFrameLength) {
+		t.Fatalf("unexpected ErrInvalidFrameLength for zero-length frame, got %v", err)
+	}
+	if err != io.ErrUnexpectedEOF {
+		t.Fatalf("expected io.ErrUnexpectedEOF for zero-length frame, got %v", err)
+	}
+
+	// 2. Exact MaxFrameSize length header should pass length validation (and fail read/decrypt if truncated or garbage data)
+	buf = new(bytes.Buffer)
+	if err := binary.Write(buf, binary.BigEndian, uint32(MaxFrameSize)); err != nil {
+		t.Fatalf("failed to write frame length header: %v", err)
+	}
+	// Append garbage payload of size MaxFrameSize
+	buf.Write(make([]byte, MaxFrameSize))
+
+	decReader, err = NewDecryptingReader(buf, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+	_, err = decReader.Read(out)
+	if errors.Is(err, ErrInvalidFrameLength) {
+		t.Fatalf("exact MaxFrameSize frame was incorrectly rejected with ErrInvalidFrameLength: %v", err)
 	}
 }
