@@ -418,6 +418,65 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.notEqual(app.get_senderEncryptionKey(), null);
   });
 
+  test('startSenderSharing renders QR code locally in memory without outbound network calls to api.qrserver.com or /api/qr', async () => {
+    const fetchedURLs = [];
+    global.fetch = async (url, opts) => {
+      fetchedURLs.push(url);
+      if (url.includes('/poll')) {
+        return { ok: false, status: 404 };
+      }
+      return {
+        ok: true,
+        json: async () => ({ session: 'mock-session-123' })
+      };
+    };
+    window.fetch = global.fetch;
+
+    await app.startSenderSharing();
+
+    // Verify 0 requests were sent to api.qrserver.com
+    const qrServerCalls = fetchedURLs.filter(u => u.includes('qrserver.com'));
+    assert.equal(qrServerCalls.length, 0, 'Must not make HTTP requests to api.qrserver.com');
+
+    // Verify 0 requests were sent to /api/qr
+    const localQRCalls = fetchedURLs.filter(u => u.includes('/api/qr'));
+    assert.equal(localQRCalls.length, 0, 'Must not make HTTP requests to /api/qr');
+
+    // Verify canvas element was updated locally
+    const canvas = document.getElementById('send-qr-canvas');
+    assert.notEqual(canvas, null);
+    assert.equal(canvas.width > 0, true);
+
+    // Verify img element has inline SVG data URI
+    const sendImg = document.getElementById('send-qr-img');
+    assert.notEqual(sendImg, null);
+    const srcAttr = sendImg.getAttribute('src') || sendImg.src;
+    assert.equal(srcAttr.startsWith('data:image/svg+xml'), true);
+    assert.equal(decodeURIComponent(srcAttr).includes('<path d='), true);
+  });
+
+  test('renderQRCode generates local QR SVG and Canvas elements containing Base64 AES keys (#k=)', () => {
+    const shareURL = "http://localhost:8080/?s=test-session-123&mode=webrtc#k=dGVzdC1zZWNyZXQta2V5LTAxMjM0NTY3ODkwMTI=";
+    
+    // SVG element target
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    app.renderQRCode(shareURL, svg);
+    assert.equal(svg.getAttribute('viewBox').length > 0, true);
+    assert.equal(svg.innerHTML.includes('<path d='), true);
+
+    // Image element target (data URI)
+    const img = document.createElement('img');
+    app.renderQRCode(shareURL, img);
+    const srcAttr = img.getAttribute('src') || img.src;
+    assert.equal(srcAttr.startsWith('data:image/svg+xml'), true);
+    assert.equal(decodeURIComponent(srcAttr).includes('<path d='), true);
+
+    // Container element target
+    const div = document.createElement('div');
+    app.renderQRCode(shareURL, div);
+    assert.equal(div.innerHTML.includes('<svg'), true);
+  });
+
   test('createOPFSWriter uses createWritable when available', async () => {
     let written = [];
     const mockFileHandle = {
