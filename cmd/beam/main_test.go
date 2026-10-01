@@ -1,14 +1,24 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
-
+	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+
 	"github.com/beamshare/beam/internal/server"
+	"github.com/beamshare/beam/internal/signaling"
+	"github.com/pion/webrtc/v3"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -112,3 +122,269 @@ func TestDownloadFile_Relay(t *testing.T) {
 		t.Fatalf("downloadFile failed: %v", err)
 	}
 }
+
+func TestWebRTCDuplicateOffsetAndBackpressure(t *testing.T) {
+	// Create temporary test file
+	fileSize := int64(150 * 1024) // 150KB
+	testData := make([]byte, fileSize)
+	for i := range testData {
+		testData[i] = byte(i % 251)
+	}
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "test_transfer.bin")
+	if err := os.WriteFile(filePath, testData, 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+	fileName := "test_transfer.bin"
+
+	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 10*time.Second)
+	if err != nil {
+		t.Fatalf("failed to create sender session: %v", err)
+	}
+	defer senderSession.Close()
+
+	senderTxReady := make(chan struct{})
+
+	var transferWg sync.WaitGroup
+
+	senderSession.OnOpen = func(dc *webrtc.DataChannel) {
+		var (
+			transferMu     sync.Mutex
+			cancelTransfer context.CancelFunc
+		)
+
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			if msg.IsString {
+				dataStr := string(msg.Data)
+				if strings.HasPrefix(dataStr, "OFFSET:") {
+					parts := strings.SplitN(dataStr, ":", 2)
+					var offset int64
+					if len(parts) == 2 {
+						offset, _ = strconv.ParseInt(parts[1], 10, 64)
+					}
+
+					transferMu.Lock()
+					if cancelTransfer != nil {
+						cancelTransfer()
+					}
+					ctx, cancel := context.WithCancel(context.Background())
+					cancelTransfer = cancel
+					transferMu.Unlock()
+
+					transferWg.Add(1)
+					go func(ctx context.Context) {
+						defer transferWg.Done()
+						file, err := os.Open(filePath)
+						if err != nil {
+							return
+						}
+						defer file.Close()
+
+						if offset > 0 {
+							if _, err := file.Seek(offset, 0); err != nil {
+								return
+							}
+						}
+
+						metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
+						if errSend := dc.SendText(metaHeader); errSend != nil {
+							return
+						}
+
+						buffer := make([]byte, 16*1024)
+						totalSent := offset
+
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							default:
+							}
+
+							for dc.BufferedAmount() > 1024*1024 {
+								select {
+								case <-ctx.Done():
+									return
+								case <-time.After(10 * time.Millisecond):
+								}
+							}
+
+							n, err := file.Read(buffer)
+							if n > 0 {
+								chunk := make([]byte, n)
+								copy(chunk, buffer[:n])
+								if errSend := dc.Send(chunk); errSend != nil {
+									return
+								}
+								totalSent += int64(n)
+							}
+							if err != nil {
+								break
+							}
+						}
+
+						for dc.BufferedAmount() > 0 {
+							select {
+							case <-ctx.Done():
+								return
+							case <-time.After(10 * time.Millisecond):
+							}
+						}
+						_ = dc.SendText("EOF")
+					}(ctx)
+				}
+			}
+		})
+		close(senderTxReady)
+	}
+
+	rxPC, err := signaling.NewWebRTCAPI().NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("failed to create receiver PeerConnection: %v", err)
+	}
+	defer rxPC.Close()
+
+	var mu sync.Mutex
+	var rxCandidates []webrtc.ICECandidateInit
+
+	rxPC.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			cand := c.ToJSON()
+			mu.Lock()
+			rxCandidates = append(rxCandidates, cand)
+			mu.Unlock()
+			_ = senderSession.AddICECandidate(cand)
+		}
+	})
+
+	var receivedBuf bytes.Buffer
+	eofReceived := make(chan struct{})
+
+	rxOpenCh := make(chan struct{})
+	rxDataChannelCh := make(chan *webrtc.DataChannel, 1)
+
+	rxPC.OnDataChannel(func(dc *webrtc.DataChannel) {
+		dc.OnOpen(func() {
+			select {
+			case <-rxOpenCh:
+			default:
+				close(rxOpenCh)
+			}
+		})
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			mu.Lock()
+			defer mu.Unlock()
+			if msg.IsString {
+				str := string(msg.Data)
+				if strings.HasPrefix(str, "META:") {
+					receivedBuf.Reset()
+				} else if str == "EOF" {
+					close(eofReceived)
+				}
+			} else {
+				receivedBuf.Write(msg.Data)
+			}
+		})
+		rxDataChannelCh <- dc
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err = senderSession.CreateOffer(ctx)
+	if err != nil {
+		t.Fatalf("failed to create offer: %v", err)
+	}
+
+	if err := rxPC.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeOffer,
+		SDP:  senderSession.RawOffer(),
+	}); err != nil {
+		t.Fatalf("SetRemoteDescription failed: %v", err)
+	}
+
+	for _, cand := range senderSession.GetCandidates() {
+		_ = rxPC.AddICECandidate(cand)
+	}
+
+	senderSession.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			_ = rxPC.AddICECandidate(c.ToJSON())
+		}
+	})
+
+	answerObj, err := rxPC.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("CreateAnswer failed: %v", err)
+	}
+	if err := rxPC.SetLocalDescription(answerObj); err != nil {
+		t.Fatalf("SetLocalDescription failed: %v", err)
+	}
+
+	answerBytes, err := json.Marshal(answerObj)
+	if err != nil {
+		t.Fatalf("marshal answer failed: %v", err)
+	}
+
+	if err := senderSession.ProvideAnswer(string(answerBytes)); err != nil {
+		t.Fatalf("ProvideAnswer failed: %v", err)
+	}
+
+	mu.Lock()
+	for _, cand := range rxCandidates {
+		_ = senderSession.AddICECandidate(cand)
+	}
+	mu.Unlock()
+
+	var rxDC *webrtc.DataChannel
+	select {
+	case rxDC = <-rxDataChannelCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for receiver DataChannel")
+	}
+
+	select {
+	case <-rxOpenCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for rxOpenCh")
+	}
+
+	select {
+	case <-senderTxReady:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for senderTxReady")
+	}
+
+	// Send initial OFFSET:0 to start transfer
+	_ = rxDC.SendText("OFFSET:0")
+
+	// Sleep briefly so first transfer starts
+	time.Sleep(10 * time.Millisecond)
+
+	// Send duplicate OFFSET:50000 while first transfer is streaming
+	mu.Lock()
+	receivedBuf.Reset() // Clear buffer for new transfer start
+	mu.Unlock()
+
+	targetOffset := int64(50000)
+	_ = rxDC.SendText(fmt.Sprintf("OFFSET:%d", targetOffset))
+
+	// Wait for EOF
+	select {
+	case <-eofReceived:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for EOF after duplicate OFFSET")
+	}
+
+	transferWg.Wait()
+
+	mu.Lock()
+	receivedBytes := receivedBuf.Bytes()
+	mu.Unlock()
+
+	expectedData := testData[targetOffset:]
+	if !bytes.Equal(receivedBytes, expectedData) {
+		t.Fatalf("received data length %d mismatch expected length %d (data corrupt)", len(receivedBytes), len(expectedData))
+	}
+}
+
