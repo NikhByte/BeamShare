@@ -30,12 +30,15 @@ import (
 const version = "0.4.0"
 
 var (
-	activeChannels []*webrtc.DataChannel
-	channelsMu     sync.Mutex
-	liveFinished   bool
-	relayURL       string
-	receiverURL    string
-	liveBufferSize int = 10 * 1024 * 1024 // 10MB
+	activeChannels       []*webrtc.DataChannel
+	channelsMu           sync.Mutex
+	liveFinished         bool
+	relayURL             string
+	receiverURL          string
+	liveBufferSize       int = 10 * 1024 * 1024 // 10MB
+	parsedTurnServers    []string
+	parsedTurnUsername   string
+	parsedTurnCredential string
 )
 
 func main() {
@@ -215,6 +218,10 @@ func parseFlags(args []string) ([]string, []webrtc.ICEServer, time.Duration) {
 			Credential: turnCredential,
 		})
 	}
+
+	parsedTurnServers = turnServers
+	parsedTurnUsername = turnUsername
+	parsedTurnCredential = turnCredential
 
 	return cleanArgs, iceServers, discoveryTimeout
 }
@@ -721,6 +728,15 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		if session != nil {
 			qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+			if len(parsedTurnServers) > 0 {
+				qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
+				if parsedTurnUsername != "" {
+					qrURL += "&turn_username=" + url.QueryEscape(parsedTurnUsername)
+				}
+				if parsedTurnCredential != "" {
+					qrURL += "&turn_credential=" + url.QueryEscape(parsedTurnCredential)
+				}
+			}
 		}
 		qrURL += "#k=" + relKeyStr
 	} else {
@@ -729,11 +745,29 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 			qrURL = fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
 			if session != nil {
 				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				if len(parsedTurnServers) > 0 {
+					qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
+					if parsedTurnUsername != "" {
+						qrURL += "&turn_username=" + url.QueryEscape(parsedTurnUsername)
+					}
+					if parsedTurnCredential != "" {
+						qrURL += "&turn_credential=" + url.QueryEscape(parsedTurnCredential)
+					}
+				}
 			}
 		} else {
 			qrURL = localURL
 			if session != nil {
 				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				if len(parsedTurnServers) > 0 {
+					qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
+					if parsedTurnUsername != "" {
+						qrURL += "&turn_username=" + url.QueryEscape(parsedTurnUsername)
+					}
+					if parsedTurnCredential != "" {
+						qrURL += "&turn_credential=" + url.QueryEscape(parsedTurnCredential)
+					}
+				}
 			}
 		}
 	}

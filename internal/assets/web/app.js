@@ -67,7 +67,8 @@ function getIceServers(offer) {
       }
     }
     if (params.get('turn_server')) {
-      const turnServers = params.get('turn_server').split(',');
+      const turnServerParams = params.getAll('turn_server');
+      const turnServers = turnServerParams.flatMap(s => s.split(',')).map(s => s.trim()).filter(Boolean);
       const username = params.get('turn_username');
       const credential = params.get('turn_credential');
       servers.push({
@@ -77,7 +78,8 @@ function getIceServers(offer) {
       });
     }
     if (params.get('stun_server')) {
-      const stunServers = params.get('stun_server').split(',');
+      const stunServerParams = params.getAll('stun_server');
+      const stunServers = stunServerParams.flatMap(s => s.split(',')).map(s => s.trim()).filter(Boolean);
       servers.push({ urls: stunServers });
     }
     if (servers.length > 0) {
@@ -2591,6 +2593,7 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    getIceServers
   };
 }

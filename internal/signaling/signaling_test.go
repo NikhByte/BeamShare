@@ -457,6 +457,66 @@ func TestMinifySDPRelayCandidate(t *testing.T) {
 	assert.LessOrEqual(t, sizeDiff, 80, "Compressed SDP length increase with TURN candidate should be <= 80 bytes")
 }
 
+func TestMinifySDPMultiTransportRelayCandidate(t *testing.T) {
+	oldFinder := outboundIPFinder
+	outboundIPFinder = func() net.IP {
+		return net.ParseIP("192.168.1.100")
+	}
+	defer func() { outboundIPFinder = oldFinder }()
+
+	rawSDP := "v=0\r\n" +
+		"o=- 123456 2 IN IP4 127.0.0.1\r\n" +
+		"s=-\r\n" +
+		"t=0 0\r\n" +
+		"a=group:BUNDLE 0\r\n" +
+		"a=candidate:1 1 UDP 2122260223 192.168.1.100 50000 typ host\r\n" +
+		"a=candidate:2 1 UDP 1694498815 203.0.113.1 50001 typ srflx raddr 192.168.1.100 rport 50000\r\n" +
+		"a=candidate:3 1 UDP 16777215 198.51.100.1 54321 typ relay raddr 192.168.1.100 rport 50000 generation 0\r\n" +
+		"a=candidate:4 1 UDP 16777215 198.51.100.2 54322 typ relay raddr 192.168.1.100 rport 50000 generation 0\r\n" +
+		"a=candidate:5 1 TCP 150995711 198.51.100.1 3478 typ relay raddr 192.168.1.100 rport 50000 tcptype active\r\n" +
+		"a=candidate:6 1 TLS 150995711 198.51.100.1 5349 typ relay raddr 192.168.1.100 rport 50000\r\n"
+
+	minified := minifySDP(rawSDP)
+
+	// Verify all three active transport relay candidates are preserved
+	assert.Contains(t, minified, "1 UDP 16777215 198.51.100.1 54321 typ relay")
+	assert.Contains(t, minified, "1 TCP 150995711 198.51.100.1 3478 typ relay")
+	assert.Contains(t, minified, "1 TLS 150995711 198.51.100.1 5349 typ relay")
+
+	// Verify duplicate UDP relay candidate was deduplicated
+	assert.NotContains(t, minified, "198.51.100.2")
+
+	// Verify raddr/rport truncation for all relay candidates
+	assert.NotContains(t, minified, "raddr")
+	assert.NotContains(t, minified, "rport")
+
+	// Verify compressed SDP size overhead is < 120 bytes compared to single relay
+	rawSDPSingleRelay := "v=0\r\n" +
+		"o=- 123456 2 IN IP4 127.0.0.1\r\n" +
+		"s=-\r\n" +
+		"t=0 0\r\n" +
+		"a=group:BUNDLE 0\r\n" +
+		"a=candidate:1 1 UDP 2122260223 192.168.1.100 50000 typ host\r\n" +
+		"a=candidate:2 1 UDP 1694498815 203.0.113.1 50001 typ srflx raddr 192.168.1.100 rport 50000\r\n" +
+		"a=candidate:3 1 UDP 16777215 198.51.100.1 54321 typ relay raddr 192.168.1.100 rport 50000 generation 0\r\n"
+
+	compressedMulti, err := CompressSDP(rawSDP)
+	require.NoError(t, err)
+
+	compressedSingle, err := CompressSDP(rawSDPSingleRelay)
+	require.NoError(t, err)
+
+	sizeDiff := len(compressedMulti) - len(compressedSingle)
+	assert.Less(t, sizeDiff, 120, "Compressed SDP size increase with multi-transport relay candidates must be < 120 bytes")
+
+	// Verify roundtrip compression/decompression
+	decompressed, err := DecompressSDP(compressedMulti)
+	require.NoError(t, err)
+	assert.Contains(t, decompressed, "1 UDP 16777215 198.51.100.1 54321 typ relay")
+	assert.Contains(t, decompressed, "1 TCP 150995711 198.51.100.1 3478 typ relay")
+	assert.Contains(t, decompressed, "1 TLS 150995711 198.51.100.1 5349 typ relay")
+}
+
 func BenchmarkDecompressSDP(b *testing.B) {
 	sampleSDP := "v=0\r\n" +
 		"o=- 1234567890 2 IN IP4 127.0.0.1\r\n" +
