@@ -341,6 +341,197 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
   });
+
+  test('WebRTC Receiver AES-GCM Decryption and Chunk Queueing', async () => {
+    const { webcrypto } = require('node:crypto');
+    const key = await webcrypto.subtle.generateKey(
+      { name: 'AES-GCM', length: 256 },
+      true,
+      ['encrypt', 'decrypt']
+    );
+    const rawKey = await webcrypto.subtle.exportKey('raw', key);
+    const keyB64 = Buffer.from(rawKey).toString('base64url');
+
+    window.location.hash = `#k=${keyB64}`;
+    const importedKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+    assert.notEqual(importedKey, null);
+
+    const receivedData = [];
+    const mockDC = {
+      readyState: 'open',
+      send: () => {},
+      close: () => {}
+    };
+
+    const queue = new app.SequentialChunkQueue({
+      highWatermark: 1024,
+      lowWatermark: 256,
+      dataChannel: mockDC,
+      writeHandler: async (chunk) => {
+        receivedData.push(...chunk);
+      }
+    });
+
+    const plaintext1 = new Uint8Array([10, 20, 30, 40]);
+    const plaintext2 = new Uint8Array([50, 60, 70, 80]);
+
+    async function createEncryptedFrame(pt) {
+      const nonce = webcrypto.getRandomValues(new Uint8Array(12));
+      const ciphertext = await webcrypto.subtle.encrypt(
+        { name: 'AES-GCM', iv: nonce },
+        key,
+        pt
+      );
+      const frameLen = 12 + ciphertext.byteLength;
+      const payload = new Uint8Array(4 + frameLen);
+      const dv = new DataView(payload.buffer);
+      dv.setUint32(0, frameLen, false);
+      payload.set(nonce, 4);
+      payload.set(new Uint8Array(ciphertext), 16);
+      return payload;
+    }
+
+    const frame1 = await createEncryptedFrame(plaintext1);
+    const frame2 = await createEncryptedFrame(plaintext2);
+
+    let encBuffer = new Uint8Array(0);
+    let decryptChain = Promise.resolve();
+
+    const onmessage = (e) => {
+      decryptChain = decryptChain.then(async () => {
+        if (typeof e.data === 'string') {
+          if (e.data === 'EOF') {
+            queue.enqueueEOF();
+            await queue.drain();
+          }
+          return;
+        }
+
+        const value = new Uint8Array(e.data);
+        let newBuffer = new Uint8Array(encBuffer.length + value.length);
+        newBuffer.set(encBuffer, 0);
+        newBuffer.set(value, encBuffer.length);
+        encBuffer = newBuffer;
+
+        while (encBuffer.length >= 4) {
+          const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+          const frameLen = dv.getUint32(0, false);
+          if (encBuffer.length >= 4 + frameLen) {
+            const frame = encBuffer.slice(4, 4 + frameLen);
+            encBuffer = encBuffer.slice(4 + frameLen);
+
+            const nonce = new Uint8Array(frame.subarray(0, 12));
+            const ciphertext = new Uint8Array(frame.subarray(12));
+            const decrypted = await webcrypto.subtle.decrypt(
+              { name: 'AES-GCM', iv: nonce },
+              importedKey,
+              ciphertext
+            );
+            queue.enqueue(new Uint8Array(decrypted));
+          } else {
+            break;
+          }
+        }
+      });
+    };
+
+    onmessage({ data: frame1.buffer });
+    onmessage({ data: frame2.buffer });
+    onmessage({ data: 'EOF' });
+
+    await decryptChain;
+
+    assert.deepEqual(receivedData, [10, 20, 30, 40, 50, 60, 70, 80]);
+  });
+
+  test('WebRTC Receiver AES-GCM Decryption with Chunk Fragmentation', async () => {
+    const { webcrypto } = require('node:crypto');
+    const key = await webcrypto.subtle.generateKey(
+      { name: 'AES-GCM', length: 256 },
+      true,
+      ['encrypt', 'decrypt']
+    );
+    const rawKey = await webcrypto.subtle.exportKey('raw', key);
+    const keyB64 = Buffer.from(rawKey).toString('base64url');
+
+    window.location.hash = `#k=${keyB64}`;
+    const importedKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+
+    const receivedData = [];
+    const queue = new app.SequentialChunkQueue({
+      writeHandler: async (chunk) => {
+        receivedData.push(...chunk);
+      }
+    });
+
+    const plaintext = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const nonce = webcrypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await webcrypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce },
+      key,
+      plaintext
+    );
+    const frameLen = 12 + ciphertext.byteLength;
+    const fullPayload = new Uint8Array(4 + frameLen);
+    const dv = new DataView(fullPayload.buffer);
+    dv.setUint32(0, frameLen, false);
+    fullPayload.set(nonce, 4);
+    fullPayload.set(new Uint8Array(ciphertext), 16);
+
+    const chunkA = new Uint8Array(fullPayload.subarray(0, 5));
+    const chunkB = new Uint8Array(fullPayload.subarray(5, 15));
+    const chunkC = new Uint8Array(fullPayload.subarray(15));
+
+    let encBuffer = new Uint8Array(0);
+    let decryptChain = Promise.resolve();
+
+    const onmessage = (e) => {
+      decryptChain = decryptChain.then(async () => {
+        if (typeof e.data === 'string') {
+          if (e.data === 'EOF') {
+            queue.enqueueEOF();
+            await queue.drain();
+          }
+          return;
+        }
+
+        const value = new Uint8Array(e.data);
+        let newBuffer = new Uint8Array(encBuffer.length + value.length);
+        newBuffer.set(encBuffer, 0);
+        newBuffer.set(value, encBuffer.length);
+        encBuffer = newBuffer;
+
+        while (encBuffer.length >= 4) {
+          const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+          const frameLen = dv.getUint32(0, false);
+          if (encBuffer.length >= 4 + frameLen) {
+            const frame = encBuffer.slice(4, 4 + frameLen);
+            encBuffer = encBuffer.slice(4 + frameLen);
+
+            const nonce = new Uint8Array(frame.subarray(0, 12));
+            const ciphertext = new Uint8Array(frame.subarray(12));
+            const decrypted = await webcrypto.subtle.decrypt(
+              { name: 'AES-GCM', iv: nonce },
+              importedKey,
+              ciphertext
+            );
+            queue.enqueue(new Uint8Array(decrypted));
+          } else {
+            break;
+          }
+        }
+      });
+    };
+
+    onmessage({ data: chunkA.buffer });
+    onmessage({ data: chunkB.buffer });
+    onmessage({ data: chunkC.buffer });
+    onmessage({ data: 'EOF' });
+
+    await decryptChain;
+
+    assert.deepEqual(receivedData, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
 });
 
 describe('Gaze Web Sender Test Suite', () => {
