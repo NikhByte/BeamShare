@@ -1970,6 +1970,22 @@ function appendTerminalText(text) {
   receivedBytes += text.length;
 }
 
+function renderQRCodeSVG(text) {
+  if (typeof generateQRCodeSVG === 'function') {
+    return generateQRCodeSVG(text);
+  }
+  if (typeof window !== 'undefined' && typeof window.generateQRCodeSVG === 'function') {
+    return window.generateQRCodeSVG(text);
+  }
+  if (typeof window !== 'undefined' && window.qrcode && typeof window.qrcode.generateSVG === 'function') {
+    return window.qrcode.generateSVG(text);
+  }
+  if (typeof qrcode !== 'undefined' && typeof qrcode.generateSVG === 'function') {
+    return qrcode.generateSVG(text);
+  }
+  return apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(text);
+}
+
 function showDone(name, size, mode) {
   localStorage.removeItem('beam_resume');
   document.getElementById('done-sub').textContent = `${name} · ${formatBytes(size)}`;
@@ -1991,10 +2007,10 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR PNG dynamically from the server's newly added QR API
+    // Load QR SVG locally via client-side generator or fallback to server route
     const qrImg = document.getElementById('done-qr-img');
     if (qrImg) {
-      qrImg.src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareLink);
+      qrImg.src = renderQRCodeSVG(shareLink);
     }
     
     if (doneShare) doneShare.classList.remove('hidden');
@@ -2172,7 +2188,7 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(shareURL.href);
+    document.getElementById('send-qr-img').src = renderQRCodeSVG(shareURL.href);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
