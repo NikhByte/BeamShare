@@ -182,3 +182,79 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 		t.Fatal("consecutive frames reused the same nonce")
 	}
 }
+
+func TestOversizedFrameRejection(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name          string
+		lengthHeader  uint32
+		expectedError error
+	}{
+		{
+			name:          "MaxFramePayloadSize plus 1",
+			lengthHeader:  MaxFramePayloadSize + 1,
+			expectedError: ErrFrameTooLarge,
+		},
+		{
+			name:          "Huge frame length (1GB)",
+			lengthHeader:  1024 * 1024 * 1024,
+			expectedError: ErrFrameTooLarge,
+		},
+		{
+			name:          "Max uint32 length",
+			lengthHeader:  0xFFFFFFFF,
+			expectedError: ErrFrameTooLarge,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tc.lengthHeader)
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if err != tc.expectedError {
+				t.Fatalf("expected error %v, got %v", tc.expectedError, err)
+			}
+		})
+	}
+}
+
+func TestMaxFramePayloadSizeBoundary(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// Create a header claiming MaxFramePayloadSize (65564 bytes)
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, uint32(MaxFramePayloadSize))
+	// Provide only a few bytes so it encounters unexpected EOF during payload read,
+	// confirming it passed the MaxFramePayloadSize guard clause.
+	buf.Write([]byte("short payload"))
+
+	decReader, err := NewDecryptingReader(buf, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	out := make([]byte, 64)
+	_, err = decReader.Read(out)
+	if err == ErrFrameTooLarge {
+		t.Fatalf("expected frame of MaxFramePayloadSize to be accepted, but got ErrFrameTooLarge")
+	}
+	if err != io.ErrUnexpectedEOF {
+		t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+	}
+}
+
