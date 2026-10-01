@@ -3,6 +3,8 @@ package relay
 import (
 	"context"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -259,6 +261,151 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestServer_UploadPipeCleanupOnSessionExpiration(t *testing.T) {
+	srv := NewServerWithConfig(100*time.Millisecond, 20*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+	sessID := sess.ID
+
+	// Create a pipe for streaming multipart body in background upload
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+
+	uploadErrCh := make(chan error, 1)
+	go func() {
+		defer pr.Close()
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sessID, pr)
+		if err != nil {
+			uploadErrCh <- err
+			return
+		}
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			uploadErrCh <- err
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			uploadErrCh <- fmt.Errorf("upload failed with status %d", resp.StatusCode)
+			return
+		}
+		uploadErrCh <- nil
+	}()
+
+	// Write multipart header and start streaming file bytes
+	go func() {
+		part, err := mw.CreateFormFile("file", "test_upload.bin")
+		if err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		buf := make([]byte, 1024)
+		for {
+			_, err := part.Write(buf)
+			if err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	// Wait for upload pipes to be set on the session
+	require.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil && sess.UploadPipeW != nil
+	}, 2*time.Second, 10*time.Millisecond, "Upload pipes were not set")
+
+	// Start a pull request in background
+	pullErrCh := make(chan error, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/relay/pull?session="+sessID, nil)
+		if err != nil {
+			pullErrCh <- err
+			return
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			pullErrCh <- err
+			return
+		}
+		defer resp.Body.Close()
+		_, err = io.ReadAll(resp.Body)
+		pullErrCh <- err
+	}()
+
+	// Wait for session to expire via background sweeper
+	require.Eventually(t, func() bool {
+		return srv.GetSession(sessID) == nil
+	}, 3*time.Second, 10*time.Millisecond, "Session did not expire")
+
+	// Verify session pipe handles were closed and reset to nil
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+
+	// Verify both upload and pull goroutines unblocked and exited promptly
+	select {
+	case err := <-uploadErrCh:
+		require.Error(t, err, "Upload goroutine should fail on session expiration")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload goroutine blocked indefinitely after session expiration")
+	}
+
+	select {
+	case <-pullErrCh:
+		// Pull goroutine completed/unblocked on pipe close
+	case <-time.After(2 * time.Second):
+		t.Fatal("Pull goroutine blocked indefinitely after session expiration")
+	}
+}
+
+func TestServer_PullOnExpiredSession(t *testing.T) {
+	srv := NewServerWithConfig(10*time.Millisecond, 5*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+	sessID := sess.ID
+
+	// Wait for session to be swept
+	require.Eventually(t, func() bool {
+		return srv.GetSession(sessID) == nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Attempt pull request on expired session
+	resp, err := http.Get(ts.URL + "/relay/pull?session=" + sessID)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestServer_UploadPipeCleanupWhenNil(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+	// Call ClosePipes when UploadPipes and DataPipes are nil
+	assert.NotPanics(t, func() {
+		sess.ClosePipes(fmt.Errorf("session expired"))
+	})
+
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	assert.Nil(t, sess.DataPipeR)
+	assert.Nil(t, sess.DataPipeW)
 }
 
 
