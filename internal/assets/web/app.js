@@ -823,16 +823,93 @@ function setMode(mode, label) {
 async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator)) return null;
 
+  // WebKit (Safari / Mobile Safari) does not reliably route iframe navigations through SW fetch handlers
+  const isWebKit = typeof navigator !== 'undefined' && (/AppleWebKit/i.test(navigator.userAgent) && !/Chrome|Chromium|Edg|Firefox/i.test(navigator.userAgent));
+  if (isWebKit) {
+    console.warn("Service Worker iframe pipe not supported in WebKit; bypassing SW pipe.");
+    return null;
+  }
+
   try {
+    let swTimer = null;
     const swReady = navigator.serviceWorker.ready;
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
+    const timeout = new Promise((_, reject) => {
+      swTimer = setTimeout(() => reject(new Error('SW ready timeout')), 5000);
+    });
     const reg = await Promise.race([swReady, timeout]);
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
-    if (!sw) return null;
+    if (swTimer) clearTimeout(swTimer);
+
+    if (!reg) return null;
+
+    // Ensure document is controlled by Service Worker (wait for clients.claim if needed)
+    if (!navigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        const startTime = Date.now();
+        const check = () => {
+          if (navigator.serviceWorker.controller || Date.now() - startTime >= 3000) {
+            navigator.serviceWorker.removeEventListener('controllerchange', check);
+            resolve();
+          }
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', check);
+        const timer = setInterval(() => {
+          if (navigator.serviceWorker.controller || Date.now() - startTime >= 3000) {
+            clearInterval(timer);
+            navigator.serviceWorker.removeEventListener('controllerchange', check);
+            resolve();
+          }
+        }, 50);
+      });
+    }
+
+    const sw = navigator.serviceWorker.controller;
+    if (!sw) {
+      console.warn("Service Worker active but page is uncontrolled; bypassing SW pipe.");
+      return null;
+    }
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
     const channel = new MessageChannel();
     const port = channel.port1;
+
+    const handshakePromise = new Promise((resolve, reject) => {
+      const ackTimeout = setTimeout(() => {
+        cleanupHandshake();
+        reject(new Error('SW init handshake timeout'));
+      }, 3000);
+
+      function handleMessage(e) {
+        if (e && e.data && e.data.type === 'READY') {
+          cleanupHandshake();
+          resolve();
+        }
+      }
+
+      function handleMessageError() {
+        cleanupHandshake();
+        reject(new Error('SW init handshake message error'));
+      }
+
+      function cleanupHandshake() {
+        clearTimeout(ackTimeout);
+        if (typeof port.removeEventListener === 'function') {
+          port.removeEventListener('message', handleMessage);
+          port.removeEventListener('messageerror', handleMessageError);
+        } else if (port.onmessage === handleMessage) {
+          port.onmessage = null;
+        }
+      }
+
+      if (typeof port.addEventListener === 'function') {
+        port.addEventListener('message', handleMessage);
+        port.addEventListener('messageerror', handleMessageError);
+        if (typeof port.start === 'function') {
+          port.start();
+        }
+      } else {
+        port.onmessage = handleMessage;
+      }
+    });
 
     sw.postMessage({
       type: 'INIT_PORT',
@@ -842,10 +919,12 @@ async function getSWPipe(fileMeta) {
       mime: fileMeta.mime
     }, [channel.port2]);
 
+    await handshakePromise;
+
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
-    iframe.src = swUrl;
     document.body.appendChild(iframe);
+    iframe.src = swUrl;
 
     return port;
   } catch (err) {
@@ -1337,6 +1416,27 @@ async function startHTTPDownload() {
     swPipePort = await getSWPipe(currentFile);
   }
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch(e) {
+    console.error("Failed to import decryption key", e);
+    showError("Decryption key error: " + e.message);
+    return;
+  }
+
+  // If unencrypted transfer and SW pipe/disk picker are not active, perform direct HTTP download via iframe
+  if (!decryptionKey && !swPipePort && !diskWritableStream) {
+    setState('downloading');
+    updateProgress(1.0);
+    const downloadIframe = document.createElement('iframe');
+    downloadIframe.hidden = true;
+    downloadIframe.src = apiPath('/api/download');
+    document.body.appendChild(downloadIframe);
+    showDone(currentFile.name, currentFile.size, 'Direct HTTP');
+    return;
+  }
+
   if (!diskWritableStream && !swPipePort && opfsSupported) {
     try {
       const root = await navigator.storage.getDirectory();
@@ -1383,15 +1483,7 @@ async function startHTTPDownload() {
 
     const reader = res.body.getReader();
     let received = initialOffset;
-    let decryptionKey = null;
     let encBuffer = new Uint8Array(0);
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch(e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      return;
-    }
 
     while (true) {
       const { done, value } = await reader.read();
@@ -2591,6 +2683,7 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    getSWPipe
   };
 }
