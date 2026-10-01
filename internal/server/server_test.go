@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -554,5 +555,95 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 		defer srv.mu.Unlock()
 		return len(srv.liveClients) == 0
 	}, 5*time.Second, 20*time.Millisecond)
+}
+
+func TestConcurrentMetaDownloadUpdateSharedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	file1 := filepath.Join(tmpDir, "file1.txt")
+	file2 := filepath.Join(tmpDir, "file2.txt")
+
+	err := os.WriteFile(file1, []byte("content of file 1"), 0644)
+	require.NoError(t, err)
+	err = os.WriteFile(file2, []byte("content of file 2 - secondary file"), 0644)
+	require.NoError(t, err)
+
+	srv, err := New(file1, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+
+	// Goroutine 1: Continuously fetch /api/meta
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client := &http.Client{Timeout: 500 * time.Millisecond}
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					resp, err := client.Get(ts.URL + "/api/meta")
+					if err == nil {
+						var meta FileMeta
+						if json.NewDecoder(resp.Body).Decode(&meta) == nil {
+							_ = meta.Name
+						}
+						resp.Body.Close()
+					}
+				}
+			}
+		}()
+	}
+
+	// Goroutine 2: Continuously download from /api/download
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client := &http.Client{Timeout: 500 * time.Millisecond}
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					resp, err := client.Get(ts.URL + "/api/download")
+					if err == nil {
+						_, _ = io.Copy(io.Discard, resp.Body)
+						resp.Body.Close()
+					}
+				}
+			}
+		}()
+	}
+
+	// Goroutine 3: Continuously update shared file state
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		toggle := false
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if toggle {
+					srv.UpdateSharedFile(file1, "file1.txt", 17)
+				} else {
+					srv.UpdateSharedFile(file2, "file2.txt", 34)
+				}
+				toggle = !toggle
+				time.Sleep(1 * time.Millisecond)
+			}
+		}
+	}()
+
+	wg.Wait()
 }
 
