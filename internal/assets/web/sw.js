@@ -134,8 +134,38 @@ self.addEventListener('fetch', (event) => {
 
       event.respondWith(new Response(stream, { headers }));
     } else {
-      // If stream not found, could be an expired link or reload, just return 404
-      event.respondWith(new Response('Stream not found or already downloaded.', { status: 404 }));
+      event.respondWith((async () => {
+        if (!streamMap.has(url.pathname)) {
+          for (let i = 0; i < 20; i++) {
+            await new Promise(r => setTimeout(r, 50));
+            if (streamMap.has(url.pathname)) break;
+          }
+        }
+
+        if (streamMap.has(url.pathname)) {
+          const entry = streamMap.get(url.pathname);
+          const { stream, filename, size, mime, ttlTimer } = entry;
+          
+          streamMap.delete(url.pathname); // Only download once per URL
+          if (ttlTimer) {
+            clearTimeout(ttlTimer);
+            entry.ttlTimer = null;
+          }
+          
+          const headers = new Headers({
+            'Content-Type': mime || 'application/octet-stream',
+            'Content-Disposition': formatContentDisposition(filename)
+          });
+          
+          if (size && size > 0) {
+            headers.set('Content-Length', size);
+          }
+
+          return new Response(stream, { headers });
+        } else {
+          return new Response('Stream not found or already downloaded.', { status: 404 });
+        }
+      })());
     }
   }
 });
