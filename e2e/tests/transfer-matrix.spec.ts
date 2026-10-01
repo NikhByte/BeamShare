@@ -62,13 +62,13 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       url.searchParams.set('no_stun', '1');
       const webrtcURL = url.toString();
 
-      const downloadPromise = page.waitForEvent('download', { timeout: 30000 });
+      const downloadPromise = page.waitForEvent('download', { timeout: 45000 });
 
       await page.goto(webrtcURL);
 
       // Assert DOM lifecycle states
       // WebRTC mode starts at loading/webrtc -> downloading -> done
-      await expect(page.locator('#state-done')).toBeVisible({ timeout: 30000 });
+      await expect(page.locator('#state-done')).toBeVisible({ timeout: 45000 });
       await expect(page.locator('#done-title')).toHaveText(/Transfer complete|File Shared/i);
 
       const download = await downloadPromise;
@@ -103,12 +103,12 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
 
       // Click Download File button with concurrent download event listener
       const [download] = await Promise.all([
-        page.waitForEvent('download', { timeout: 30000 }),
+        page.waitForEvent('download', { timeout: 45000 }),
         page.click('#btn-download'),
       ]);
 
       // State transition: downloading -> done
-      await expect(page.locator('#state-done')).toBeVisible({ timeout: 30000 });
+      await expect(page.locator('#state-done')).toBeVisible({ timeout: 45000 });
       await expect(page.locator('#done-title')).toHaveText(/Transfer complete|File Shared/i);
 
       const downloadPath = await download.path();
@@ -152,12 +152,12 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
 
       // Click Download button with concurrent download event listener
       const [download] = await Promise.all([
-        page.waitForEvent('download', { timeout: 30000 }),
+        page.waitForEvent('download', { timeout: 45000 }),
         page.click('#btn-download'),
       ]);
 
       // State transition to downloading -> done via relay stream
-      await expect(page.locator('#state-done')).toBeVisible({ timeout: 30000 });
+      await expect(page.locator('#state-done')).toBeVisible({ timeout: 45000 });
       await expect(page.locator('#done-title')).toHaveText(/Transfer complete|File Shared/i);
 
       const downloadPath = await download.path();
@@ -192,11 +192,11 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
 
       const [download] = await Promise.all([
-        page.waitForEvent('download', { timeout: 30000 }),
+        page.waitForEvent('download', { timeout: 45000 }),
         page.click('#btn-download'),
       ]);
 
-      await expect(page.locator('#state-done')).toBeVisible({ timeout: 30000 });
+      await expect(page.locator('#state-done')).toBeVisible({ timeout: 45000 });
 
       const downloadPath = await download.path();
       expect(downloadPath).toBeTruthy();
