@@ -1866,6 +1866,36 @@ async function startWebRTC() {
 }
 
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
+async function waitForBufferDrain(dataChannel, highWatermark = 1024 * 1024, lowWatermark = 512 * 1024) {
+  if (!dataChannel) return;
+  const targetLowThreshold = Math.min(lowWatermark, highWatermark);
+  dataChannel.bufferedAmountLowThreshold = targetLowThreshold;
+
+  if (dataChannel.bufferedAmount <= highWatermark) {
+    return;
+  }
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    const cleanup = () => {
+      if (!resolved) {
+        resolved = true;
+        dataChannel.removeEventListener('bufferedamountlow', handler);
+        dataChannel.removeEventListener('close', handler);
+        resolve();
+      }
+    };
+    const handler = () => cleanup();
+
+    dataChannel.addEventListener('bufferedamountlow', handler);
+    dataChannel.addEventListener('close', handler);
+
+    if (dataChannel.bufferedAmount <= targetLowThreshold || dataChannel.readyState === 'closed') {
+      cleanup();
+    }
+  });
+}
+
 async function handleUploadFile(e) {
   const file = e.target.files[0];
   if (!file) return;
@@ -1891,12 +1921,7 @@ async function handleUploadFile(e) {
         reader.readAsArrayBuffer(chunkBlob);
       });
 
-      webrtcDataChannel.bufferedAmountLowThreshold = 512 * 1024;
-      if (webrtcDataChannel.bufferedAmount > 1024 * 1024) {
-        await new Promise(resolve => {
-          webrtcDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-        });
-      }
+      await waitForBufferDrain(webrtcDataChannel, 1024 * 1024, 512 * 1024);
       webrtcDataChannel.send(chunkBuffer);
       offset += chunkBuffer.byteLength;
 
@@ -1905,12 +1930,7 @@ async function handleUploadFile(e) {
       updateSpeed(offset);
     }
 
-    webrtcDataChannel.bufferedAmountLowThreshold = 0;
-    if (webrtcDataChannel.bufferedAmount > 0) {
-      await new Promise(resolve => {
-        webrtcDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-      });
-    }
+    await waitForBufferDrain(webrtcDataChannel, 0, 0);
     webrtcDataChannel.send("UPLOAD_EOF");
     showDone(file.name, file.size, "WebRTC P2P Upload");
   } else {
@@ -2305,13 +2325,10 @@ async function streamFileToDataChannel(initialOffset) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    senderDataChannel.bufferedAmountLowThreshold = 512 * 1024;
     while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
       if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
       if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await new Promise(resolve => {
-          senderDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-        });
+        await waitForBufferDrain(senderDataChannel, 1024 * 1024, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -2351,12 +2368,7 @@ async function streamFileToDataChannel(initialOffset) {
 
   if (senderAborted) return;
 
-  senderDataChannel.bufferedAmountLowThreshold = 0;
-  if (senderDataChannel.bufferedAmount > 0) {
-    await new Promise(resolve => {
-      senderDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-    });
-  }
+  await waitForBufferDrain(senderDataChannel, 0, 0);
   senderDataChannel.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
@@ -2591,6 +2603,7 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    waitForBufferDrain
   };
 }
