@@ -125,6 +125,14 @@ func (s *Session) closeUploadPipesLocked(err error) {
 	}
 }
 
+func (s *Session) CloseUploadPipes(err error) {
+	s.ClosePipesIfMatch(nil, nil, err)
+}
+
+func (s *Session) CloseUploadPipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err error) {
+	s.ClosePipesIfMatch(pr, pw, err)
+}
+
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
 	prClosed := false
 	pwClosed := false
@@ -192,6 +200,25 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 		} else {
 			pr.Close()
 		}
+	}
+}
+
+func (s *Session) closeDataPipesLocked(err error) {
+	if s.DataPipeW != nil {
+		if err != nil {
+			s.DataPipeW.CloseWithError(err)
+		} else {
+			s.DataPipeW.Close()
+		}
+		s.DataPipeW = nil
+	}
+	if s.DataPipeR != nil {
+		if err != nil {
+			s.DataPipeR.CloseWithError(err)
+		} else {
+			s.DataPipeR.Close()
+		}
+		s.DataPipeR = nil
 	}
 }
 
@@ -316,6 +343,7 @@ func (s *Server) SweepExpiredSessions() {
 			sess.cancel(fmt.Errorf("session expired"))
 		}
 		sess.ClosePipes(fmt.Errorf("session expired"))
+		sess.CloseUploadPipes(fmt.Errorf("session expired"))
 		sess.ClearDownloadQueue()
 	}
 
@@ -1249,62 +1277,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 
-			copyDone := make(chan error, 1)
-			go func() {
-				type chunk struct {
-					data []byte
-					err  error
-				}
-				chunks := make(chan chunk, 16)
-
-				go func() {
-					defer close(chunks)
-					for {
-						buf := make([]byte, 32*1024)
-						n, readErr := part.Read(buf)
-						if n > 0 {
-							cData := make([]byte, n)
-							copy(cData, buf[:n])
-							chunks <- chunk{data: cData}
-						}
-						if readErr != nil {
-							if readErr != io.EOF {
-								chunks <- chunk{err: readErr}
-							}
-							break
-						}
-					}
-				}()
-
-				var writeErr error
-				for c := range chunks {
-					if c.err != nil {
-						writeErr = c.err
-						break
-					}
-					if len(c.data) > 0 {
-						_, err := pw.Write(c.data)
-						if err != nil {
-							writeErr = err
-							break
-						}
-					}
-				}
-
-				if writeErr != nil {
-					pw.CloseWithError(writeErr)
-				} else {
-					pw.Close()
-				}
+			// Stream data to pipe
+			_, uploadErr = io.Copy(pw, part)
+			if uploadErr != nil {
+				pw.CloseWithError(uploadErr)
+			} else {
+				pw.Close()
 				part.Close()
-				copyDone <- writeErr
-			}()
-
-			select {
-			case uploadErr = <-copyDone:
-			case <-r.Context().Done():
-				uploadErr = fmt.Errorf("upload context cancelled: %w", r.Context().Err())
-				sess.ClosePipesIfMatch(pr, pw, uploadErr)
 			}
 
 			if uploadErr != nil {
@@ -1329,8 +1308,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	sess := s.getSession(r.URL.Query().Get("session"))
 	if sess == nil {
-		http.Error(w, "not found", 404)
-		return
+		sess = s.getSession(r.URL.Query().Get("s"))
+		if sess == nil {
+			http.Error(w, "not found", 404)
+			return
+		}
 	}
 
 	sess.mu.Lock()
