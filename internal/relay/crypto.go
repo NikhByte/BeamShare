@@ -5,8 +5,13 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 )
+
+const MaxFrameSize = 128 * 1024 // 128KB maximum frame size
+
+var ErrInvalidFrameLength = errors.New("invalid frame length header")
 
 type EncryptingReader struct {
 	r     io.Reader
@@ -99,6 +104,10 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 	var length uint32
 	if err := binary.Read(dr.r, binary.BigEndian, &length); err != nil {
 		return 0, err
+	}
+
+	if length > MaxFrameSize {
+		return 0, ErrInvalidFrameLength
 	}
 
 	frameData := make([]byte, length)
