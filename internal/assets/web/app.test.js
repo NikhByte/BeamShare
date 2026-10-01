@@ -1078,6 +1078,97 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(servers[0].username, 'alice');
     assert.equal(servers[0].credential, 'secret');
   });
+
+  describe('WebRTC Buffer Drain Helper Tests (waitForBufferDrain)', () => {
+    class MockDataChannel {
+      constructor(bufferedAmount = 0, readyState = 'open') {
+        this.bufferedAmount = bufferedAmount;
+        this.bufferedAmountLowThreshold = 0;
+        this.readyState = readyState;
+        this.listeners = new Map();
+      }
+
+      addEventListener(type, listener) {
+        if (!this.listeners.has(type)) {
+          this.listeners.set(type, new Set());
+        }
+        this.listeners.get(type).add(listener);
+      }
+
+      removeEventListener(type, listener) {
+        if (this.listeners.has(type)) {
+          this.listeners.get(type).delete(listener);
+        }
+      }
+
+      emit(type, eventData) {
+        if (this.listeners.has(type)) {
+          for (const listener of Array.from(this.listeners.get(type))) {
+            listener(eventData);
+          }
+        }
+      }
+    }
+
+    test('waitForBufferDrain resolves immediately when bufferedAmount is already <= targetThreshold', async () => {
+      const dc = new MockDataChannel(500 * 1024, 'open');
+      await app.waitForBufferDrain(dc, 1024 * 1024, 512 * 1024, 50);
+      assert.equal(dc.bufferedAmountLowThreshold, 512 * 1024);
+      assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0);
+    });
+
+    test('waitForBufferDrain resolves when bufferedamountlow event fires and cleans up listeners', async () => {
+      const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+      const promise = app.waitForBufferDrain(dc, 1024 * 1024, 512 * 1024, 50);
+
+      assert.equal(dc.listeners.get('bufferedamountlow').size, 1);
+
+      dc.bufferedAmount = 400 * 1024;
+      dc.emit('bufferedamountlow');
+
+      await promise;
+      assert.equal(dc.listeners.get('bufferedamountlow').size, 0);
+    });
+
+    test('waitForBufferDrain resolves via fallback polling within 50ms when event is missed', async () => {
+      const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+      const promise = app.waitForBufferDrain(dc, 1024 * 1024, 512 * 1024, 50);
+
+      // Simulate buffer drain WITHOUT firing bufferedamountlow event
+      dc.bufferedAmount = 100 * 1024;
+
+      const start = Date.now();
+      await promise;
+      const elapsed = Date.now() - start;
+
+      assert.ok(elapsed <= 300, `Expected polling resolution around 50ms, took ${elapsed}ms`);
+      assert.equal(dc.listeners.get('bufferedamountlow').size, 0);
+    });
+
+    test('waitForBufferDrain rejects and cleans up when channel closes', async () => {
+      const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+      const promise = app.waitForBufferDrain(dc, 1024 * 1024, 512 * 1024, 50);
+
+      dc.readyState = 'closed';
+      dc.emit('close');
+
+      await assert.rejects(promise, {
+        message: 'Data channel is no longer open'
+      });
+      assert.equal(dc.listeners.get('bufferedamountlow').size, 0);
+    });
+
+    test('waitForBufferDrain rejects immediately if channel is closed or null', async () => {
+      const dcClosed = new MockDataChannel(0, 'closed');
+      await assert.rejects(app.waitForBufferDrain(dcClosed, 0, 0, 50), {
+        message: 'Data channel is no longer open'
+      });
+      await assert.rejects(app.waitForBufferDrain(null, 0, 0, 50), {
+        message: 'Data channel is no longer open'
+      });
+    });
+
+  });
 });
 
 describe('WebRTC Buffer Backpressure Suite', () => {
@@ -1311,7 +1402,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     dc.readyState = 'closed';
     dc.emit('close');
 
-    await assert.rejects(promise, { message: /closed or closing/i });
+    await assert.rejects(promise, { message: /closed|closing|no longer open/i });
     assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up on rejection');
   });
 
@@ -1319,7 +1410,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     const dc = new MockDataChannel(2 * 1024 * 1024, 'closed');
     await assert.rejects(
       app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024),
-      { message: /closed or closing/i }
+      { message: /closed|closing|no longer open/i }
     );
   });
 

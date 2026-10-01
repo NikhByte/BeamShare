@@ -3336,7 +3336,7 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
+      encBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -3603,6 +3603,84 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
   });
 }
 
+/**
+ * Resilient WebRTC DataChannel buffer drain helper function.
+ * Combines immediate guard checks, bufferedamountlow event listeners, and 50ms fallback polling.
+ *
+ * @param {RTCDataChannel} dataChannel - The WebRTC data channel to monitor.
+ * @param {number} [targetThreshold=1024*1024] - Maximum bufferedAmount allowed before resolving.
+ * @param {number} [lowThreshold=512*1024] - The bufferedAmountLowThreshold setting.
+ * @param {number} [pollingIntervalMs=50] - Periodic polling fallback interval in milliseconds.
+ * @returns {Promise<void>}
+ */
+function waitForBufferDrain(dataChannel, targetThreshold = 1024 * 1024, lowThreshold = 512 * 1024, pollingIntervalMs = 50) {
+  if (!dataChannel || dataChannel.readyState !== 'open') {
+    return Promise.reject(new Error("Data channel is no longer open"));
+  }
+
+  const effectiveLowThreshold = Math.min(lowThreshold, targetThreshold);
+  dataChannel.bufferedAmountLowThreshold = effectiveLowThreshold;
+
+  // Requirement 1: Check current buffer levels immediately before creating or awaiting event listeners
+  if (dataChannel.bufferedAmount <= targetThreshold) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    let timer = null;
+
+    // Requirement 3: Clean up all registered event listeners and polling timers immediately
+    function cleanup() {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+      if (dataChannel) {
+        dataChannel.removeEventListener('bufferedamountlow', onBufferedAmountLow);
+        dataChannel.removeEventListener('close', onCloseOrError);
+        dataChannel.removeEventListener('error', onCloseOrError);
+      }
+    }
+
+    function checkDrain() {
+      if (!dataChannel || dataChannel.readyState !== 'open') {
+        cleanup();
+        reject(new Error("Data channel is no longer open"));
+        return true;
+      }
+      if (dataChannel.bufferedAmount <= targetThreshold) {
+        cleanup();
+        resolve();
+        return true;
+      }
+      return false;
+    }
+
+    function onBufferedAmountLow() {
+      checkDrain();
+    }
+
+    function onCloseOrError() {
+      cleanup();
+      reject(new Error("Data channel is no longer open"));
+    }
+
+    dataChannel.addEventListener('bufferedamountlow', onBufferedAmountLow);
+    dataChannel.addEventListener('close', onCloseOrError);
+    dataChannel.addEventListener('error', onCloseOrError);
+
+    // Requirement 2: Periodic polling as a safety net (e.g. 50ms)
+    timer = setInterval(checkDrain, pollingIntervalMs);
+
+    // Immediate re-check after registering listeners/timer
+    checkDrain();
+  });
+}
+
+function waitForDataChannelBuffer(dc, targetThreshold = 1024 * 1024, lowThreshold = 512 * 1024) {
+  return waitForBufferDrain(dc, targetThreshold, lowThreshold, 250);
+}
+
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
 async function uploadFileP2P(file, dc = webrtcDataChannel) {
   if (!dc || dc.readyState !== 'open') {
@@ -3630,7 +3708,7 @@ async function uploadFileP2P(file, dc = webrtcDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    await waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    await waitForBufferDrain(dc, 1024 * 1024, 512 * 1024, 50);
     dc.send(chunkBuffer);
     offset += chunkBuffer.byteLength;
 
@@ -3639,7 +3717,7 @@ async function uploadFileP2P(file, dc = webrtcDataChannel) {
     updateSpeed(offset);
   }
 
-  await waitForDataChannelBuffer(dc, 0, 0);
+  await waitForBufferDrain(dc, 0, 0, 50);
   dc.send("UPLOAD_EOF");
   showDone(file.name, file.size, "WebRTC P2P Upload");
 }
@@ -3669,9 +3747,7 @@ async function handleUploadFile(e) {
         reader.readAsArrayBuffer(chunkBlob);
       });
 
-      if (webrtcDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(webrtcDataChannel, 512 * 1024);
-      }
+      await waitForBufferDrain(webrtcDataChannel, 1024 * 1024, 512 * 1024, 50);
       webrtcDataChannel.send(chunkBuffer);
       offset += chunkBuffer.byteLength;
 
@@ -3680,9 +3756,7 @@ async function handleUploadFile(e) {
       updateSpeed(offset);
     }
 
-    if (webrtcDataChannel.bufferedAmount > 0) {
-      await waitForBufferedAmountLow(webrtcDataChannel, 0);
-    }
+    await waitForBufferDrain(webrtcDataChannel, 0, 0, 50);
     webrtcDataChannel.send("UPLOAD_EOF");
     showDone(file.name, file.size, "WebRTC P2P Upload");
   } else {
@@ -4077,10 +4151,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(senderDataChannel, 512 * 1024);
+    while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
+      if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+      if (dc.bufferedAmount > 1024 * 1024) {
+        await waitForBufferDrain(dc, 1024 * 1024, 512 * 1024, 50);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -4120,10 +4194,8 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (senderDataChannel.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(senderDataChannel, 0);
-  }
-  senderDataChannel.send("EOF");
+  await waitForBufferDrain(dc, 0, 0, 50);
+  dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
@@ -4363,6 +4435,10 @@ function renderQRCode(elementOrId, url) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     waitForBufferedAmountLow,
+    waitForBufferDrain,
+    waitForDataChannelBuffer,
+    uploadFileP2P,
+    sendWebRTCFile,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
