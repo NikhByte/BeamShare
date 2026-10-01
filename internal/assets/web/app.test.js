@@ -537,4 +537,72 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('waitForDataChannelBuffer attaches listener before check and cleans up on completion / polling', async () => {
+    class MockDataChannel {
+      constructor(amount = 0, readyState = 'open') {
+        this.bufferedAmount = amount;
+        this.bufferedAmountLowThreshold = 0;
+        this.readyState = readyState;
+        this.listeners = new Map();
+      }
+
+      addEventListener(event, listener) {
+        if (!this.listeners.has(event)) {
+          this.listeners.set(event, new Set());
+        }
+        this.listeners.get(event).add(listener);
+      }
+
+      removeEventListener(event, listener) {
+        if (this.listeners.has(event)) {
+          this.listeners.get(event).delete(listener);
+        }
+      }
+
+      triggerEvent(event) {
+        if (this.listeners.has(event)) {
+          for (const listener of Array.from(this.listeners.get(event))) {
+            listener();
+          }
+        }
+      }
+    }
+
+    // 1. Immediate resolution when <= maxAllowedAmount
+    const dc1 = new MockDataChannel(100);
+    await app.waitForDataChannelBuffer(dc1, 512 * 1024, 1024 * 1024);
+
+    // 2. Event triggered resolution
+    const dc2 = new MockDataChannel(2000 * 1024);
+    let resolved2 = false;
+    const p2 = app.waitForDataChannelBuffer(dc2, 512 * 1024, 1024 * 1024).then(() => { resolved2 = true; });
+
+    assert.equal(resolved2, false);
+    assert.equal(dc2.listeners.get('bufferedamountlow').size, 1);
+
+    // Drain buffer and trigger event
+    dc2.bufferedAmount = 400 * 1024;
+    dc2.triggerEvent('bufferedamountlow');
+    await p2;
+
+    assert.equal(resolved2, true);
+    assert.equal(dc2.listeners.get('bufferedamountlow').size, 0); // Cleaned up
+
+    // 3. Polling safety net resolution (when event missed)
+    const dc3 = new MockDataChannel(2000 * 1024);
+    let resolved3 = false;
+    const p3 = app.waitForDataChannelBuffer(dc3, 512 * 1024, 1024 * 1024).then(() => { resolved3 = true; });
+
+    assert.equal(dc3.listeners.get('bufferedamountlow').size, 1);
+    // Lower buffer WITHOUT firing event
+    dc3.bufferedAmount = 100 * 1024;
+
+    // Wait for 30ms polling check
+    await new Promise(r => setTimeout(r, 60));
+    await p3;
+
+    assert.equal(resolved3, true);
+    assert.equal(dc3.listeners.get('bufferedamountlow').size, 0); // Cleaned up
+  });
 });
