@@ -38,15 +38,21 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
   test.afterEach(async ({ page, context }) => {
     try {
       await page.unrouteAll({ behavior: 'ignoreErrors' });
+    } catch (e) {}
+    try {
       await context.clearCookies();
-      await page.evaluate(async () => {
-        if ('serviceWorker' in navigator) {
-          const regs = await navigator.serviceWorker.getRegistrations();
-          for (const reg of regs) {
-            await reg.unregister();
+    } catch (e) {}
+    try {
+      if (!page.isClosed()) {
+        await page.evaluate(async () => {
+          if ('serviceWorker' in navigator) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            for (const reg of regs) {
+              await reg.unregister();
+            }
           }
-        }
-      }).catch(() => {});
+        }).catch(() => {});
+      }
     } catch (e) {}
     stopAllProcesses();
   });
@@ -190,6 +196,9 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       // WebRTC attempt will fail due to aborted signaling, and app should seamlessly transition to HTTP ready state
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
+
+      // Unregister signal interceptor after reaching fallback ready state
+      await page.unroute('**/api/signal/**');
 
       const downloadPromise = page.waitForEvent('download', { timeout: 30000 });
 
