@@ -963,10 +963,22 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 		}
 
 		if !sr.initDone {
-			n, err := sr.pr.Read(p)
 			sr.sess.mu.Lock()
 			reqOff := sr.sess.RequestedOffset
 			sendOff := sr.sess.SenderOffset
+			sr.sess.mu.Unlock()
+
+			sr.bytesToSkip = reqOff - sendOff
+			if sr.bytesToSkip < 0 {
+				sr.initDone = true
+				return 0, fmt.Errorf("relay stream offset mismatch: sender offset %d exceeds requested offset %d", sendOff, reqOff)
+			}
+
+			n, err := sr.pr.Read(p)
+
+			sr.sess.mu.Lock()
+			reqOff = sr.sess.RequestedOffset
+			sendOff = sr.sess.SenderOffset
 			sr.sess.mu.Unlock()
 
 			sr.bytesToSkip = reqOff - sendOff
@@ -992,6 +1004,14 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 			sr.bytesToSkip = 0
 			copied := copy(p, p[discard:n])
 			return copied, err
+		}
+
+		if sr.bytesToSkip < 0 {
+			sr.sess.mu.Lock()
+			reqOff := sr.sess.RequestedOffset
+			sendOff := sr.sess.SenderOffset
+			sr.sess.mu.Unlock()
+			return 0, fmt.Errorf("relay stream offset mismatch: sender offset %d exceeds requested offset %d", sendOff, reqOff)
 		}
 
 		if sr.bytesToSkip > 0 {
