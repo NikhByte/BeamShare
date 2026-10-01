@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -64,6 +65,7 @@ type Session struct {
 	dc          *webrtc.DataChannel
 	offerSDP    string // compressed+b64 for QR encoding
 	rawOffer    string // full SDP text
+	token       string // ephemeral session token
 	answerReady chan struct{}
 	candidates  []webrtc.ICECandidateInit
 	mu          sync.Mutex
@@ -158,6 +160,79 @@ func (s *Session) CreateOffer(ctx context.Context) (compressedOffer string, err 
 // CompressedOffer returns the zlib+base64 encoded SDP, ready for embedding in a QR.
 func (s *Session) CompressedOffer() string { return s.offerSDP }
 
+// SetToken sets the ephemeral session token required for signaling route authentication.
+func (s *Session) SetToken(token string) {
+	s.mu.Lock()
+	s.token = token
+	s.mu.Unlock()
+}
+
+func isLoopback(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func (s *Session) validateToken(r *http.Request) bool {
+	s.mu.Lock()
+	tok := s.token
+	s.mu.Unlock()
+
+	if tok == "" {
+		return true
+	}
+
+	var reqToken string
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		parts := strings.SplitN(auth, " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			reqToken = strings.TrimSpace(parts[1])
+		}
+	}
+	if reqToken == "" {
+		reqToken = r.URL.Query().Get("token")
+	}
+	if reqToken == "" {
+		reqToken = r.URL.Query().Get("t")
+	}
+	if reqToken == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(reqToken), []byte(tok)) == 1
+}
+
+func (s *Session) checkCORSAndPNA(w http.ResponseWriter, r *http.Request, allowedMethods string) bool {
+	isValid := s.validateToken(r)
+	isLoop := isLoopback(r)
+
+	if r.Method == http.MethodOptions {
+		if isValid || isLoop {
+			if origin := r.Header.Get("Origin"); origin != "" {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+			}
+			w.Header().Set("Access-Control-Allow-Methods", allowedMethods)
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
+
+	if isValid || isLoop {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+	}
+
+	return false
+}
+
 // RegisterHandlers mounts the signaling API routes on the given mux:
 //   - GET  /api/signal/offer  → returns the compressed SDP offer
 //   - POST /api/signal/answer → accepts the receiver's SDP answer
@@ -165,8 +240,14 @@ func (s *Session) CompressedOffer() string { return s.offerSDP }
 func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 	// Offer endpoint — receiver fetches this after scanning the QR.
 	mux.HandleFunc("/api/signal/offer", func(w http.ResponseWriter, r *http.Request) {
+		if s.checkCORSAndPNA(w, r, "GET, OPTIONS") {
+			return
+		}
+		if !s.validateToken(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"sdp":        s.rawOffer,
 			"type":       "offer",
@@ -177,11 +258,11 @@ func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 
 	// Answer endpoint — receiver POSTs its SDP answer here.
 	mux.HandleFunc("/api/signal/answer", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-			w.WriteHeader(http.StatusNoContent)
+		if s.checkCORSAndPNA(w, r, "POST, OPTIONS") {
+			return
+		}
+		if !s.validateToken(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if r.Method != http.MethodPost {
@@ -200,7 +281,6 @@ func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
 		// Unblock WaitForAnswer.
@@ -212,8 +292,14 @@ func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 
 	// ICE candidates endpoint — receiver polls this to add remote candidates.
 	mux.HandleFunc("/api/signal/candidates", func(w http.ResponseWriter, r *http.Request) {
+		if s.checkCORSAndPNA(w, r, "GET, OPTIONS") {
+			return
+		}
+		if !s.validateToken(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		cands := s.GetCandidates()
 		json.NewEncoder(w).Encode(cands)
 	})
