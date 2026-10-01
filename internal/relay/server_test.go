@@ -3,6 +3,8 @@ package relay
 import (
 	"context"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -261,4 +263,108 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
 }
 
+func TestServer_UploadPipeCleanupOnSessionExpiration(t *testing.T) {
+	srv := NewServerWithConfig(100*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
 
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+	require.NotNil(t, sess)
+
+	bodyPr, bodyPw := io.Pipe()
+	writer := multipart.NewWriter(bodyPw)
+
+	uploadErrChan := make(chan error, 1)
+	go func() {
+		defer bodyPr.Close()
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, bodyPr)
+		if err != nil {
+			uploadErrChan <- err
+			return
+		}
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+
+		httpClient := newTestHTTPClient()
+		defer httpClient.CloseIdleConnections()
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			uploadErrChan <- err
+			return
+		}
+		resp.Body.Close()
+		uploadErrChan <- nil
+	}()
+
+	go func() {
+		defer bodyPw.Close()
+		part, err := writer.CreateFormFile("file", "test_upload.bin")
+		if err != nil {
+			return
+		}
+		_, _ = part.Write([]byte("initial chunk data"))
+		time.Sleep(1 * time.Second)
+	}()
+
+	require.Eventually(t, func() bool {
+		return sess.IsUploadPipeReady()
+	}, 2*time.Second, 10*time.Millisecond, "Upload pipe was not initialized")
+
+	sess.mu.Lock()
+	assert.NotNil(t, sess.UploadPipeR)
+	assert.NotNil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+
+	require.Eventually(t, func() bool {
+		return srv.GetSession(sess.ID) == nil
+	}, 2*time.Second, 10*time.Millisecond, "Session did not expire")
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+
+	bodyPw.Close()
+
+	select {
+	case err := <-uploadErrChan:
+		_ = err
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload handler did not unblock after session expiration")
+	}
+}
+
+func TestServer_UploadPipeMutexProtectionAndReassignment(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+	pr1, pw1 := io.Pipe()
+
+	sess.SetUploadPipes(pr1, pw1)
+	assert.True(t, sess.IsUploadPipeReady())
+
+	pr2, pw2 := io.Pipe()
+	sess.mu.Lock()
+	sess.closeUploadPipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by test"))
+	sess.UploadPipeR = pr2
+	sess.UploadPipeW = pw2
+	sess.mu.Unlock()
+
+	buf := make([]byte, 10)
+	_, err := pr1.Read(buf)
+	assert.Error(t, err)
+
+	assert.True(t, sess.IsUploadPipeReady())
+
+	sess.CloseUploadPipes(fmt.Errorf("test cleanup"))
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+
+	assert.False(t, sess.IsUploadPipeReady())
+}
