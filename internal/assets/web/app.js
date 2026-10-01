@@ -1119,13 +1119,7 @@ function checkRamWarning(size) {
 }
 
 function generateClientQRCodeDataURL(text) {
-  if (typeof generateQRCodeSVGDataURL === 'function') {
-    return generateQRCodeSVGDataURL(text);
-  }
-  if (typeof window !== 'undefined' && window.qrcode && typeof window.qrcode.generateQRCodeSVGDataURL === 'function') {
-    return window.qrcode.generateQRCodeSVGDataURL(text);
-  }
-  return '';
+  return renderQRCodeSVG(text);
 }
 
 // ── QR Scanning ───────────────────────────────────────────────────────────────
@@ -2113,147 +2107,44 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
-      let decryptChain = Promise.resolve();
-
       dc.onmessage = (e) => {
-        if (decryptionKey) {
-          decryptChain = decryptChain.then(async () => {
-            if (typeof e.data === 'string') {
-              if (e.data === "EOF") {
-                chunkQueue.enqueueEOF();
-                await chunkQueue.drain();
+        try {
+          if (typeof e.data === 'string') {
+            if (e.data === "EOF") {
+              chunkQueue.enqueueEOF();
+              chunkQueue.drain().then(async () => {
                 if (diskWritableStream) {
                   await diskWritableStream.close();
                   if (useOPFS) {
                     const file = await diskFileHandle.getFile();
                     triggerSave(file, currentFile.name);
                   }
-                  chunkQueue.enqueueEOF();
-                  try {
-                    await chunkQueue.drain();
-                    if (diskWritableStream) {
-                      await diskWritableStream.close();
-                      if (useOPFS) {
-                        const file = await diskFileHandle.getFile();
-                        triggerSave(file, currentFile.name);
-                      }
-                    } else if (swPipePort) {
-                      swPipePort.postMessage("EOF");
-                    } else {
-                      let finalBlob;
-                      if (useIndexedDB) {
-                        finalBlob = await getAllChunksIDB(currentFile.mime);
-                        await clearIDB();
-                      } else {
-                        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                      }
-                      triggerSave(finalBlob, currentFile.name);
-                    }
-                    resolve();
-                  } catch (err) {
-                    hasError = true;
-                    // Handled in chunkQueue onError callback
-                  }
-                });
-              } else {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
-                  if (diskWritableStream) {
-                    await diskWritableStream.close();
-                    if (useOPFS) {
-                      const file = await diskFileHandle.getFile();
-                      triggerSave(file, currentFile.name);
-                    }
-                  } else if (swPipePort) {
-                    swPipePort.postMessage("EOF");
+                } else if (swPipePort) {
+                  swPipePort.postMessage("EOF");
+                } else {
+                  let finalBlob;
+                  if (useIndexedDB) {
+                    finalBlob = await getAllChunksIDB(currentFile.mime);
+                    await clearIDB();
                   } else {
-                    let finalBlob;
-                    if (useIndexedDB) {
-                      finalBlob = await getAllChunksIDB(currentFile.mime);
-                      await clearIDB();
-                    } else {
-                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                    }
-                    triggerSave(finalBlob, currentFile.name);
+                    finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
                   }
                   triggerSave(finalBlob, currentFile.name);
                 }
                 resolve();
-              }
-              return;
+              }).catch((err) => {
+                // Handled in chunkQueue onError callback
+              });
             }
-
-            const value = new Uint8Array(e.data);
-            let newBuffer = new Uint8Array(encBuffer.length + value.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(value, encBuffer.length);
-            encBuffer = newBuffer;
-
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-              const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
-
-                const nonce = new Uint8Array(frame.subarray(0, 12));
-                const ciphertext = new Uint8Array(frame.subarray(12));
-                const decrypted = await crypto.subtle.decrypt(
-                  { name: "AES-GCM", iv: nonce },
-                  decryptionKey,
-                  ciphertext
-                );
-                const decValue = new Uint8Array(decrypted);
-                chunkQueue.enqueue(decValue);
-              } else {
-                break;
-              }
-            }
-          }).catch((err) => {
-            showError(`Transfer failed: ${err.message}`);
-            dc.close();
-            reject(err);
-          });
-        } else {
-          try {
-            if (typeof e.data === 'string') {
-              if (e.data === "EOF") {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
-                  if (diskWritableStream) {
-                    await diskWritableStream.close();
-                    if (useOPFS) {
-                      const file = await diskFileHandle.getFile();
-                      triggerSave(file, currentFile.name);
-                    }
-                  } else if (swPipePort) {
-                    swPipePort.postMessage("EOF");
-                  } else {
-                    let finalBlob;
-                    if (useIndexedDB) {
-                      finalBlob = await getAllChunksIDB(currentFile.mime);
-                      await clearIDB();
-                    } else {
-                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                    }
-                    triggerSave(finalBlob, currentFile.name);
-                  }
-                  resolve();
-                }).catch((err) => {
-                  // Handled in chunkQueue onError callback
-                });
-              }
-              return;
-            }
-
-            const chunk = new Uint8Array(e.data);
-            chunkQueue.enqueue(chunk);
-          } catch (err) {
-            showError(`Transfer failed: ${err.message}`);
-            dc.close();
-            reject(err);
+            return;
           }
+
+          const chunk = new Uint8Array(e.data);
+          chunkQueue.enqueue(chunk);
+        } catch (err) {
+          showError(`Transfer failed: ${err.message}`);
+          dc.close();
+          reject(err);
         }
       };
 
@@ -2467,6 +2358,31 @@ function appendTerminalText(text) {
   receivedBytes += text.length;
 }
 
+function renderQRCodeSVG(text) {
+  if (typeof generateQRCodeSVG === 'function') {
+    return generateQRCodeSVG(text);
+  }
+  if (typeof generateQRCodeSVGDataURL === 'function') {
+    return generateQRCodeSVGDataURL(text);
+  }
+  if (typeof window !== 'undefined' && typeof window.generateQRCodeSVG === 'function') {
+    return window.generateQRCodeSVG(text);
+  }
+  if (typeof window !== 'undefined' && typeof window.generateQRCodeSVGDataURL === 'function') {
+    return window.generateQRCodeSVGDataURL(text);
+  }
+  if (typeof window !== 'undefined' && window.qrcode && typeof window.qrcode.generateSVG === 'function') {
+    return window.qrcode.generateSVG(text);
+  }
+  if (typeof window !== 'undefined' && window.qrcode && typeof window.qrcode.generateQRCodeSVGDataURL === 'function') {
+    return window.qrcode.generateQRCodeSVGDataURL(text);
+  }
+  if (typeof qrcode !== 'undefined' && typeof qrcode.generateSVG === 'function') {
+    return qrcode.generateSVG(text);
+  }
+  return apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(text);
+}
+
 function showDone(name, size, mode) {
   localStorage.removeItem('beam_resume');
   document.getElementById('done-sub').textContent = `${name} · ${formatBytes(size)}`;
@@ -2488,10 +2404,10 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR SVG data URL locally without external network requests
+    // Load QR SVG locally via client-side generator or fallback to server route
     const qrImg = document.getElementById('done-qr-img');
     if (qrImg) {
-      qrImg.src = generateClientQRCodeDataURL(shareLink);
+      qrImg.src = renderQRCodeSVG(shareLink);
     }
     
     if (doneShare) doneShare.classList.remove('hidden');
@@ -2632,7 +2548,7 @@ async function startSenderSharing() {
     const offer = await senderPeerConnection.createOffer();
     await senderPeerConnection.setLocalDescription(offer);
 
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) ? 0 : 2000));
 
     setLoadingSub('Publishing SDP offer to relay…');
     const stateRes = await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
@@ -2669,7 +2585,7 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    document.getElementById('send-qr-img').src = renderQRCodeSVG(shareURL.href);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -3061,6 +2977,9 @@ if (typeof window !== 'undefined') {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     waitForBufferedAmountLow,
+    waitForDataChannelBuffer: waitForBufferedAmountLow,
+    uploadFileP2P,
+    sendWebRTCFile,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,

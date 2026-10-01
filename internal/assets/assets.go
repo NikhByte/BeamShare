@@ -89,6 +89,11 @@ func QrcodeJS() string {
 	return qrcodeJS
 }
 
+// QRCodeJS returns the qrcode.min.js content.
+func QRCodeJS() string {
+	return qrcodeJS
+}
+
 // StaticHandler returns an http.Handler that serves the embedded CSS and JS.
 func StaticHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

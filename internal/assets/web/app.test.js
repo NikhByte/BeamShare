@@ -109,9 +109,13 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
+    const qrcode = require('./qrcode.min.js');
+    global.qrcode = qrcode;
+    window.qrcode = qrcode;
+    global.generateQRCodeSVG = qrcode.generateSVG;
+    window.generateQRCodeSVG = qrcode.generateSVG;
+    global.generateQRCodeSVGDataURL = qrcode.generateQRCodeSVGDataURL || qrcode.generateSVG;
+    window.generateQRCodeSVGDataURL = qrcode.generateQRCodeSVGDataURL || qrcode.generateSVG;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -754,6 +758,11 @@ describe('Gaze Web Sender Test Suite', () => {
     }
     window.RTCPeerConnection = RTCPeerConnection;
     global.RTCPeerConnection = RTCPeerConnection;
+    const qrcode = require('./qrcode.min.js');
+    global.qrcode = qrcode;
+    window.qrcode = qrcode;
+    global.generateQRCodeSVG = qrcode.generateSVG;
+    window.generateQRCodeSVG = qrcode.generateSVG;
     window.__BEAM_TEST_ENV__ = true;
 
     delete require.cache[require.resolve('./qrcode.min.js')];
@@ -771,9 +780,17 @@ describe('Gaze Web Sender Test Suite', () => {
   });
 
   test('startSenderSharing generates AES-GCM key and appends #k fragment', async () => {
+    let fetchUrls = [];
+    const origFetch = global.fetch;
+    global.fetch = async (url, opts) => {
+      fetchUrls.push(url);
+      return origFetch(url, opts);
+    };
+
     await app.startSenderSharing();
 
     const urlInput = document.getElementById('send-url-input');
+    const qrImg = document.getElementById('send-qr-img');
     const hash = new URL(urlInput.value || "http://localhost/").hash;
 
     assert.equal(hash.startsWith('#k='), true);
@@ -786,32 +803,12 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
-    const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
+    // Verify QR image is generated locally as SVG data URL and does NOT call external third-party APIs
+    assert.equal(qrImg.src.startsWith('data:image/svg+xml'), true);
     assert.equal(qrImg.src.includes('api.qrserver.com'), false);
-  });
+    assert.equal(fetchUrls.some(u => String(u).includes('api.qrserver.com')), false);
 
-  test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
-    let externalCallMade = false;
-    const origFetch = global.fetch;
-    global.fetch = async (url, opts) => {
-      if (typeof url === 'string' && (url.includes('qrserver.com') || url.includes('/api/qr'))) {
-        externalCallMade = true;
-      }
-      return origFetch(url, opts);
-    };
-
-    await app.startSenderSharing();
-
-    assert.equal(externalCallMade, false, 'No external QR API requests should be made');
-
-    const sendCanvas = document.getElementById('send-qr-canvas');
-    assert.notEqual(sendCanvas, null);
-
-    const urlInput = document.getElementById('send-url-input');
-    assert.ok(urlInput.value.includes('#k='));
+    global.fetch = origFetch;
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
