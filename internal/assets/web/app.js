@@ -1866,6 +1866,80 @@ async function startWebRTC() {
 }
 
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
+/**
+ * Resilient WebRTC DataChannel buffer drain helper function.
+ * Combines immediate guard checks, bufferedamountlow event listeners, and 50ms fallback polling.
+ *
+ * @param {RTCDataChannel} dataChannel - The WebRTC data channel to monitor.
+ * @param {number} [targetThreshold=1024*1024] - Maximum bufferedAmount allowed before resolving.
+ * @param {number} [lowThreshold=512*1024] - The bufferedAmountLowThreshold setting.
+ * @param {number} [pollingIntervalMs=50] - Periodic polling fallback interval in milliseconds.
+ * @returns {Promise<void>}
+ */
+function waitForBufferDrain(dataChannel, targetThreshold = 1024 * 1024, lowThreshold = 512 * 1024, pollingIntervalMs = 50) {
+  if (!dataChannel || dataChannel.readyState !== 'open') {
+    return Promise.reject(new Error("Data channel is no longer open"));
+  }
+
+  const effectiveLowThreshold = Math.min(lowThreshold, targetThreshold);
+  dataChannel.bufferedAmountLowThreshold = effectiveLowThreshold;
+
+  // Requirement 1: Check current buffer levels immediately before creating or awaiting event listeners
+  if (dataChannel.bufferedAmount <= targetThreshold) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    let timer = null;
+
+    // Requirement 3: Clean up all registered event listeners and polling timers immediately
+    function cleanup() {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+      if (dataChannel) {
+        dataChannel.removeEventListener('bufferedamountlow', onBufferedAmountLow);
+        dataChannel.removeEventListener('close', onCloseOrError);
+        dataChannel.removeEventListener('error', onCloseOrError);
+      }
+    }
+
+    function checkDrain() {
+      if (!dataChannel || dataChannel.readyState !== 'open') {
+        cleanup();
+        reject(new Error("Data channel is no longer open"));
+        return true;
+      }
+      if (dataChannel.bufferedAmount <= targetThreshold) {
+        cleanup();
+        resolve();
+        return true;
+      }
+      return false;
+    }
+
+    function onBufferedAmountLow() {
+      checkDrain();
+    }
+
+    function onCloseOrError() {
+      cleanup();
+      reject(new Error("Data channel is no longer open"));
+    }
+
+    dataChannel.addEventListener('bufferedamountlow', onBufferedAmountLow);
+    dataChannel.addEventListener('close', onCloseOrError);
+    dataChannel.addEventListener('error', onCloseOrError);
+
+    // Requirement 2: Periodic polling as a safety net (e.g. 50ms)
+    timer = setInterval(checkDrain, pollingIntervalMs);
+
+    // Immediate re-check after registering listeners/timer
+    checkDrain();
+  });
+}
+
 async function handleUploadFile(e) {
   const file = e.target.files[0];
   if (!file) return;
@@ -1891,12 +1965,7 @@ async function handleUploadFile(e) {
         reader.readAsArrayBuffer(chunkBlob);
       });
 
-      webrtcDataChannel.bufferedAmountLowThreshold = 512 * 1024;
-      if (webrtcDataChannel.bufferedAmount > 1024 * 1024) {
-        await new Promise(resolve => {
-          webrtcDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-        });
-      }
+      await waitForBufferDrain(webrtcDataChannel, 1024 * 1024, 512 * 1024, 50);
       webrtcDataChannel.send(chunkBuffer);
       offset += chunkBuffer.byteLength;
 
@@ -1905,12 +1974,7 @@ async function handleUploadFile(e) {
       updateSpeed(offset);
     }
 
-    webrtcDataChannel.bufferedAmountLowThreshold = 0;
-    if (webrtcDataChannel.bufferedAmount > 0) {
-      await new Promise(resolve => {
-        webrtcDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-      });
-    }
+    await waitForBufferDrain(webrtcDataChannel, 0, 0, 50);
     webrtcDataChannel.send("UPLOAD_EOF");
     showDone(file.name, file.size, "WebRTC P2P Upload");
   } else {
@@ -2305,13 +2369,10 @@ async function streamFileToDataChannel(initialOffset) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    senderDataChannel.bufferedAmountLowThreshold = 512 * 1024;
     while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
       if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
       if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await new Promise(resolve => {
-          senderDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-        });
+        await waitForBufferDrain(senderDataChannel, 1024 * 1024, 512 * 1024, 50);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -2351,12 +2412,7 @@ async function streamFileToDataChannel(initialOffset) {
 
   if (senderAborted) return;
 
-  senderDataChannel.bufferedAmountLowThreshold = 0;
-  if (senderDataChannel.bufferedAmount > 0) {
-    await new Promise(resolve => {
-      senderDataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-    });
-  }
+  await waitForBufferDrain(senderDataChannel, 0, 0, 50);
   senderDataChannel.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
@@ -2569,6 +2625,7 @@ if (typeof window !== 'undefined') {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    waitForBufferDrain,
     SequentialChunkQueue,
     decompressOffer,
     setState,
