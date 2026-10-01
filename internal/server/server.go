@@ -12,11 +12,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/beamshare/beam/internal/assets"
+	"github.com/beamshare/beam/internal/fileutil"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -479,11 +479,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if part.FormName() == "file" {
-			cleanBase := filepath.Base(filepath.Clean(part.FileName()))
-			cleanBase = strings.Trim(cleanBase, "\x00./\\")
-			if cleanBase == "" {
-				cleanBase = "upload.bin"
-			}
+			cleanBase := fileutil.SanitizeReceivedFilename(part.FileName(), "upload.bin")
 			outName := "received_" + cleanBase
 			outFile, err := os.OpenFile(outName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 			if err != nil {

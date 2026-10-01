@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/beamshare/beam/internal/fileutil"
 	"github.com/beamshare/beam/internal/mdns"
 	"github.com/beamshare/beam/internal/relay"
 	"github.com/beamshare/beam/internal/server"
@@ -403,14 +404,15 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								fmt.Println("  ✅ Relay Transfer Complete!")
 							}
 						} else if cmd.Action == "upload" {
-							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", cmd.Filename)
+							cleanBase := fileutil.SanitizeReceivedFilename(cmd.Filename, "upload.bin")
+							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", cleanBase)
 							rc, err := relClient.DownloadData()
 							if err != nil {
 								fmt.Printf("  Error downloading from relay: %v\n", err)
 								continue
 							}
 
-							outName := "received_" + cmd.Filename
+							outName := "received_" + cleanBase
 							outFile, err := os.Create(outName)
 							if err != nil {
 								fmt.Printf("  Error creating file: %v\n", err)
@@ -433,7 +435,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									elapsed.Seconds(),
 									ui.FormatBytes(int64(speed)),
 								)
-								srv.UpdateSharedFile(outName, cmd.Filename, copied)
+								srv.UpdateSharedFile(outName, cleanBase, copied)
 							}
 						}
 					}
@@ -469,11 +471,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								name := parts[1]
 								size, _ := strconv.ParseInt(parts[2], 10, 64)
 
-								cleanBase := filepath.Base(filepath.Clean(name))
-								cleanBase = strings.Trim(cleanBase, "\x00./\\")
-								if cleanBase == "" {
-									cleanBase = "upload.bin"
-								}
+								cleanBase := fileutil.SanitizeReceivedFilename(name, "upload.bin")
 								uploadName = "received_" + cleanBase
 								uploadSize = size
 								uploaded = 0
@@ -901,11 +899,7 @@ func downloadFile(code string) error {
 		}
 	}
 
-	cleanBase := filepath.Base(filepath.Clean(meta.Name))
-	cleanBase = strings.Trim(cleanBase, "\x00./\\")
-	if cleanBase == "" {
-		cleanBase = "download.bin"
-	}
+	cleanBase := fileutil.SanitizeReceivedFilename(meta.Name, "download.bin")
 	outName := "received_" + cleanBase
 	outFile, err := os.Create(outName)
 	if err != nil {
