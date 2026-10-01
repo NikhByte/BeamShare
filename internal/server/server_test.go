@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -554,5 +555,96 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 		defer srv.mu.Unlock()
 		return len(srv.liveClients) == 0
 	}, 5*time.Second, 20*time.Millisecond)
+}
+
+func TestConcurrentMetaDownloadUpdateSharedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath1 := filepath.Join(tmpDir, "file1.txt")
+	err := os.WriteFile(filePath1, []byte("file 1 content"), 0644)
+	require.NoError(t, err)
+
+	filePath2 := filepath.Join(tmpDir, "file2.txt")
+	err = os.WriteFile(filePath2, []byte("file 2 content longer"), 0644)
+	require.NoError(t, err)
+
+	srv, err := New(filePath1, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	var wg sync.WaitGroup
+	stopCh := make(chan struct{})
+
+	// Goroutine calling UpdateSharedFile in a loop
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+				if i%2 == 0 {
+					srv.UpdateSharedFile(filePath2, "file2.txt", int64(len("file 2 content longer")))
+				} else {
+					srv.UpdateSharedFile(filePath1, "file1.txt", int64(len("file 1 content")))
+				}
+				i++
+				time.Sleep(1 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Parallel GET requests to /api/meta
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client := ts.Client()
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					resp, err := client.Get(ts.URL + "/api/meta")
+					if err == nil {
+						var meta FileMeta
+						_ = json.NewDecoder(resp.Body).Decode(&meta)
+						resp.Body.Close()
+						assert.True(t, meta.Name == "file1.txt" || meta.Name == "file2.txt")
+					}
+					time.Sleep(1 * time.Millisecond)
+				}
+			}
+		}()
+	}
+
+	// Parallel GET requests to /api/download
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client := ts.Client()
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					resp, err := client.Get(ts.URL + "/api/download")
+					if err == nil {
+						_, _ = io.Copy(io.Discard, resp.Body)
+						resp.Body.Close()
+					}
+					time.Sleep(1 * time.Millisecond)
+				}
+			}
+		}()
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	close(stopCh)
+	wg.Wait()
 }
 
