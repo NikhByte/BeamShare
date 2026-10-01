@@ -537,4 +537,54 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('waitForDataChannelBuffer resolves immediately if bufferedAmount <= targetAmount', async () => {
+    const mockChannel = {
+      readyState: 'open',
+      bufferedAmount: 100,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    };
+
+    let resolved = false;
+    await app.waitForDataChannelBuffer(mockChannel, 500).then(() => { resolved = true; });
+    assert.equal(resolved, true);
+  });
+
+  test('waitForDataChannelBuffer resolves via 50ms polling fallback when bufferedamountlow event is missed', async () => {
+    let listeners = [];
+    const mockChannel = {
+      readyState: 'open',
+      bufferedAmount: 2000,
+      addEventListener: (evt, listener) => { listeners.push({ evt, listener }); },
+      removeEventListener: (evt, listener) => {
+        listeners = listeners.filter(l => l.listener !== listener);
+      }
+    };
+
+    const waitPromise = app.waitForDataChannelBuffer(mockChannel, 500);
+
+    // Simulate bufferedAmount dropping after 60ms without firing event
+    setTimeout(() => {
+      mockChannel.bufferedAmount = 200;
+    }, 60);
+
+    await waitPromise;
+    assert.equal(mockChannel.bufferedAmount, 200);
+    assert.equal(listeners.length, 0); // Cleanup verified
+  });
+
+  test('waitForDataChannelBuffer rejects if data channel readyState is closed', async () => {
+    const closedChannel = {
+      readyState: 'closed',
+      bufferedAmount: 1000,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    };
+
+    await assert.rejects(
+      async () => { await app.waitForDataChannelBuffer(closedChannel, 500); },
+      { message: 'Data channel is no longer open' }
+    );
+  });
 });

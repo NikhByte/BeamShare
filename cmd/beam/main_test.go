@@ -5,10 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-
 	"reflect"
 	"testing"
+	"time"
+
 	"github.com/beamshare/beam/internal/server"
+	"github.com/pion/webrtc/v3"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -110,5 +112,96 @@ func TestDownloadFile_Relay(t *testing.T) {
 	err := downloadFile(urlWithSession)
 	if err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
+	}
+}
+
+func TestWaitDataChannelBuffer(t *testing.T) {
+	ch := make(chan struct{}, 1)
+
+	// Test 1: nil data channel returns error
+	err := waitDataChannelBuffer(nil, ch, 100)
+	if err == nil {
+		t.Fatalf("expected error for nil data channel, got nil")
+	}
+
+	// Test 2: connected pair where buffer is 0 <= 1000 returns immediately
+	api := webrtc.NewAPI()
+	pc1, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("failed to create pc1: %v", err)
+	}
+	defer pc1.Close()
+
+	pc2, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("failed to create pc2: %v", err)
+	}
+	defer pc2.Close()
+
+	dc, err := pc1.CreateDataChannel("test", nil)
+	if err != nil {
+		t.Fatalf("failed to create dc: %v", err)
+	}
+
+	dcOpen := make(chan struct{})
+	dc.OnOpen(func() {
+		close(dcOpen)
+	})
+
+	// Wire ICE candidates between pc1 and pc2
+	pc1.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			_ = pc2.AddICECandidate(c.ToJSON())
+		}
+	})
+	pc2.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			_ = pc1.AddICECandidate(c.ToJSON())
+		}
+	})
+
+	// Perform ICE handshake
+	offer, err := pc1.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("failed offer: %v", err)
+	}
+	pc1.SetLocalDescription(offer)
+	pc2.SetRemoteDescription(offer)
+
+	answer, err := pc2.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("failed answer: %v", err)
+	}
+	pc2.SetLocalDescription(answer)
+	pc1.SetRemoteDescription(answer)
+
+	select {
+	case <-dcOpen:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for data channel to open")
+	}
+
+	// Immediate return when BufferedAmount() <= target (0 <= 100)
+	err = waitDataChannelBuffer(dc, ch, 100)
+	if err != nil {
+		t.Fatalf("expected nil for buffer <= target, got %v", err)
+	}
+
+	// Test channel / ticker signal unblock
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		ch <- struct{}{}
+	}()
+	err = waitDataChannelBuffer(dc, ch, 100)
+	if err != nil {
+		t.Fatalf("expected nil on signal unblock, got %v", err)
+	}
+
+	// Test channel close during wait or beforehand
+	pc1.Close()
+	time.Sleep(50 * time.Millisecond)
+	err = waitDataChannelBuffer(dc, ch, 100)
+	if err == nil {
+		t.Fatalf("expected error for closed data channel, got nil")
 	}
 }
