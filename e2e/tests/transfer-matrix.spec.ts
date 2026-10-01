@@ -46,9 +46,6 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       await page.unrouteAll({ behavior: 'ignoreErrors' });
     } catch (e) {}
     try {
-      await context.clearCookies();
-    } catch (e) {}
-    try {
       if (!page.isClosed()) {
         await page.evaluate(async () => {
           if ('serviceWorker' in navigator) {
@@ -59,6 +56,9 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
           }
         }).catch(() => {});
       }
+    } catch (e) {}
+    try {
+      await context.clearCookies();
     } catch (e) {}
     stopAllProcesses();
   });
