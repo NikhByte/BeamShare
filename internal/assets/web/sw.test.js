@@ -272,4 +272,31 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     assert.equal(responseResult.headers.get('Content-Type'), 'application/pdf');
     assert.equal(responseResult.headers.get('Content-Length'), '1024');
   });
+
+  test('INIT_PORT sends PORT_INITIALIZED response on message port', () => {
+    const { streamMap } = require('./sw.js');
+    const url = '/sw-download-pipe/test-handshake';
+
+    let postedMessage = null;
+    const mockPort = {
+      onmessage: null,
+      onmessageerror: null,
+      close: () => {},
+      postMessage: (msg) => { postedMessage = msg; }
+    };
+
+    listeners['message']({
+      data: {
+        type: 'INIT_PORT',
+        url,
+        filename: 'test.bin',
+        size: 100,
+        mime: 'application/octet-stream'
+      },
+      ports: [mockPort]
+    });
+
+    assert.equal(streamMap.has(url), true);
+    assert.deepEqual(postedMessage, { type: 'PORT_INITIALIZED' });
+  });
 });
