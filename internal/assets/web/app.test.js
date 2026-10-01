@@ -537,4 +537,115 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('waitForBufferedAmountLow resolves immediately when bufferedAmount <= threshold', async () => {
+    let listenerAdded = false;
+    const mockDC = {
+      bufferedAmount: 100,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: () => { listenerAdded = true; },
+      removeEventListener: () => {}
+    };
+
+    await app.waitForBufferedAmountLow(mockDC, 512 * 1024);
+    assert.equal(mockDC.bufferedAmountLowThreshold, 512 * 1024);
+    assert.equal(listenerAdded, false, 'Listener should not be attached if buffer is already <= threshold');
+  });
+
+  test('waitForBufferedAmountLow resolves via synchronous recheck when buffer drains during listener attachment', async () => {
+    const listeners = new Set();
+
+    const mockDC = {
+      bufferedAmount: 2 * 1024 * 1024, // starts above threshold
+      bufferedAmountLowThreshold: 0,
+      addEventListener(type, handler) {
+        if (type === 'bufferedamountlow') {
+          listeners.add(handler);
+          // Simulate buffer draining rapidly right when/after listener is attached
+          this.bufferedAmount = 256 * 1024;
+        }
+      },
+      removeEventListener(type, handler) {
+        if (type === 'bufferedamountlow') {
+          listeners.delete(handler);
+        }
+      }
+    };
+
+    let resolved = false;
+    const promise = app.waitForBufferedAmountLow(mockDC, 512 * 1024).then(() => {
+      resolved = true;
+    });
+
+    await promise;
+    assert.equal(resolved, true, 'Promise should resolve via synchronous recheck');
+    assert.equal(listeners.size, 0, 'Listener should be cleaned up after resolving');
+  });
+
+  test('waitForBufferedAmountLow resolves via event when buffer drains asynchronously', async () => {
+    const listeners = new Set();
+
+    const mockDC = {
+      bufferedAmount: 2 * 1024 * 1024,
+      bufferedAmountLowThreshold: 0,
+      addEventListener(type, handler) {
+        if (type === 'bufferedamountlow') {
+          listeners.add(handler);
+        }
+      },
+      removeEventListener(type, handler) {
+        if (type === 'bufferedamountlow') {
+          listeners.delete(handler);
+        }
+      }
+    };
+
+    let resolved = false;
+    const promise = app.waitForBufferedAmountLow(mockDC, 512 * 1024).then(() => {
+      resolved = true;
+    });
+
+    assert.equal(resolved, false, 'Promise should be pending while buffer > threshold');
+    assert.equal(listeners.size, 1);
+
+    // Simulate async buffer drain and event dispatch
+    mockDC.bufferedAmount = 100 * 1024;
+    for (const handler of Array.from(listeners)) {
+      handler();
+    }
+
+    await promise;
+    assert.equal(resolved, true, 'Promise should resolve when event fires');
+    assert.equal(listeners.size, 0, 'Listener should be cleaned up');
+  });
+
+  test('waitForBufferedAmountLow handles pre-EOF zero threshold and defaults threshold to 0', async () => {
+    const listeners = new Set();
+    const mockDC = {
+      bufferedAmount: 1024,
+      bufferedAmountLowThreshold: 512,
+      addEventListener(type, handler) {
+        if (type === 'bufferedamountlow') {
+          listeners.add(handler);
+          this.bufferedAmount = 0; // drains to zero during listener attachment
+        }
+      },
+      removeEventListener(type, handler) {
+        if (type === 'bufferedamountlow') {
+          listeners.delete(handler);
+        }
+      }
+    };
+
+    let resolved = false;
+    // Omit threshold argument to test default threshold = 0 for pre-EOF flush
+    const promise = app.waitForBufferedAmountLow(mockDC).then(() => {
+      resolved = true;
+    });
+
+    await promise;
+    assert.equal(mockDC.bufferedAmountLowThreshold, 0, 'Threshold should default to 0');
+    assert.equal(resolved, true, 'Promise should resolve instantly when buffer drains to 0');
+    assert.equal(listeners.size, 0, 'Listener should be cleaned up after resolving');
+  });
 });
