@@ -198,6 +198,9 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
 
+      // Unregister signal interceptor after reaching fallback ready state
+      await page.unroute('**/api/signal/**');
+
       const [download] = await Promise.all([
         page.waitForEvent('download', { timeout: 30000 }),
         page.click('#btn-download'),

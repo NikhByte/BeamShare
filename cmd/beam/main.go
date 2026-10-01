@@ -673,7 +673,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									}
 								}
 
-								buffer := make([]byte, 64*1024) // 64KB chunk size
+								buffer := make([]byte, 32*1024) // 32KB chunk size
 								totalSent := reqOffset
 								start := time.Now()
 
