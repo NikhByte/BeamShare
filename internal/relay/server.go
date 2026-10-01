@@ -862,6 +862,14 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		} else {
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-/*", rng.start))
 		}
+	}
+
+	if !sess.EnqueueDownload(DownloadRequest{Offset: offset, Range: rangeHdr}) {
+		http.Error(w, "Download queue full", http.StatusServiceUnavailable)
+		return
+	}
+
+	if hasRange {
 		w.WriteHeader(http.StatusPartialContent)
 	} else {
 		w.WriteHeader(http.StatusOK)
@@ -900,9 +908,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
-
-	// Notify sender with offset/range
-	sess.EnqueueDownload(DownloadRequest{Offset: offset, Range: rangeHdr})
 
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
