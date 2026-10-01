@@ -182,3 +182,97 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 		t.Fatal("consecutive frames reused the same nonce")
 	}
 }
+
+func TestDecryptingReader_FrameHeaderValidation(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	t.Run("OversizedFrameHeader", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		// Header claims MaxFrameSize + 1
+		binary.Write(buf, binary.BigEndian, uint32(MaxFrameSize+1))
+		// Put dummy bytes in buffer
+		buf.Write(make([]byte, 100))
+
+		decReader, err := NewDecryptingReader(buf, key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		p := make([]byte, 1024)
+		_, err = decReader.Read(p)
+		if err != ErrFrameTooLarge {
+			t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+		}
+
+		// Verify that dummy payload bytes were NOT consumed from buf (all 100 bytes remain)
+		if buf.Len() != 100 {
+			t.Fatalf("expected 100 payload bytes remaining unread, got %d", buf.Len())
+		}
+	})
+
+	t.Run("ShortFrameHeaderLessThanNonce", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		// Header claims 5 bytes (< NonceSize 12)
+		binary.Write(buf, binary.BigEndian, uint32(5))
+		buf.Write([]byte("short"))
+
+		decReader, err := NewDecryptingReader(buf, key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		p := make([]byte, 1024)
+		_, err = decReader.Read(p)
+		if err != io.ErrUnexpectedEOF {
+			t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+		}
+	})
+}
+
+func TestDecryptingReader_ZeroAllocations(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// Produce frames of encrypted data
+	plainData := make([]byte, 64*1024)
+	encReader, err := NewEncryptingReader(bytes.NewReader(plainData), key)
+	if err != nil {
+		t.Fatalf("NewEncryptingReader failed: %v", err)
+	}
+
+	singleFrame, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("failed to read single frame: %v", err)
+	}
+
+	// Repeat singleFrame 105 times into a multiFrame buffer
+	multiFrame := bytes.Repeat(singleFrame, 105)
+	decReader, err := NewDecryptingReader(bytes.NewReader(multiFrame), key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	p := make([]byte, 64*1024)
+
+	// Warmup 1 frame
+	if _, err := decReader.Read(p); err != nil {
+		t.Fatalf("warmup Read failed: %v", err)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_, err := decReader.Read(p)
+		if err != nil {
+			t.Fatalf("Read failed during AllocsPerRun: %v", err)
+		}
+	})
+
+	if allocs > 0 {
+		t.Fatalf("expected 0 allocations per frame read, got %f", allocs)
+	}
+}
+
