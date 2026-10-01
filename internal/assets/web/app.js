@@ -1055,7 +1055,7 @@ async function getSWPipe(fileMeta) {
       return null;
     }
 
-    const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
+    const swUrl = apiPath(`/sw-download-pipe/${Math.random().toString(36).substring(2)}`);
     const channel = new MessageChannel();
     const port = channel.port1;
 
@@ -2443,11 +2443,15 @@ function renderFileCard(meta) {
 
 function triggerSave(blob, name) {
   const url = URL.createObjectURL(blob);
-  const a   = Object.assign(document.createElement('a'), { href: url, download: name, target: '_blank', rel: 'noopener' });
+  triggerSaveURL(url, name);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function triggerSaveURL(url, name) {
+  const a = Object.assign(document.createElement('a'), { href: url, download: name, target: '_blank', rel: 'noopener' });
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  setTimeout(() => a.remove(), 1000);
 }
 
 function appendTerminalText(text) {

@@ -38,6 +38,8 @@ self.addEventListener('message', (event) => {
 
   if (event.data && event.data.type === 'INIT_PORT') {
     const { url, filename, size, mime } = event.data;
+    const baseOrigin = (typeof self !== 'undefined' && self.location && self.location.origin) ? self.location.origin : 'https://beamshare.app';
+    const cleanUrl = new URL(url, baseOrigin).pathname;
     const port = event.ports && event.ports[0];
     if (!port) return;
 
@@ -53,8 +55,8 @@ self.addEventListener('message', (event) => {
         ttlTimer = null;
       }
 
-      if (streamMap.has(url)) {
-        streamMap.delete(url);
+      if (streamMap.has(cleanUrl)) {
+        streamMap.delete(cleanUrl);
       }
 
       try {
@@ -113,7 +115,7 @@ self.addEventListener('message', (event) => {
       cleanup();
     };
 
-    streamMap.set(url, { stream, filename, size, mime, cleanup, ttlTimer, port });
+    streamMap.set(cleanUrl, { stream, filename, size, mime, cleanup, ttlTimer, port });
     try {
       port.postMessage({ type: 'READY' });
     } catch (_) {}
