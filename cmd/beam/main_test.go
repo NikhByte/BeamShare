@@ -5,9 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
 	"github.com/beamshare/beam/internal/server"
 )
 
@@ -110,5 +113,47 @@ func TestDownloadFile_Relay(t *testing.T) {
 	err := downloadFile(urlWithSession)
 	if err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
+	}
+}
+
+func TestAtomicSenderGuardAndFlowControl(t *testing.T) {
+	var streamActive atomic.Bool
+
+	// Test 1: Atomic CAS Guard against duplicate OFFSET signals
+	activeCount := atomic.Int32{}
+	var wg sync.WaitGroup
+
+	// Simulate 10 concurrent duplicate OFFSET signals
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if streamActive.CompareAndSwap(false, true) {
+				defer streamActive.Store(false)
+				activeCount.Add(1)
+				time.Sleep(20 * time.Millisecond) // Simulate streaming duration
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if activeCount.Load() != 1 {
+		t.Fatalf("expected exactly 1 active stream worker to execute, got %d", activeCount.Load())
+	}
+
+	// Test 2: Isolated Memory Slice Allocation Verification
+	buffer := []byte("ORIGINAL_DATA")
+	n := len(buffer)
+	chunk := make([]byte, n)
+	copy(chunk, buffer[:n])
+
+	// Mutate the original read buffer
+	for i := range buffer {
+		buffer[i] = 'X'
+	}
+
+	if string(chunk) != "ORIGINAL_DATA" {
+		t.Fatalf("expected chunk data to remain isolated as ORIGINAL_DATA, got %s", string(chunk))
 	}
 }

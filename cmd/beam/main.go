@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -459,6 +460,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					uploaded   int64
 					uploadStat time.Time
 				)
+				var streamActive atomic.Bool
 
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
@@ -510,8 +512,13 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if len(parts) == 2 {
 								offset, _ = strconv.ParseInt(parts[1], 10, 64)
 							}
+							if !streamActive.CompareAndSwap(false, true) {
+								return
+							}
 							// File sender goroutine (Direct-to-Disk + Backpressure)
 							go func() {
+								defer streamActive.Store(false)
+
 								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
 								file, err := os.Open(filePath)
 								if err != nil {
@@ -549,14 +556,20 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								start := time.Now()
 
 								for {
-									// Backpressure check: wait if buffered amount > 1MB
-									if dc.BufferedAmount() > 1024*1024 {
-										<-bufferedAmountLowChan
+									// Backpressure check: wait if buffered amount > 1MB using polled non-blocking select
+									for dc.BufferedAmount() > 1024*1024 {
+										select {
+										case <-bufferedAmountLowChan:
+										case <-time.After(10 * time.Millisecond):
+										}
 									}
 
-									n, err := file.Read(buffer)
+									n, errRead := file.Read(buffer)
 									if n > 0 {
-										errSend := dc.Send(buffer[:n])
+										// Isolated heap slice allocation per chunk send
+										chunk := make([]byte, n)
+										copy(chunk, buffer[:n])
+										errSend := dc.Send(chunk)
 										if errSend != nil {
 											fmt.Printf("\n  Error sending chunk: %v\n", errSend)
 											return
@@ -568,15 +581,18 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 											ui.FormatBytes(fileSize),
 										)
 									}
-									if err != nil {
+									if errRead != nil {
 										break
 									}
 								}
 
-								// Wait for buffer to clear before sending EOF
+								// Wait for buffer to clear before sending EOF using polled non-blocking check
 								dc.SetBufferedAmountLowThreshold(0)
-								if dc.BufferedAmount() > 0 {
-									<-bufferedAmountLowChan
+								for dc.BufferedAmount() > 0 {
+									select {
+									case <-bufferedAmountLowChan:
+									case <-time.After(10 * time.Millisecond):
+									}
 								}
 								dc.SendText("EOF")
 
