@@ -107,7 +107,10 @@ func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err er
 }
 
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
-	if pr == nil || s.DataPipeR == pr {
+	dataMatched := pr == nil || s.DataPipeR == pr
+	uploadMatched := pr == nil || s.UploadPipeR == pr || (pw != nil && s.UploadPipeW == pw)
+
+	if dataMatched {
 		if s.DataPipeW != nil {
 			if err != nil {
 				s.DataPipeW.CloseWithError(err)
@@ -124,7 +127,28 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			}
 			s.DataPipeR = nil
 		}
-	} else {
+	}
+
+	if uploadMatched {
+		if s.UploadPipeW != nil {
+			if err != nil {
+				s.UploadPipeW.CloseWithError(err)
+			} else {
+				s.UploadPipeW.Close()
+			}
+			s.UploadPipeW = nil
+		}
+		if s.UploadPipeR != nil {
+			if err != nil {
+				s.UploadPipeR.CloseWithError(err)
+			} else {
+				s.UploadPipeR.Close()
+			}
+			s.UploadPipeR = nil
+		}
+	}
+
+	if !dataMatched && !uploadMatched {
 		if pw != nil {
 			if err != nil {
 				pw.CloseWithError(err)
@@ -1059,10 +1083,38 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		if part.FormName() == "file" {
 			sess.mu.Lock()
+			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
+				sess.closePipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new upload request"))
+			}
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
 			sess.mu.Unlock()
+
+			var copyErr error
+			defer func() {
+				sess.ClosePipesIfMatch(pr, pw, copyErr)
+			}()
+
+			done := make(chan struct{})
+			defer close(done)
+
+			go func() {
+				select {
+				case <-done:
+					return
+				case <-r.Context().Done():
+					select {
+					case <-done:
+						return
+					default:
+						if r.Body != nil {
+							r.Body.Close()
+						}
+						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("uploader context cancelled: %w", r.Context().Err()))
+					}
+				}
+			}()
 
 			// Notify sender
 			select {
@@ -1071,9 +1123,15 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Stream data to pipe
-			_, err = io.Copy(pw, part)
-			pw.CloseWithError(err)
-			part.Close()
+			_, copyErr = io.Copy(pw, part)
+			if copyErr == nil {
+				_, copyErr = pw.Write(nil)
+			}
+			if copyErr != nil {
+				http.Error(w, fmt.Sprintf("upload stream error: %v", copyErr), http.StatusInternalServerError)
+				return
+			}
+			pw.Close()
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})
@@ -1100,6 +1158,28 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var copyErr error
+	defer func() {
+		sess.ClosePipesIfMatch(pr, nil, copyErr)
+	}()
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-r.Context().Done():
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipesIfMatch(pr, nil, fmt.Errorf("pull context cancelled: %w", r.Context().Err()))
+			}
+		}
+	}()
+
 	w.Header().Set("Content-Type", "application/octet-stream")
-	io.Copy(w, pr)
+	_, copyErr = io.Copy(w, pr)
 }

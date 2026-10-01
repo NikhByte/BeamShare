@@ -3,6 +3,8 @@ package relay
 import (
 	"context"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -259,6 +261,257 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestSession_ClosePipesClosesUploadPipes(t *testing.T) {
+	pr, pw := io.Pipe()
+	sess := &Session{
+		ID:          "test-upload-pipes",
+		UploadPipeR: pr,
+		UploadPipeW: pw,
+	}
+
+	testErr := fmt.Errorf("custom cleanup error")
+	sess.ClosePipes(testErr)
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR, "UploadPipeR should be nil after ClosePipes")
+	assert.Nil(t, sess.UploadPipeW, "UploadPipeW should be nil after ClosePipes")
+	sess.mu.Unlock()
+
+	// Verify writing to pw returns error
+	_, err := pw.Write([]byte("test"))
+	assert.Error(t, err)
+
+	// Verify reading from pr returns error
+	buf := make([]byte, 10)
+	_, err = pr.Read(buf)
+	assert.Error(t, err)
+}
+
+func TestServer_SweepExpiredSessionsUnblocksUploadAndPull(t *testing.T) {
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	ctx := context.Background()
+
+	sessID, err := client.Register(ctx)
+	require.NoError(t, err)
+
+	// Create a pipe for body to simulate a continuous upload
+	bodyR, bodyW := io.Pipe()
+
+	// Build multipart request
+	bodyPr, bodyPw := io.Pipe()
+	writer := multipart.NewWriter(bodyPw)
+
+	go func() {
+		defer bodyPw.Close()
+		partWriter, err := writer.CreateFormFile("file", "upload_test.dat")
+		if err != nil {
+			return
+		}
+		io.Copy(partWriter, bodyR)
+		writer.Close()
+	}()
+
+	uploadErrCh := make(chan error, 1)
+	uploadStatusCh := make(chan int, 1)
+
+	uploadCtx, uploadCancel := context.WithCancel(context.Background())
+	defer uploadCancel()
+
+	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyPr)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	httpClient := newTestHTTPClient()
+	defer httpClient.CloseIdleConnections()
+
+	go func() {
+		defer bodyR.Close()
+		defer bodyW.Close()
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			uploadErrCh <- err
+			return
+		}
+		uploadStatusCh <- resp.StatusCode
+		resp.Body.Close()
+	}()
+
+	// Write initial chunk to trigger part receiving in handleUpload
+	_, err = bodyW.Write([]byte("initial chunk\n"))
+	require.NoError(t, err)
+
+	// Wait until session creates UploadPipeR
+	assert.Eventually(t, func() bool {
+		sess := srv.GetSession(sessID)
+		if sess == nil {
+			return false
+		}
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil
+	}, 2*time.Second, 10*time.Millisecond, "UploadPipeR should be set")
+
+	// Start handlePull in background
+	pullErrCh := make(chan error, 1)
+	pullStatusCh := make(chan int, 1)
+	pullReq, err := http.NewRequest(http.MethodGet, ts.URL+"/relay/pull?session="+sessID, nil)
+	require.NoError(t, err)
+
+	go func() {
+		resp, err := httpClient.Do(pullReq)
+		if err != nil {
+			pullErrCh <- err
+			return
+		}
+		pullStatusCh <- resp.StatusCode
+		io.ReadAll(resp.Body)
+		resp.Body.Close()
+	}()
+
+	// Wait for session to expire via sweeper
+	assert.Eventually(t, func() bool {
+		return srv.GetSession(sessID) == nil
+	}, 2*time.Second, 10*time.Millisecond, "Session should expire and be removed")
+
+	// Send another chunk and close upload body so client request body reaches EOF
+	bodyW.Write([]byte("chunk 2\n"))
+	bodyR.Close()
+	bodyW.Close()
+
+	select {
+	case status := <-uploadStatusCh:
+		assert.Equal(t, http.StatusInternalServerError, status, "handleUpload should return HTTP 500 when session expires during upload")
+	case err := <-uploadErrCh:
+		t.Fatalf("unexpected upload HTTP do error: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("upload handler did not unblock after session expiration")
+	}
+
+	select {
+	case status := <-pullStatusCh:
+		assert.Equal(t, http.StatusOK, status)
+	case err := <-pullErrCh:
+		t.Fatalf("unexpected pull HTTP do error: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("pull handler did not unblock after session expiration")
+	}
+}
+
+func TestServer_ReplacedUploadClosesPreviousPipes(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	ctx := context.Background()
+
+	sessID, err := client.Register(ctx)
+	require.NoError(t, err)
+
+	sess := srv.GetSession(sessID)
+	require.NotNil(t, sess)
+
+	// First upload request
+	bodyR1, bodyW1 := io.Pipe()
+	bodyPr1, bodyPw1 := io.Pipe()
+	writer1 := multipart.NewWriter(bodyPw1)
+
+	go func() {
+		defer bodyPw1.Close()
+		partWriter, err := writer1.CreateFormFile("file", "first.dat")
+		if err != nil {
+			return
+		}
+		io.Copy(partWriter, bodyR1)
+		writer1.Close()
+	}()
+
+	httpClient := newTestHTTPClient()
+	defer httpClient.CloseIdleConnections()
+
+	req1, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyPr1)
+	require.NoError(t, err)
+	req1.Header.Set("Content-Type", writer1.FormDataContentType())
+
+	upload1StatusCh := make(chan int, 1)
+	go func() {
+		defer bodyR1.Close()
+		defer bodyW1.Close()
+		resp, err := httpClient.Do(req1)
+		if err == nil {
+			upload1StatusCh <- resp.StatusCode
+			resp.Body.Close()
+		}
+	}()
+
+	bodyW1.Write([]byte("chunk 1"))
+
+	var oldPipeW *io.PipeWriter
+	assert.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		oldPipeW = sess.UploadPipeW
+		return oldPipeW != nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Second upload request replaces first
+	bodyR2, bodyW2 := io.Pipe()
+	bodyPr2, bodyPw2 := io.Pipe()
+	writer2 := multipart.NewWriter(bodyPw2)
+
+	go func() {
+		defer bodyPw2.Close()
+		partWriter, err := writer2.CreateFormFile("file", "second.dat")
+		if err != nil {
+			return
+		}
+		io.Copy(partWriter, bodyR2)
+		writer2.Close()
+	}()
+
+	req2, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyPr2)
+	require.NoError(t, err)
+	req2.Header.Set("Content-Type", writer2.FormDataContentType())
+
+	upload2StatusCh := make(chan int, 1)
+	go func() {
+		defer bodyR2.Close()
+		defer bodyW2.Close()
+		resp, err := httpClient.Do(req2)
+		if err == nil {
+			upload2StatusCh <- resp.StatusCode
+			resp.Body.Close()
+		}
+	}()
+
+	go func() {
+		bodyW2.Write([]byte("chunk 2"))
+		bodyW2.Close()
+		bodyR2.Close()
+	}()
+
+	select {
+	case status := <-upload1StatusCh:
+		assert.Equal(t, http.StatusInternalServerError, status, "First upload should be terminated with error when replaced")
+	case <-time.After(2 * time.Second):
+		t.Fatal("First upload did not unblock after replacement")
+	}
+
+	// Verify oldPipeW returns error on Write
+	_, err = oldPipeW.Write([]byte("after replace"))
+	assert.Error(t, err)
+
+	sess.ClosePipes(nil)
 }
 
 
