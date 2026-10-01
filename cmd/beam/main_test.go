@@ -5,9 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-
 	"reflect"
 	"testing"
+	"time"
+
 	"github.com/beamshare/beam/internal/server"
 )
 
@@ -110,5 +111,61 @@ func TestDownloadFile_Relay(t *testing.T) {
 	err := downloadFile(urlWithSession)
 	if err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
+	}
+}
+
+func TestPauseController(t *testing.T) {
+	pc := newPauseController()
+
+	// Initial state: not paused, not closed
+	if !pc.WaitIfPaused() {
+		t.Fatal("expected WaitIfPaused to return true when not closed")
+	}
+
+	// Test Pause & Resume
+	pc.Pause()
+
+	unblocked := make(chan bool)
+	go func() {
+		res := pc.WaitIfPaused()
+		unblocked <- res
+	}()
+
+	// Ensure goroutine is waiting
+	select {
+	case <-unblocked:
+		t.Fatal("expected WaitIfPaused to block while paused")
+	default:
+	}
+
+	pc.Resume()
+
+	select {
+	case res := <-unblocked:
+		if !res {
+			t.Fatal("expected WaitIfPaused to return true on Resume")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for Resume unblock")
+	}
+
+	// Test Pause & Close
+	pc.Pause()
+
+	closedCh := make(chan bool)
+	go func() {
+		res := pc.WaitIfPaused()
+		closedCh <- res
+	}()
+
+	pc.Close()
+
+	select {
+	case res := <-closedCh:
+		if res {
+			t.Fatal("expected WaitIfPaused to return false on Close")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for Close unblock")
 	}
 }
