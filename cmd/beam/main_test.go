@@ -5,10 +5,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-
 	"reflect"
 	"testing"
+	"time"
+
 	"github.com/beamshare/beam/internal/server"
+	"github.com/pion/webrtc/v3"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -111,4 +114,122 @@ func TestDownloadFile_Relay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
 	}
+}
+
+func TestActiveChannelsPruningOnClose(t *testing.T) {
+	channelsMu.Lock()
+	activeChannels = nil
+	channelsMu.Unlock()
+	defer func() {
+		channelsMu.Lock()
+		activeChannels = nil
+		channelsMu.Unlock()
+	}()
+
+	api := webrtc.NewAPI()
+	pc1, err := api.NewPeerConnection(webrtc.Configuration{})
+	require.NoError(t, err)
+	defer pc1.Close()
+
+	pc2, err := api.NewPeerConnection(webrtc.Configuration{})
+	require.NoError(t, err)
+	defer pc2.Close()
+
+	pc1.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			_ = pc2.AddICECandidate(c.ToJSON())
+		}
+	})
+	pc2.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			_ = pc1.AddICECandidate(c.ToJSON())
+		}
+	})
+
+	dc1Open := make(chan struct{})
+	dc2Open := make(chan struct{})
+
+	dc1, err := pc1.CreateDataChannel("live1", nil)
+	require.NoError(t, err)
+	dc1.OnOpen(func() {
+		channelsMu.Lock()
+		dc1.OnClose(func() {
+			channelsMu.Lock()
+			defer channelsMu.Unlock()
+			var updated []*webrtc.DataChannel
+			for _, ch := range activeChannels {
+				if ch != dc1 {
+					updated = append(updated, ch)
+				}
+			}
+			activeChannels = updated
+		})
+		activeChannels = append(activeChannels, dc1)
+		channelsMu.Unlock()
+		close(dc1Open)
+	})
+
+	dc2, err := pc1.CreateDataChannel("live2", nil)
+	require.NoError(t, err)
+	dc2.OnOpen(func() {
+		channelsMu.Lock()
+		dc2.OnClose(func() {
+			channelsMu.Lock()
+			defer channelsMu.Unlock()
+			var updated []*webrtc.DataChannel
+			for _, ch := range activeChannels {
+				if ch != dc2 {
+					updated = append(updated, ch)
+				}
+			}
+			activeChannels = updated
+		})
+		activeChannels = append(activeChannels, dc2)
+		channelsMu.Unlock()
+		close(dc2Open)
+	})
+
+	offer, err := pc1.CreateOffer(nil)
+	require.NoError(t, err)
+	require.NoError(t, pc1.SetLocalDescription(offer))
+	require.NoError(t, pc2.SetRemoteDescription(offer))
+
+	answer, err := pc2.CreateAnswer(nil)
+	require.NoError(t, err)
+	require.NoError(t, pc2.SetLocalDescription(answer))
+	require.NoError(t, pc1.SetRemoteDescription(answer))
+
+	select {
+	case <-dc1Open:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for dc1 open")
+	}
+	select {
+	case <-dc2Open:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for dc2 open")
+	}
+
+	channelsMu.Lock()
+	count := len(activeChannels)
+	channelsMu.Unlock()
+	require.Equal(t, 2, count)
+
+	// Close dc1
+	require.NoError(t, dc1.Close())
+
+	require.Eventually(t, func() bool {
+		channelsMu.Lock()
+		defer channelsMu.Unlock()
+		return len(activeChannels) == 1 && activeChannels[0] == dc2
+	}, 5*time.Second, 50*time.Millisecond)
+
+	// Close dc2
+	require.NoError(t, dc2.Close())
+
+	require.Eventually(t, func() bool {
+		channelsMu.Lock()
+		defer channelsMu.Unlock()
+		return len(activeChannels) == 0
+	}, 5*time.Second, 50*time.Millisecond)
 }
