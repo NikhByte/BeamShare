@@ -786,32 +786,49 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
+    // Verify QR image element is rendered locally as an SVG data URL without calling api.qrserver.com
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
+    assert.notEqual(qrImg, null);
+    assert.equal(qrImg.src.startsWith('data:image/svg+xml;'), true);
     assert.equal(qrImg.src.includes('api.qrserver.com'), false);
+    assert.equal(qrImg.src.length > 100, true);
   });
 
-  test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
-    let externalCallMade = false;
-    const origFetch = global.fetch;
-    global.fetch = async (url, opts) => {
-      if (typeof url === 'string' && (url.includes('qrserver.com') || url.includes('/api/qr'))) {
-        externalCallMade = true;
-      }
-      return origFetch(url, opts);
+  test('startSenderSharing renders local QR code SVG with full share link including secret key fragment and zero external network calls', async () => {
+    const fetchCalls = [];
+    window.fetch = async (url, opts) => {
+      fetchCalls.push(url);
+      if (url.includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ session: 'mock-session-456' }) };
     };
+    global.fetch = window.fetch;
 
     await app.startSenderSharing();
 
-    assert.equal(externalCallMade, false, 'No external QR API requests should be made');
-
-    const sendCanvas = document.getElementById('send-qr-canvas');
-    assert.notEqual(sendCanvas, null);
-
+    const qrImg = document.getElementById('send-qr-img');
     const urlInput = document.getElementById('send-url-input');
-    assert.ok(urlInput.value.includes('#k='));
+
+    // 1. Verify zero calls to external domains or api.qrserver.com
+    const qrServerCalls = fetchCalls.filter(call => call.includes('qrserver.com'));
+    assert.equal(qrServerCalls.length, 0, 'No requests must be made to api.qrserver.com');
+
+    // 2. Verify send-qr-img src is a local inline SVG data URL
+    assert.equal(qrImg.src.startsWith('data:image/svg+xml;'), true);
+    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
+
+    // 3. Verify the share input URL includes secret key fragment (#k=...)
+    assert.equal(urlInput.value.includes('#k='), true);
+    assert.equal(qrImg.src.length > 100, true);
+  });
+
+  test('generateQRCodeSVG produces valid local SVG data URL for URLs with hash parameters', () => {
+    const shareURL = 'http://localhost:8080/?s=test-session&mode=webrtc#k=dGVzdC1rZXktMTIzNDU2Nzg5MA==';
+    const svgDataURL = app.generateQRCodeSVG(shareURL);
+
+    assert.equal(svgDataURL.startsWith('data:image/svg+xml;charset=utf-8,'), true);
+    assert.equal(svgDataURL.includes('api.qrserver.com'), false);
+    assert.equal(svgDataURL.includes('%3Csvg'), true);
+    assert.equal(svgDataURL.length > 100, true);
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
