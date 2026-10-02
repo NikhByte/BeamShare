@@ -821,13 +821,31 @@ function setMode(mode, label) {
 
 // ── Service Worker Pipe ───────────────────────────────────────────────────────
 async function getSWPipe(fileMeta) {
+  // Service Worker pipe synthetic iframe downloads do not trigger browser downloads in Firefox
+  const isFirefox = typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.includes('Firefox');
+  if (isFirefox) return null;
+
   if (!('serviceWorker' in navigator)) return null;
 
   try {
     const swReady = navigator.serviceWorker.ready;
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 5000));
     const reg = await Promise.race([swReady, timeout]);
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
+    if (!reg) return null;
+
+    let sw = navigator.serviceWorker.controller;
+    if (!sw) {
+      await new Promise(resolve => {
+        if (navigator.serviceWorker.controller) { resolve(); return; }
+        const onControllerChange = () => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          resolve();
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+        setTimeout(resolve, 1500);
+      });
+      sw = navigator.serviceWorker.controller;
+    }
     if (!sw) return null;
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
@@ -1022,6 +1040,22 @@ function init() {
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(err => {
       console.warn('Service Worker registration failed:', err);
     });
+    navigator.serviceWorker.ready.then(() => {
+      const markReady = () => {
+        document.documentElement.setAttribute('data-sw-ready', 'true');
+        if (document.body) {
+          document.body.setAttribute('data-sw-ready', 'true');
+        }
+      };
+      if (navigator.serviceWorker.controller) {
+        markReady();
+      } else {
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          markReady();
+        }, { once: true });
+        setTimeout(markReady, 100);
+      }
+    }).catch(() => {});
   }
 
   setState('loading');
@@ -1645,7 +1679,10 @@ async function startWebRTC() {
   setWebRTCSub('Waiting for data channel…');
   const dc = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('data channel timeout')), 30000);
-    pc.ondatachannel = (e) => { clearTimeout(timer); resolve(e.channel); };
+    pc.ondatachannel = (e) => {
+      clearTimeout(timer);
+      resolve(e.channel);
+    };
   });
   markStep('step-open');
   webrtcDataChannel = dc;
@@ -1772,10 +1809,24 @@ async function startWebRTC() {
 
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
+      let offsetSent = false;
+      const sendOffset = () => {
+        if (offsetSent) return;
+        offsetSent = true;
+        try {
+          dc.send(`OFFSET:${initialOffset}`);
+        } catch (err) {
+          console.error('Error sending OFFSET:', err);
+        }
+      };
+
       if (dc.readyState === 'open') {
-        dc.send(`OFFSET:${initialOffset}`);
+        sendOffset();
       } else {
-        dc.onopen = () => dc.send(`OFFSET:${initialOffset}`);
+        dc.addEventListener('open', sendOffset, { once: true });
+        if (dc.readyState === 'open') {
+          sendOffset();
+        }
       }
 
       const chunkQueue = new SequentialChunkQueue({
@@ -1962,7 +2013,16 @@ function triggerSave(blob, name) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  try {
+    const iframe = document.createElement('iframe');
+    iframe.hidden = true;
+    iframe.src = url;
+    document.body.appendChild(iframe);
+    setTimeout(() => {
+      try { document.body.removeChild(iframe); } catch(e) {}
+    }, 5000);
+  } catch (_) {}
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
 function appendTerminalText(text) {

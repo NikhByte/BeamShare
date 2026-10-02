@@ -101,6 +101,16 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
 
+      // Wait for service worker activation before clicking download trigger
+      await page.evaluate(async () => {
+        if ('serviceWorker' in navigator) {
+          await navigator.serviceWorker.ready;
+        }
+      });
+      await expect(page.locator('[data-sw-ready="true"]')).toBeVisible({ timeout: 15000 }).catch(() => {});
+
+      await page.screenshot({ path: '/tmp/transfer-matrix-sw-ready.png' });
+
       const downloadPromise = page.waitForEvent('download', { timeout: 30000 });
 
       // Click Download File button
@@ -109,6 +119,8 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       // State transition: downloading -> done
       await expect(page.locator('#state-done')).toBeVisible({ timeout: 30000 });
       await expect(page.locator('#done-title')).toHaveText(/Transfer complete|File Shared/i);
+
+      await page.screenshot({ path: '/tmp/transfer-matrix-done.png' });
 
       const download = await downloadPromise;
       const downloadPath = await download.path();
@@ -150,6 +162,14 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 20000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
 
+      // Wait for service worker activation before clicking download trigger
+      await page.evaluate(async () => {
+        if ('serviceWorker' in navigator) {
+          await navigator.serviceWorker.ready;
+        }
+      });
+      await expect(page.locator('[data-sw-ready="true"]')).toBeVisible({ timeout: 15000 }).catch(() => {});
+
       const downloadPromise = page.waitForEvent('download', { timeout: 30000 });
 
       // Click Download button
@@ -190,6 +210,14 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       // WebRTC attempt will fail due to aborted signaling, and app should seamlessly transition to HTTP ready state
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
+
+      // Wait for service worker activation before clicking download trigger
+      await page.evaluate(async () => {
+        if ('serviceWorker' in navigator) {
+          await navigator.serviceWorker.ready;
+        }
+      });
+      await expect(page.locator('[data-sw-ready="true"]')).toBeVisible({ timeout: 15000 }).catch(() => {});
 
       const downloadPromise = page.waitForEvent('download', { timeout: 30000 });
 
