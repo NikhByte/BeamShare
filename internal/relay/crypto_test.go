@@ -82,18 +82,83 @@ func TestEncryptDecryptEmptyData(t *testing.T) {
 }
 
 func TestInvalidKeyLengths(t *testing.T) {
-	invalidKeyLengths := []int{1, 10, 16, 24, 31, 33, 64}
-	for _, length := range invalidKeyLengths {
-		invalidKey := make([]byte, length)
-		_, err := NewEncryptingReader(bytes.NewReader([]byte("test")), invalidKey)
-		if err == nil {
-			t.Fatalf("expected error for key length %d in NewEncryptingReader, got nil", length)
-		}
+	testKeys := []struct {
+		name string
+		key  []byte
+	}{
+		{"nil key", nil},
+		{"empty key", []byte{}},
+		{"short key 10", make([]byte, 10)},
+		{"AES-128 key 16", make([]byte, 16)},
+		{"AES-192 key 24", make([]byte, 24)},
+		{"long key 31", make([]byte, 31)},
+		{"long key 33", make([]byte, 33)},
+		{"long key 40", make([]byte, 40)},
+		{"long key 64", make([]byte, 64)},
+	}
 
-		_, err = NewDecryptingReader(bytes.NewReader([]byte("test")), invalidKey)
-		if err == nil {
-			t.Fatalf("expected error for key length %d in NewEncryptingReader, got nil", length)
-		}
+	for _, tc := range testKeys {
+		t.Run("NewEncryptingWriter_"+tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			_, err := NewEncryptingWriter(&buf, tc.key)
+			if !errors.Is(err, ErrInvalidKeySize) {
+				t.Fatalf("expected ErrInvalidKeySize for key length %d, got %v", len(tc.key), err)
+			}
+		})
+
+		t.Run("NewEncryptingReader_"+tc.name, func(t *testing.T) {
+			_, err := NewEncryptingReader(bytes.NewReader([]byte("test")), tc.key)
+			if !errors.Is(err, ErrInvalidKeySize) {
+				t.Fatalf("expected ErrInvalidKeySize for key length %d, got %v", len(tc.key), err)
+			}
+		})
+
+		t.Run("NewDecryptingReader_"+tc.name, func(t *testing.T) {
+			_, err := NewDecryptingReader(bytes.NewReader([]byte("test")), tc.key)
+			if !errors.Is(err, ErrInvalidKeySize) {
+				t.Fatalf("expected ErrInvalidKeySize for key length %d, got %v", len(tc.key), err)
+			}
+		})
+	}
+}
+
+func TestEncryptingWriterRoundTrip(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	originalData := make([]byte, 150*1024)
+	if _, err := io.ReadFull(rand.Reader, originalData); err != nil {
+		t.Fatalf("failed to generate random data: %v", err)
+	}
+
+	var buf bytes.Buffer
+	writer, err := NewEncryptingWriter(&buf, key)
+	if err != nil {
+		t.Fatalf("NewEncryptingWriter failed: %v", err)
+	}
+
+	n, err := writer.Write(originalData)
+	if err != nil {
+		t.Fatalf("writer.Write failed: %v", err)
+	}
+	if n != len(originalData) {
+		t.Fatalf("expected to write %d bytes, wrote %d", len(originalData), n)
+	}
+
+	decReader, err := NewDecryptingReader(&buf, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	decryptedData, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("reading decrypted data failed: %v", err)
+	}
+
+	if !bytes.Equal(decryptedData, originalData) {
+		t.Fatal("decrypted data does not match original data")
 	}
 }
 
