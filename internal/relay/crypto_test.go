@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 )
@@ -81,15 +82,34 @@ func TestEncryptDecryptEmptyData(t *testing.T) {
 }
 
 func TestInvalidKeyLengths(t *testing.T) {
-	invalidKey := make([]byte, 10) // Invalid for AES (requires 16, 24, or 32)
-	_, err := NewEncryptingReader(bytes.NewReader([]byte("test")), invalidKey)
-	if err == nil {
-		t.Fatal("expected error for invalid key length in NewEncryptingReader, got nil")
+	invalidKeys := map[string][]byte{
+		"short-10":   make([]byte, 10),
+		"short-16":   make([]byte, 16),
+		"short-24":   make([]byte, 24),
+		"long-40":    make([]byte, 40),
+		"long-64":    make([]byte, 64),
+		"empty":      []byte{},
+		"nil":        nil,
 	}
 
-	_, err = NewDecryptingReader(bytes.NewReader([]byte("test")), invalidKey)
-	if err == nil {
-		t.Fatal("expected error for invalid key length in NewDecryptingReader, got nil")
+	for name, key := range invalidKeys {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewEncryptingReader(bytes.NewReader([]byte("test")), key)
+			if !errors.Is(err, ErrInvalidKeySize) {
+				t.Errorf("NewEncryptingReader expected ErrInvalidKeySize for %s key, got: %v", name, err)
+			}
+
+			_, err = NewDecryptingReader(bytes.NewReader([]byte("test")), key)
+			if !errors.Is(err, ErrInvalidKeySize) {
+				t.Errorf("NewDecryptingReader expected ErrInvalidKeySize for %s key, got: %v", name, err)
+			}
+
+			var buf bytes.Buffer
+			_, err = NewEncryptingWriter(&buf, key)
+			if !errors.Is(err, ErrInvalidKeySize) {
+				t.Errorf("NewEncryptingWriter expected ErrInvalidKeySize for %s key, got: %v", name, err)
+			}
+		})
 	}
 }
 

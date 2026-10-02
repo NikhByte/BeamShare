@@ -5,8 +5,11 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 )
+
+var ErrInvalidKeySize = errors.New("invalid key size: must be 32 bytes")
 
 type EncryptingReader struct {
 	r     io.Reader
@@ -16,6 +19,9 @@ type EncryptingReader struct {
 }
 
 func NewEncryptingReader(r io.Reader, key []byte) (*EncryptingReader, error) {
+	if len(key) != 32 {
+		return nil, ErrInvalidKeySize
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -65,6 +71,51 @@ func (er *EncryptingReader) Read(p []byte) (int, error) {
 	return 0, err
 }
 
+type EncryptingWriter struct {
+	w   io.Writer
+	gcm cipher.AEAD
+}
+
+func NewEncryptingWriter(w io.Writer, key []byte) (*EncryptingWriter, error) {
+	if len(key) != 32 {
+		return nil, ErrInvalidKeySize
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	return &EncryptingWriter{
+		w:   w,
+		gcm: gcm,
+	}, nil
+}
+
+func (ew *EncryptingWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	nonce := make([]byte, ew.gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return 0, err
+	}
+
+	ciphertext := ew.gcm.Seal(nil, nonce, p, nil)
+
+	frame := make([]byte, 4+len(nonce)+len(ciphertext))
+	binary.BigEndian.PutUint32(frame[0:4], uint32(len(nonce)+len(ciphertext)))
+	copy(frame[4:4+len(nonce)], nonce)
+	copy(frame[4+len(nonce):], ciphertext)
+
+	if _, err := ew.w.Write(frame); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
 type DecryptingReader struct {
 	r   io.Reader
 	gcm cipher.AEAD
@@ -72,6 +123,9 @@ type DecryptingReader struct {
 }
 
 func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
+	if len(key) != 32 {
+		return nil, ErrInvalidKeySize
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
