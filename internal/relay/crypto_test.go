@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"runtime"
 	"testing"
 )
 
@@ -413,5 +414,41 @@ func BenchmarkDecryptingReaderRead(b *testing.B) {
 		if err != nil {
 			b.Fatalf("Read failed during benchmark: %v", err)
 		}
+	}
+}
+func TestOversizedFrameHeader(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// 1GB frame header (1073741824 bytes)
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.BigEndian, uint32(1073741824)); err != nil {
+		t.Fatalf("failed to write header: %v", err)
+	}
+
+	decReader, err := NewDecryptingReader(buf, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	var m1, m2 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m1)
+
+	out := make([]byte, 64)
+	_, err = decReader.Read(out)
+	if err != ErrFrameTooLarge {
+		t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+	}
+
+	runtime.GC()
+	runtime.ReadMemStats(&m2)
+
+	// Verify memory allocation remained flat (no 1GB allocation)
+	const maxAllowedAlloc = 10 * 1024 * 1024 // 10MB
+	if m2.TotalAlloc-m1.TotalAlloc > maxAllowedAlloc {
+		t.Fatalf("memory increased excessively: %d bytes allocated", m2.TotalAlloc-m1.TotalAlloc)
 	}
 }
