@@ -7,19 +7,40 @@ function getBackendURL() {
       backend = 'https://beamshare.onrender.com';
     }
   }
+  if (backend.includes('?')) {
+    backend = backend.split('?')[0];
+  }
   if (backend && backend.endsWith('/')) {
     backend = backend.slice(0, -1);
   }
   return backend;
 }
 
+function getSessionToken() {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get('token') || params.get('t');
+  if (token) return token;
+
+  let backend = params.get('backend') || params.get('b') || params.get('local') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
+  if (backend && backend.includes('?')) {
+    const q = backend.split('?')[1];
+    const bParams = new URLSearchParams(q);
+    token = bParams.get('token') || bParams.get('t');
+  }
+  return token || '';
+}
+
 function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  const token = getSessionToken();
   let fullPath = path;
   if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+    fullPath = fullPath.includes('?') ? fullPath + '&s=' + s : fullPath + '?s=' + s;
+  }
+  if (token) {
+    fullPath = fullPath.includes('?') ? fullPath + '&token=' + encodeURIComponent(token) : fullPath + '?token=' + encodeURIComponent(token);
   }
   if (backend) {
     return backend + fullPath;
@@ -1203,7 +1224,8 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      const localMetaURL = localURL.includes('?') ? localURL.replace('?', '/api/meta?') : `${localURL}/api/meta`;
+      const res = await fetch(localMetaURL, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
@@ -1375,6 +1397,10 @@ async function startHTTPDownload() {
 
   try {
     const headers = {};
+    const token = new URLSearchParams(window.location.search).get('token') || new URLSearchParams(window.location.search).get('t');
+    if (token) {
+      headers['Authorization'] = 'Bearer ' + token;
+    }
     if (initialOffset > 0) {
       headers['Range'] = `bytes=${initialOffset}-`;
     }
