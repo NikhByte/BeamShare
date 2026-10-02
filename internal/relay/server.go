@@ -124,7 +124,28 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			}
 			s.DataPipeR = nil
 		}
-	} else {
+	}
+
+	if pr == nil || s.UploadPipeR == pr {
+		if s.UploadPipeW != nil {
+			if err != nil {
+				s.UploadPipeW.CloseWithError(err)
+			} else {
+				s.UploadPipeW.Close()
+			}
+			s.UploadPipeW = nil
+		}
+		if s.UploadPipeR != nil {
+			if err != nil {
+				s.UploadPipeR.CloseWithError(err)
+			} else {
+				s.UploadPipeR.Close()
+			}
+			s.UploadPipeR = nil
+		}
+	}
+
+	if pr != nil && s.DataPipeR != pr && s.UploadPipeR != pr {
 		if pw != nil {
 			if err != nil {
 				pw.CloseWithError(err)
@@ -871,7 +892,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	sess.mu.Lock()
 	if sess.DataPipeR != nil || sess.DataPipeW != nil {
-		sess.closePipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new download request"))
+		sess.closePipesIfMatchLocked(sess.DataPipeR, sess.DataPipeW, fmt.Errorf("replaced by new download request"))
 	}
 	sess.DataPipeR = pr
 	sess.DataPipeW = pw
@@ -1059,6 +1080,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		if part.FormName() == "file" {
 			sess.mu.Lock()
+			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
+				sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
+			}
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
@@ -1074,6 +1098,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			_, err = io.Copy(pw, part)
 			pw.CloseWithError(err)
 			part.Close()
+
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})

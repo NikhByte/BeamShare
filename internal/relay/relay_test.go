@@ -980,5 +980,116 @@ func TestRelayClient_ExponentialBackoffCustomConfig(t *testing.T) {
 	assert.Equal(t, 5*time.Second, custom.CalculateBackoff(20))
 }
 
+func TestSession_ClosePipes_UploadPipeCleanup(t *testing.T) {
+	sess := &Session{ID: "test-pipes-sess"}
+
+	pr, pw := io.Pipe()
+	sess.UploadPipeR = pr
+	sess.UploadPipeW = pw
+
+	expectedErr := fmt.Errorf("session expired")
+
+	writeErrCh := make(chan error, 1)
+	go func() {
+		_, err := pw.Write([]byte("hello world"))
+		writeErrCh <- err
+	}()
+
+	time.Sleep(10 * time.Millisecond) // Ensure write is blocked
+
+	sess.ClosePipes(expectedErr)
+
+	select {
+	case err := <-writeErrCh:
+		require.Error(t, err)
+		t.Logf("Write returned error: %v", err)
+	case <-time.After(1 * time.Second):
+		t.Fatal("pw.Write did not unblock after ClosePipes")
+	}
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+}
+
+func TestServer_UploadPipeCleanupOnSessionExpiry(t *testing.T) {
+	srv := NewServerWithConfig(100*time.Millisecond, 20*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	ctx := context.Background()
+
+	sessID, err := client.Register(ctx)
+	require.NoError(t, err)
+
+	sess := srv.getSession(sessID)
+	require.NotNil(t, sess)
+
+	// Create a pipe for streaming multipart body to simulate an active, ongoing file upload
+	bodyPr, bodyPw := io.Pipe()
+	defer bodyPw.Close()
+
+	uploadDone := make(chan error, 1)
+
+	go func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyPr)
+		if err != nil {
+			uploadDone <- err
+			return
+		}
+		// Use a custom multipart boundary
+		boundary := "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+		req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			uploadDone <- err
+			return
+		}
+		resp.Body.Close()
+		uploadDone <- nil
+	}()
+
+	// Write opening boundary and part headers, but keep data streaming open
+	boundary := "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+	header := fmt.Sprintf("--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"testupload.txt\"\r\nContent-Type: text/plain\r\n\r\nSome initial chunk of data...", boundary)
+	_, err = bodyPw.Write([]byte(header))
+	require.NoError(t, err)
+
+	// Wait until session has set UploadPipeR and UploadPipeW
+	require.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil && sess.UploadPipeW != nil
+	}, 2*time.Second, 10*time.Millisecond, "Upload pipes were not set in time")
+
+	// Expire session and trigger cleanup
+	sess.mu.Lock()
+	sess.expiresAt = time.Now().Add(-1 * time.Second)
+	sess.mu.Unlock()
+
+	srv.SweepExpiredSessions()
+	bodyPw.CloseWithError(fmt.Errorf("client closed on session expiry"))
+
+	// Confirm that the upload handler unblocks and finishes cleanly
+	select {
+	case err := <-uploadDone:
+		t.Logf("Upload handler unblocked on session expiry with: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Upload handler did not unblock on session expiration")
+	}
+
+	// Verify upload pipe pointers were set to nil under mutex
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+}
+
+
 
 
