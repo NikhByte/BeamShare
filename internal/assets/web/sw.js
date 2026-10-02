@@ -105,6 +105,10 @@ self.addEventListener('message', (event) => {
     };
 
     streamMap.set(url, { stream, filename, size, mime, cleanup, ttlTimer, port });
+
+    try {
+      port.postMessage({ type: 'INIT_PORT_ACK' });
+    } catch (_) {}
   }
 });
 
