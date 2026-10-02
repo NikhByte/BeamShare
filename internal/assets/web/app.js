@@ -1559,6 +1559,15 @@ async function startWebRTC() {
   setState('webrtc');
   setMode('webrtc', 'WebRTC P2P (optical handshake)');
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (e) {
+    console.error("Failed to import decryption key", e);
+    showError("Decryption key error: " + e.message);
+    throw e;
+  }
+
   // 1. Fetch the full SDP offer from the server.
   let offer;
   const params = new URLSearchParams(window.location.search);
@@ -1812,45 +1821,75 @@ async function startWebRTC() {
         }
       });
 
+      let encBuffer = new Uint8Array(0);
+      let msgChain = Promise.resolve();
+
       dc.onmessage = (e) => {
-        try {
+        msgChain = msgChain.then(async () => {
           if (typeof e.data === 'string') {
             if (e.data === "EOF") {
               chunkQueue.enqueueEOF();
-              chunkQueue.drain().then(async () => {
-                if (diskWritableStream) {
-                  await diskWritableStream.close();
-                  if (useOPFS) {
-                    const file = await diskFileHandle.getFile();
-                    triggerSave(file, currentFile.name);
-                  }
-                } else if (swPipePort) {
-                  swPipePort.postMessage("EOF");
-                } else {
-                  let finalBlob;
-                  if (useIndexedDB) {
-                    finalBlob = await getAllChunksIDB(currentFile.mime);
-                    await clearIDB();
-                  } else {
-                    finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                  }
-                  triggerSave(finalBlob, currentFile.name);
+              await chunkQueue.drain();
+              if (diskWritableStream) {
+                await diskWritableStream.close();
+                if (useOPFS) {
+                  const file = await diskFileHandle.getFile();
+                  triggerSave(file, currentFile.name);
                 }
-                resolve();
-              }).catch((err) => {
-                // Handled in chunkQueue onError callback
-              });
+              } else if (swPipePort) {
+                swPipePort.postMessage("EOF");
+              } else {
+                let finalBlob;
+                if (useIndexedDB) {
+                  finalBlob = await getAllChunksIDB(currentFile.mime);
+                  await clearIDB();
+                } else {
+                  finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
+                }
+                triggerSave(finalBlob, currentFile.name);
+              }
+              resolve();
             }
             return;
           }
 
-          const chunk = new Uint8Array(e.data);
-          chunkQueue.enqueue(chunk);
-        } catch (err) {
+          const value = e.data instanceof Uint8Array ? e.data : new Uint8Array(e.data);
+
+          if (decryptionKey) {
+            let newBuffer = new Uint8Array(encBuffer.length + value.length);
+            newBuffer.set(encBuffer, 0);
+            newBuffer.set(value, encBuffer.length);
+            encBuffer = newBuffer;
+
+            while (encBuffer.length >= 4) {
+              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+              const frameLen = dv.getUint32(0, false);
+              if (encBuffer.length < 4 + frameLen) {
+                break;
+              }
+
+              const frame = encBuffer.slice(4, 4 + frameLen);
+              encBuffer = encBuffer.slice(4 + frameLen);
+
+              const nonce = new Uint8Array(frame.subarray(0, 12));
+              const ciphertext = new Uint8Array(frame.subarray(12));
+
+              const decrypted = await crypto.subtle.decrypt(
+                { name: "AES-GCM", iv: nonce },
+                decryptionKey,
+                ciphertext
+              );
+
+              chunkQueue.enqueue(new Uint8Array(decrypted));
+            }
+          } else {
+            chunkQueue.enqueue(value);
+          }
+        }).catch((err) => {
           showError(`Transfer failed: ${err.message}`);
           dc.close();
           reject(err);
-        }
+        });
       };
 
       dc.onerror = (e) => reject(new Error('data channel error: ' + e));

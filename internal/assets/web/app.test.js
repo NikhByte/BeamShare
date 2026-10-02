@@ -341,6 +341,206 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
   });
+
+  test('WebRTC Receiver AES-GCM Decryption and Framing', async () => {
+    // Generate AES-GCM key and set hash
+    const cryptoKey = await crypto.subtle.generateKey(
+      { name: 'AES-GCM', length: 256 },
+      true,
+      ['encrypt', 'decrypt']
+    );
+    const rawKey = await crypto.subtle.exportKey('raw', cryptoKey);
+    const keyB64 = Buffer.from(rawKey).toString('base64url');
+    window.location.hash = `#k=${keyB64}`;
+
+    const decryptionKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+    assert.ok(decryptionKey, 'Decryption key should be imported');
+
+    // Helper to encrypt and frame a Uint8Array using cryptoKey (which has encrypt usage)
+    const createEncryptedFrame = async (plaintext) => {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const ciphertext = new Uint8Array(
+        await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, cryptoKey, plaintext)
+      );
+      const frameLen = 12 + ciphertext.byteLength;
+      const payload = new Uint8Array(4 + frameLen);
+      const dv = new DataView(payload.buffer);
+      dv.setUint32(0, frameLen, false); // Big-endian
+      payload.set(iv, 4);
+      payload.set(ciphertext, 16);
+      return payload;
+    };
+
+    const chunk1 = new TextEncoder().encode('Hello ');
+    const chunk2 = new TextEncoder().encode('World!');
+
+    const frame1 = await createEncryptedFrame(chunk1);
+    const frame2 = await createEncryptedFrame(chunk2);
+
+    const receivedChunks = [];
+    const mockDC = {
+      readyState: 'open',
+      send: () => {},
+      close: () => {}
+    };
+
+    const queue = new app.SequentialChunkQueue({
+      highWatermark: 1024,
+      lowWatermark: 256,
+      dataChannel: mockDC,
+      writeHandler: async (chunk) => {
+        receivedChunks.push(chunk);
+      }
+    });
+
+    let encBuffer = new Uint8Array(0);
+    let msgChain = Promise.resolve();
+
+    const onmessage = (e) => {
+      msgChain = msgChain.then(async () => {
+        if (typeof e.data === 'string') {
+          if (e.data === 'EOF') {
+            queue.enqueueEOF();
+            await queue.drain();
+          }
+          return;
+        }
+
+        const value = e.data instanceof Uint8Array ? e.data : new Uint8Array(e.data);
+
+        if (decryptionKey) {
+          let newBuffer = new Uint8Array(encBuffer.length + value.length);
+          newBuffer.set(encBuffer, 0);
+          newBuffer.set(value, encBuffer.length);
+          encBuffer = newBuffer;
+
+          while (encBuffer.length >= 4) {
+            const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+            const frameLen = dv.getUint32(0, false);
+            if (encBuffer.length < 4 + frameLen) {
+              break;
+            }
+
+            const frame = encBuffer.slice(4, 4 + frameLen);
+            encBuffer = encBuffer.slice(4 + frameLen);
+
+            const nonce = new Uint8Array(frame.subarray(0, 12));
+            const ciphertext = new Uint8Array(frame.subarray(12));
+
+            const decrypted = await crypto.subtle.decrypt(
+              { name: 'AES-GCM', iv: nonce },
+              decryptionKey,
+              ciphertext
+            );
+
+            queue.enqueue(new Uint8Array(decrypted));
+          }
+        } else {
+          queue.enqueue(value);
+        }
+      });
+      return msgChain;
+    };
+
+    // Send frame 1 in full
+    await onmessage({ data: frame1.buffer });
+
+    // Send frame 2 split across two messages
+    const splitIdx = Math.floor(frame2.length / 2);
+    const partA = frame2.slice(0, splitIdx);
+    const partB = frame2.slice(splitIdx);
+
+    await onmessage({ data: partA.buffer });
+    await onmessage({ data: partB.buffer });
+
+    // Send EOF
+    await onmessage({ data: 'EOF' });
+
+    const totalText = receivedChunks.map(c => new TextDecoder().decode(c)).join('');
+    assert.equal(totalText, 'Hello World!');
+  });
+
+  test('WebRTC Receiver AES-GCM Decryption Error Handling', async () => {
+    const cryptoKey = await crypto.subtle.generateKey(
+      { name: 'AES-GCM', length: 256 },
+      true,
+      ['encrypt', 'decrypt']
+    );
+    const rawKey = await crypto.subtle.exportKey('raw', cryptoKey);
+    const keyB64 = Buffer.from(rawKey).toString('base64url');
+    window.location.hash = `#k=${keyB64}`;
+
+    const decryptionKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+
+    let closed = false;
+    const mockDC = {
+      readyState: 'open',
+      send: () => {},
+      close: () => { closed = true; }
+    };
+
+    const queue = new app.SequentialChunkQueue({
+      dataChannel: mockDC,
+      writeHandler: async () => {}
+    });
+
+    let encBuffer = new Uint8Array(0);
+    let msgChain = Promise.resolve();
+    let errorOccurred = null;
+
+    const onmessage = (e) => {
+      msgChain = msgChain.then(async () => {
+        if (typeof e.data === 'string') return;
+
+        const value = e.data instanceof Uint8Array ? e.data : new Uint8Array(e.data);
+
+        if (decryptionKey) {
+          let newBuffer = new Uint8Array(encBuffer.length + value.length);
+          newBuffer.set(encBuffer, 0);
+          newBuffer.set(value, encBuffer.length);
+          encBuffer = newBuffer;
+
+          while (encBuffer.length >= 4) {
+            const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+            const frameLen = dv.getUint32(0, false);
+            if (encBuffer.length < 4 + frameLen) {
+              break;
+            }
+
+            const frame = encBuffer.slice(4, 4 + frameLen);
+            encBuffer = encBuffer.slice(4 + frameLen);
+
+            const nonce = new Uint8Array(frame.subarray(0, 12));
+            const ciphertext = new Uint8Array(frame.subarray(12));
+
+            const decrypted = await crypto.subtle.decrypt(
+              { name: 'AES-GCM', iv: nonce },
+              decryptionKey,
+              ciphertext
+            );
+
+            queue.enqueue(new Uint8Array(decrypted));
+          }
+        }
+      }).catch((err) => {
+        errorOccurred = err;
+        mockDC.close();
+      });
+      return msgChain;
+    };
+
+    // Construct corrupted framed message (valid length, invalid ciphertext/auth tag)
+    const badPayload = new Uint8Array(4 + 12 + 16);
+    const dv = new DataView(badPayload.buffer);
+    dv.setUint32(0, 12 + 16, false);
+    // Fill IV and ciphertext with garbage
+    badPayload.fill(0xff, 4);
+
+    await onmessage({ data: badPayload.buffer });
+
+    assert.ok(errorOccurred, 'Error should be caught when decryption fails');
+    assert.ok(closed, 'DataChannel should be closed on decryption failure');
+  });
 });
 
 describe('Gaze Web Sender Test Suite', () => {
