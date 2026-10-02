@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 )
@@ -181,4 +182,73 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 	if bytes.Equal(nonce1, nonce2) {
 		t.Fatal("consecutive frames reused the same nonce")
 	}
+}
+
+func TestMaxFrameSizeExceeded(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	t.Run("OversizedFrameHeader", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		binary.Write(buf, binary.BigEndian, uint32(MaxFrameSize+1))
+
+		decReader, err := NewDecryptingReader(buf, key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		out := make([]byte, 64)
+		_, err = decReader.Read(out)
+		if err == nil {
+			t.Fatal("expected error for oversized frame header, got nil")
+		}
+		if !errors.Is(err, ErrFrameTooLarge) {
+			t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+		}
+	})
+
+	t.Run("ExactMaxFrameSizeValid", func(t *testing.T) {
+		payload := make([]byte, 65536)
+		encReader, err := NewEncryptingReader(bytes.NewReader(payload), key)
+		if err != nil {
+			t.Fatalf("NewEncryptingReader failed: %v", err)
+		}
+
+		encryptedData, err := io.ReadAll(encReader)
+		if err != nil {
+			t.Fatalf("reading encrypted data failed: %v", err)
+		}
+
+		decReader, err := NewDecryptingReader(bytes.NewReader(encryptedData), key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		decryptedData, err := io.ReadAll(decReader)
+		if err != nil {
+			t.Fatalf("decryption failed for MaxFrameSize payload: %v", err)
+		}
+
+		if !bytes.Equal(decryptedData, payload) {
+			t.Fatal("decrypted payload does not match original")
+		}
+	})
+
+	t.Run("ZeroLengthHeader", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		binary.Write(buf, binary.BigEndian, uint32(0))
+
+		decReader, err := NewDecryptingReader(buf, key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		out := make([]byte, 64)
+		_, err = decReader.Read(out)
+		if err != io.ErrUnexpectedEOF {
+			t.Fatalf("expected io.ErrUnexpectedEOF for zero length header, got %v", err)
+		}
+	})
 }
