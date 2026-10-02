@@ -694,7 +694,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
 
-		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		relayDisplayURL := fmt.Sprintf("%s/?s=%s&token=%s&local=%s", baseHost, relSessionID, srv.Token(), url.QueryEscape(localURL))
 		if receiverURL != "" {
 			relayDisplayURL += "&backend=" + url.QueryEscape(relayURL)
 		}
@@ -715,7 +715,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
 
-		qrURL = fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		qrURL = fmt.Sprintf("%s/?s=%s&token=%s&local=%s", baseHost, relSessionID, srv.Token(), url.QueryEscape(localURL))
 		if receiverURL != "" {
 			qrURL += "&backend=" + url.QueryEscape(relayURL)
 		}
@@ -733,7 +733,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		} else {
 			qrURL = localURL
 			if session != nil {
-				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				if strings.Contains(localURL, "?") {
+					qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				} else {
+					qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				}
 			}
 		}
 	}
@@ -847,18 +851,36 @@ func downloadFile(code string) error {
 	backend = strings.TrimRight(backend, "/")
 
 	s := u.Query().Get("s")
+	token := u.Query().Get("token")
+	if token == "" {
+		token = u.Query().Get("t")
+	}
 	k := u.Fragment
 	if strings.HasPrefix(k, "k=") {
 		k = k[2:]
 	}
 
 	metaURL := backend + "/api/meta"
+	queryParams := url.Values{}
 	if s != "" {
-		metaURL += "?s=" + s
+		queryParams.Set("s", s)
+	}
+	if token != "" {
+		queryParams.Set("token", token)
+	}
+	if len(queryParams) > 0 {
+		metaURL += "?" + queryParams.Encode()
 	}
 
 	fmt.Printf("  %s\n", dimStr("Fetching metadata..."))
-	respMeta, err := http.Get(metaURL)
+	reqMeta, err := http.NewRequest(http.MethodGet, metaURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create metadata request: %w", err)
+	}
+	if token != "" {
+		reqMeta.Header.Set("Authorization", "Bearer "+token)
+	}
+	respMeta, err := http.DefaultClient.Do(reqMeta)
 	if err != nil {
 		return fmt.Errorf("failed to fetch metadata: %w", err)
 	}
@@ -875,12 +897,19 @@ func downloadFile(code string) error {
 	ui.PrintFileMeta(meta.Name, meta.Size)
 
 	downloadURL := backend + "/api/download"
-	if s != "" {
-		downloadURL += "?s=" + s
+	if len(queryParams) > 0 {
+		downloadURL += "?" + queryParams.Encode()
 	}
 
 	fmt.Printf("  %s\n", dimStr("Starting download..."))
-	respDL, err := http.Get(downloadURL)
+	reqDL, err := http.NewRequest(http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create download request: %w", err)
+	}
+	if token != "" {
+		reqDL.Header.Set("Authorization", "Bearer "+token)
+	}
+	respDL, err := http.DefaultClient.Do(reqDL)
 	if err != nil {
 		return fmt.Errorf("failed to start download: %w", err)
 	}
