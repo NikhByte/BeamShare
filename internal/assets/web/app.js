@@ -3944,7 +3944,8 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    const qrEndpoint = apiPath("/api/qr");
+    document.getElementById('send-qr-img').src = qrEndpoint + (qrEndpoint.includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
