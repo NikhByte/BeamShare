@@ -834,6 +834,16 @@ async function getSWPipe(fileMeta) {
     const channel = new MessageChannel();
     const port = channel.port1;
 
+    const ackPromise = new Promise((resolve) => {
+      const ackTimer = setTimeout(resolve, 300);
+      port.onmessage = (e) => {
+        if (e && e.data && e.data.type === 'INIT_PORT_ACK') {
+          clearTimeout(ackTimer);
+          resolve();
+        }
+      };
+    });
+
     sw.postMessage({
       type: 'INIT_PORT',
       url: swUrl,
@@ -841,6 +851,8 @@ async function getSWPipe(fileMeta) {
       size: fileMeta.size,
       mime: fileMeta.mime
     }, [channel.port2]);
+
+    await ackPromise;
 
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
@@ -1022,6 +1034,20 @@ function init() {
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(err => {
       console.warn('Service Worker registration failed:', err);
     });
+
+    const markSwReady = () => {
+      document.documentElement.setAttribute('data-sw-ready', 'true');
+    };
+
+    if (navigator.serviceWorker.controller) {
+      markSwReady();
+    } else if (typeof navigator.serviceWorker.addEventListener === 'function') {
+      navigator.serviceWorker.addEventListener('controllerchange', markSwReady, { once: true });
+    }
+
+    navigator.serviceWorker.ready.then(() => {
+      markSwReady();
+    }).catch(() => {});
   }
 
   setState('loading');
@@ -2591,6 +2617,7 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    init
   };
 }
