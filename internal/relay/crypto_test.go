@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"io"
+	"runtime"
 	"testing"
 )
 
@@ -180,5 +181,66 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 
 	if bytes.Equal(nonce1, nonce2) {
 		t.Fatal("consecutive frames reused the same nonce")
+	}
+}
+
+func TestOversizedFrameHeader(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// 1GB frame header (1073741824 bytes)
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.BigEndian, uint32(1073741824)); err != nil {
+		t.Fatalf("failed to write header: %v", err)
+	}
+
+	decReader, err := NewDecryptingReader(buf, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	var m1, m2 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m1)
+
+	out := make([]byte, 64)
+	_, err = decReader.Read(out)
+	if err != ErrFrameTooLarge {
+		t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+	}
+
+	runtime.GC()
+	runtime.ReadMemStats(&m2)
+
+	// Verify memory allocation remained flat (no 1GB allocation)
+	const maxAllowedAlloc = 10 * 1024 * 1024 // 10MB
+	if m2.TotalAlloc-m1.TotalAlloc > maxAllowedAlloc {
+		t.Fatalf("memory increased excessively: %d bytes allocated", m2.TotalAlloc-m1.TotalAlloc)
+	}
+}
+
+func TestMaxFrameSizeBoundary(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// Just above MaxFrameSize (MaxFrameSize + 1)
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.BigEndian, uint32(MaxFrameSize+1)); err != nil {
+		t.Fatalf("failed to write header: %v", err)
+	}
+
+	decReader, err := NewDecryptingReader(buf, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	out := make([]byte, 64)
+	_, err = decReader.Read(out)
+	if err != ErrFrameTooLarge {
+		t.Fatalf("expected ErrFrameTooLarge for length MaxFrameSize+1, got %v", err)
 	}
 }
