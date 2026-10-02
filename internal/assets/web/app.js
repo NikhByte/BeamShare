@@ -13,13 +13,31 @@ function getBackendURL() {
   return backend;
 }
 
+function getToken() {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get('token') || params.get('t');
+  if (!token) {
+    const local = params.get('local') || params.get('backend');
+    if (local) {
+      try {
+        const u = new URL(local);
+        token = u.searchParams.get('token') || u.searchParams.get('t');
+      } catch (e) {}
+    }
+  }
+  return token;
+}
+
 function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  const token = getToken();
   let fullPath = path;
-  if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+  if (token) {
+    fullPath = path.includes('?') ? path + '&token=' + encodeURIComponent(token) : path + '?token=' + encodeURIComponent(token);
+  } else if (s) {
+    fullPath = path.includes('?') ? path + '&s=' + encodeURIComponent(s) : path + '?s=' + encodeURIComponent(s);
   }
   if (backend) {
     return backend + fullPath;
@@ -1203,7 +1221,12 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      const token = getToken();
+      let probeUrl = `${localURL}/api/meta`;
+      if (token) {
+        probeUrl += `?token=${encodeURIComponent(token)}`;
+      }
+      const res = await fetch(probeUrl, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
