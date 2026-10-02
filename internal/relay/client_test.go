@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -223,6 +224,23 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		receivedOffset := <-uploadDoneOffset
 		if string(receivedOffset) != string(offsetData) {
 			t.Fatalf("expected offset uploaded data '%s', got '%s'", string(offsetData), string(receivedOffset))
+		}
+	})
+
+	t.Run("InvalidKeyLength", func(t *testing.T) {
+		client, _ := createIsolatedSession(t)
+		invalidKeys := [][]byte{
+			make([]byte, 10),
+			make([]byte, 16),
+			make([]byte, 24),
+			make([]byte, 40),
+		}
+		for _, key := range invalidKeys {
+			client.Key = key
+			err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+			if !errors.Is(err, ErrInvalidKeySize) {
+				t.Fatalf("expected ErrInvalidKeySize for key length %d, got %v", len(key), err)
+			}
 		}
 	})
 }

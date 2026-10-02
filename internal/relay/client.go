@@ -207,7 +207,7 @@ func (c *Client) UploadReaderAtOffset(ctx context.Context, reader io.Reader, off
 
 	var r io.Reader = reader
 	var err error
-	if len(c.Key) == 32 {
+	if len(c.Key) > 0 {
 		r, err = NewEncryptingReader(reader, c.Key)
 		if err != nil {
 			return err
