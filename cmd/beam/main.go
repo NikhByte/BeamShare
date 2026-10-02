@@ -550,7 +550,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 								for {
 									// Backpressure check: wait if buffered amount > 1MB
-									if dc.BufferedAmount() > 1024*1024 {
+									for dc.BufferedAmount() > 1024*1024 {
 										<-bufferedAmountLowChan
 									}
 
@@ -575,7 +575,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 								// Wait for buffer to clear before sending EOF
 								dc.SetBufferedAmountLowThreshold(0)
-								if dc.BufferedAmount() > 0 {
+								for dc.BufferedAmount() > 0 {
 									<-bufferedAmountLowChan
 								}
 								dc.SendText("EOF")
