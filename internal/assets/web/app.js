@@ -1001,7 +1001,11 @@ function setMode(mode, label) {
 
 // ── Service Worker Pipe ───────────────────────────────────────────────────────
 async function getSWPipe(fileMeta) {
-  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
+  // Service Worker pipe synthetic iframe downloads do not trigger browser downloads in Firefox
+  const isFirefox = typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.includes('Firefox');
+  if (isFirefox) return null;
+
+  if (!('serviceWorker' in navigator)) return null;
 
   try {
     const swReady = navigator.serviceWorker.ready;
@@ -1019,7 +1023,7 @@ async function getSWPipe(fileMeta) {
           resolve();
         };
         navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
-        setTimeout(resolve, 500);
+        setTimeout(resolve, 1500);
       });
     }
 
@@ -1894,7 +1898,10 @@ async function startWebRTC() {
   setWebRTCSub('Waiting for data channel…');
   const dc = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('data channel timeout')), 30000);
-    pc.ondatachannel = (e) => { clearTimeout(timer); resolve(e.channel); };
+    pc.ondatachannel = (e) => {
+      clearTimeout(timer);
+      resolve(e.channel);
+    };
   });
   markStep('step-open');
   webrtcDataChannel = dc;
@@ -2031,10 +2038,24 @@ async function startWebRTC() {
 
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
+      let offsetSent = false;
+      const sendOffset = () => {
+        if (offsetSent) return;
+        offsetSent = true;
+        try {
+          dc.send(`OFFSET:${initialOffset}`);
+        } catch (err) {
+          console.error('Error sending OFFSET:', err);
+        }
+      };
+
       if (dc.readyState === 'open') {
-        dc.send(`OFFSET:${initialOffset}`);
+        sendOffset();
       } else {
-        dc.onopen = () => dc.send(`OFFSET:${initialOffset}`);
+        dc.addEventListener('open', sendOffset, { once: true });
+        if (dc.readyState === 'open') {
+          sendOffset();
+        }
       }
 
       let encBuffer = new Uint8Array(0);
