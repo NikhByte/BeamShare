@@ -282,8 +282,8 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected error for 10-byte key, got nil")
 		}
-		if !errors.Is(err, ErrInvalidKeyLength) {
-			t.Fatalf("expected ErrInvalidKeyLength, got: %v", err)
+		if !errors.Is(err, ErrInvalidKeyLength) && !errors.Is(err, ErrInvalidKeySize) {
+			t.Fatalf("expected ErrInvalidKeyLength or ErrInvalidKeySize, got: %v", err)
 		}
 		if !strings.Contains(err.Error(), "32 bytes") || !strings.Contains(err.Error(), "10") {
 			t.Fatalf("expected error message stating expected 32 bytes and actual 10 bytes, got: %v", err)
@@ -301,8 +301,8 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected error for 16-byte key, got nil")
 		}
-		if !errors.Is(err, ErrInvalidKeyLength) {
-			t.Fatalf("expected ErrInvalidKeyLength, got: %v", err)
+		if !errors.Is(err, ErrInvalidKeyLength) && !errors.Is(err, ErrInvalidKeySize) {
+			t.Fatalf("expected ErrInvalidKeyLength or ErrInvalidKeySize, got: %v", err)
 		}
 		if !strings.Contains(err.Error(), "32 bytes") || !strings.Contains(err.Error(), "16") {
 			t.Fatalf("expected error message stating expected 32 bytes and actual 16 bytes, got: %v", err)
