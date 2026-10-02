@@ -3,6 +3,8 @@ package relay
 import (
 	"context"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -260,5 +262,133 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
 }
+
+func TestSession_ClosePipesIfMatchUploadPipes(t *testing.T) {
+	sess := &Session{ID: "pipe-test-sess"}
+
+	pr, pw := io.Pipe()
+	sess.UploadPipeR = pr
+	sess.UploadPipeW = pw
+
+	expErr := fmt.Errorf("session expired")
+	sess.ClosePipes(expErr)
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR, "UploadPipeR must be nil after ClosePipes")
+	assert.Nil(t, sess.UploadPipeW, "UploadPipeW must be nil after ClosePipes")
+	sess.mu.Unlock()
+
+	buf := make([]byte, 10)
+	_, errRead := pr.Read(buf)
+	assert.Error(t, errRead)
+
+	_, errWrite := pw.Write([]byte("test"))
+	assert.Error(t, errWrite)
+}
+
+func TestServer_WebUploadPipeCleanupOnSessionExpiration(t *testing.T) {
+	srv := NewServerWithConfig(100*time.Millisecond, 20*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+	sessID := sess.ID
+
+	// Create a pipe for body that won't complete writing immediately (simulating slow/blocked upload)
+	prBody, pwBody := io.Pipe()
+
+	var uploadWg sync.WaitGroup
+	uploadWg.Add(1)
+
+	go func() {
+		defer uploadWg.Done()
+		mw := multipart.NewWriter(pwBody)
+
+		reqErrChan := make(chan error, 1)
+		go func() {
+			req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sessID, prBody)
+			if err != nil {
+				reqErrChan <- err
+				return
+			}
+			req.Header.Set("Content-Type", mw.FormDataContentType())
+
+			resp, err := ts.Client().Do(req)
+			if err == nil {
+				resp.Body.Close()
+			}
+			reqErrChan <- err
+		}()
+
+		// Write multipart part header
+		part, err := mw.CreateFormFile("file", "testfile.bin")
+		if err != nil {
+			pwBody.CloseWithError(err)
+			return
+		}
+		part.Write([]byte("chunk1"))
+
+		<-reqErrChan
+		mw.Close()
+		pwBody.Close()
+	}()
+
+	// Wait for UploadPipeR and UploadPipeW to be attached to session
+	assert.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil && sess.UploadPipeW != nil
+	}, 1*time.Second, 5*time.Millisecond)
+
+	// Start a web pull handler blocked on reading UploadPipeR
+	var pullWg sync.WaitGroup
+	pullWg.Add(1)
+	go func() {
+		defer pullWg.Done()
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/relay/pull?session="+sessID, nil)
+		if err != nil {
+			return
+		}
+		resp, err := ts.Client().Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	// Wait for session to expire and sweep to run
+	assert.Eventually(t, func() bool {
+		return srv.GetSession(sessID) == nil
+	}, 2*time.Second, 10*time.Millisecond, "Session should be swept after expiration")
+
+	// Verify UploadPipes on session were closed and set to nil
+	sess.mu.Lock()
+	uploadPipeR := sess.UploadPipeR
+	uploadPipeW := sess.UploadPipeW
+	sess.mu.Unlock()
+
+	assert.Nil(t, uploadPipeR, "UploadPipeR should be nil after session expiration")
+	assert.Nil(t, uploadPipeW, "UploadPipeW should be nil after session expiration")
+
+	// Unblock request body pipe
+	pwBody.Close()
+
+	// Both upload and pull goroutines must complete cleanly without hanging
+	doneChan := make(chan struct{})
+	go func() {
+		uploadWg.Wait()
+		pullWg.Wait()
+		close(doneChan)
+	}()
+
+	select {
+	case <-doneChan:
+		// Success - goroutines unblocked
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload and Pull goroutines remained blocked after session expiration")
+	}
+}
+
 
 
