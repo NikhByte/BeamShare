@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/beamshare/beam/internal/assets"
-	"github.com/skip2/go-qrcode"
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 type DownloadRequest struct {

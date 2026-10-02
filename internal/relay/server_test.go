@@ -230,6 +230,26 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
 }
 
+func TestServer_HandleQR(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	// Missing url parameter
+	req := httptest.NewRequest(http.MethodGet, "/api/qr", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+
+	// Valid url parameter
+	req = httptest.NewRequest(http.MethodGet, "/api/qr?url=http%3A%2F%2Flocalhost%3A8080%2F%3Fs%3Dtest%23k%3Dsecretkey", nil)
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "image/png", rr.Header().Get("Content-Type"))
+	assert.True(t, len(rr.Body.Bytes()) > 0, "QR code response should contain PNG image bytes")
+}
+
 func TestServer_LongPollUnblocksOnSessionExpiration(t *testing.T) {
 	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
 	defer srv.Stop()

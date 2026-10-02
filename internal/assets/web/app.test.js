@@ -841,11 +841,11 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
+    // Verify QR code image is generated using internal /api/qr endpoint instead of third-party
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
-    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
+    assert.ok(qrImg.src.includes('/api/qr'), 'send-qr-img src should use local /api/qr endpoint');
+    assert.ok(qrImg.src.includes('url='), 'send-qr-img src should include encoded share url parameter');
+    assert.equal(qrImg.src.includes('api.qrserver.com'), false, 'send-qr-img src should not use api.qrserver.com');
   });
 
   test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
