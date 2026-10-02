@@ -537,4 +537,87 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('waitForBufferedAmountLow resolves immediately if bufferedAmount <= targetThreshold', async () => {
+    let added = 0;
+    const mockDC = {
+      bufferedAmount: 100,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: () => { added++; },
+      removeEventListener: () => {}
+    };
+
+    await app.waitForBufferedAmountLow(mockDC, 1000, 500);
+
+    assert.equal(mockDC.bufferedAmountLowThreshold, 500);
+    assert.equal(added, 0, 'Should not attach listener if buffer is already below threshold');
+  });
+
+  test('waitForBufferedAmountLow re-checks buffer inside promise and removes listener if buffer drained during setup', async () => {
+    let listeners = [];
+    const mockDC = {
+      bufferedAmount: 2000,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: (type, handler) => {
+        listeners.push(handler);
+        // Simulate rapid buffer drain right after listener registration before event dispatch
+        mockDC.bufferedAmount = 400;
+      },
+      removeEventListener: (type, handler) => {
+        listeners = listeners.filter(h => h !== handler);
+      }
+    };
+
+    await app.waitForBufferedAmountLow(mockDC, 1000, 500);
+
+    assert.equal(listeners.length, 0, 'Listener must be removed upon resolution to prevent memory leaks');
+  });
+
+  test('waitForBufferedAmountLow resolves on bufferedamountlow event and cleans up listener', async () => {
+    let listeners = [];
+    const mockDC = {
+      bufferedAmount: 2000,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: (type, handler) => {
+        listeners.push(handler);
+      },
+      removeEventListener: (type, handler) => {
+        listeners = listeners.filter(h => h !== handler);
+      }
+    };
+
+    const waitPromise = app.waitForBufferedAmountLow(mockDC, 1000, 500);
+    assert.equal(listeners.length, 1, 'Listener attached when buffer is above threshold');
+
+    // Simulate event firing when buffer drops
+    mockDC.bufferedAmount = 400;
+    listeners[0]();
+
+    await waitPromise;
+    assert.equal(listeners.length, 0, 'Listener removed after event resolution');
+  });
+
+  test('EOF flush logic verifies buffer clearance before resolution', async () => {
+    let listeners = [];
+    const mockDC = {
+      bufferedAmount: 500,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: (type, handler) => {
+        listeners.push(handler);
+      },
+      removeEventListener: (type, handler) => {
+        listeners = listeners.filter(h => h !== handler);
+      }
+    };
+
+    const waitPromise = app.waitForBufferedAmountLow(mockDC, 0, 0);
+    assert.equal(mockDC.bufferedAmountLowThreshold, 0);
+    assert.equal(listeners.length, 1);
+
+    mockDC.bufferedAmount = 0;
+    listeners[0]();
+
+    await waitPromise;
+    assert.equal(listeners.length, 0);
+  });
 });
