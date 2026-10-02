@@ -1255,6 +1255,22 @@ function init() {
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(err => {
       console.warn('Service Worker registration failed:', err);
     });
+    navigator.serviceWorker.ready.then(() => {
+      const markReady = () => {
+        document.documentElement.setAttribute('data-sw-ready', 'true');
+        if (document.body) {
+          document.body.setAttribute('data-sw-ready', 'true');
+        }
+      };
+      if (navigator.serviceWorker.controller) {
+        markReady();
+      } else {
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          markReady();
+        }, { once: true });
+        setTimeout(markReady, 100);
+      }
+    }).catch(() => {});
   }
 
   setState('loading');
@@ -2459,7 +2475,16 @@ function triggerSave(blob, name) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  try {
+    const iframe = document.createElement('iframe');
+    iframe.hidden = true;
+    iframe.src = url;
+    document.body.appendChild(iframe);
+    setTimeout(() => {
+      try { document.body.removeChild(iframe); } catch(e) {}
+    }, 5000);
+  } catch (_) {}
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
 function appendTerminalText(text) {
