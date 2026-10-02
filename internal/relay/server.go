@@ -213,10 +213,13 @@ type failedAttempt struct {
 	firstSeen time.Time
 }
 
+const maxFailedAttemptsEntries = 10000
+
 type Server struct {
 	sessions           map[string]*Session
 	sessionTTL         time.Duration
 	cleanupInterval    time.Duration
+	UploadTimeout      time.Duration
 	stopChan           chan struct{}
 	ticker             *time.Ticker
 	wg                 sync.WaitGroup
@@ -236,6 +239,7 @@ func NewServerWithConfig(ttl, cleanupInterval time.Duration) *Server {
 		failedAttempts:  make(map[string]*failedAttempt),
 		sessionTTL:      ttl,
 		cleanupInterval: cleanupInterval,
+		UploadTimeout:   30 * time.Second,
 		stopChan:        make(chan struct{}),
 	}
 	s.startSweeper()
@@ -283,8 +287,6 @@ func (s *Server) Stop() {
 	s.wg.Wait()
 }
 
-const maxFailedAttemptsEntries = 10000
-
 func (s *Server) purgeFailedAttempts() {
 	s.failedAttemptsMu.Lock()
 	defer s.failedAttemptsMu.Unlock()
@@ -319,13 +321,21 @@ func (s *Server) SweepExpiredSessions() {
 		sess.ClearDownloadQueue()
 	}
 
+	s.SweepExpiredIPs()
+}
+
+func (s *Server) SweepExpiredIPs() {
 	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	if s.failedAttempts == nil {
+		return
+	}
+	now := time.Now()
 	for ip, fa := range s.failedAttempts {
-		if now.Sub(fa.firstSeen) > time.Minute {
+		if fa == nil || now.Sub(fa.firstSeen) > time.Minute {
 			delete(s.failedAttempts, ip)
 		}
 	}
-	s.failedAttemptsMu.Unlock()
 }
 
 func (s *Server) GetSession(id string) *Session {
@@ -364,6 +374,14 @@ func (s *Server) recordFailedAttempt(ip string) {
 	defer s.failedAttemptsMu.Unlock()
 	if s.failedAttempts == nil {
 		s.failedAttempts = make(map[string]*failedAttempt)
+	}
+	if len(s.failedAttempts) >= maxFailedAttemptsEntries {
+		now := time.Now()
+		for k, fa := range s.failedAttempts {
+			if fa == nil || now.Sub(fa.firstSeen) > time.Minute {
+				delete(s.failedAttempts, k)
+			}
+		}
 	}
 	fa, ok := s.failedAttempts[ip]
 	if !ok || time.Since(fa.firstSeen) > time.Minute {
@@ -1188,6 +1206,22 @@ func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 	w.Write(pngBytes)
 }
 
+type activityWriter struct {
+	w        io.Writer
+	activity chan struct{}
+}
+
+func (aw *activityWriter) Write(p []byte) (int, error) {
+	n, err := aw.w.Write(p)
+	if n > 0 {
+		select {
+		case aw.activity <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
+}
+
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1249,68 +1283,58 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 
-			copyDone := make(chan error, 1)
+			uploadTimeout := s.UploadTimeout
+			if uploadTimeout <= 0 {
+				uploadTimeout = 30 * time.Second
+			}
+
+			activity := make(chan struct{}, 1)
+			aw := &activityWriter{w: pw, activity: activity}
+
+			done := make(chan struct{})
+			defer close(done)
+
+			timer := time.NewTimer(uploadTimeout)
+			defer timer.Stop()
+
 			go func() {
-				type chunk struct {
-					data []byte
-					err  error
-				}
-				chunks := make(chan chunk, 16)
-
-				go func() {
-					defer close(chunks)
-					for {
-						buf := make([]byte, 32*1024)
-						n, readErr := part.Read(buf)
-						if n > 0 {
-							cData := make([]byte, n)
-							copy(cData, buf[:n])
-							chunks <- chunk{data: cData}
-						}
-						if readErr != nil {
-							if readErr != io.EOF {
-								chunks <- chunk{err: readErr}
+				for {
+					select {
+					case <-done:
+						return
+					case <-activity:
+						if !timer.Stop() {
+							select {
+							case <-timer.C:
+							default:
 							}
-							break
 						}
-					}
-				}()
-
-				var writeErr error
-				for c := range chunks {
-					if c.err != nil {
-						writeErr = c.err
-						break
-					}
-					if len(c.data) > 0 {
-						_, err := pw.Write(c.data)
-						if err != nil {
-							writeErr = err
-							break
-						}
+						timer.Reset(uploadTimeout)
+					case <-timer.C:
+						errTimeout := fmt.Errorf("upload transfer write timeout: inactive for %v", uploadTimeout)
+						pw.CloseWithError(errTimeout)
+						pr.CloseWithError(errTimeout)
+						return
+					case <-r.Context().Done():
+						errCtx := fmt.Errorf("upload client context cancelled: %w", r.Context().Err())
+						pw.CloseWithError(errCtx)
+						pr.CloseWithError(errCtx)
+						return
 					}
 				}
-
-				if writeErr != nil {
-					pw.CloseWithError(writeErr)
-				} else {
-					pw.Close()
-				}
-				part.Close()
-				copyDone <- writeErr
 			}()
 
-			select {
-			case uploadErr = <-copyDone:
-			case <-r.Context().Done():
-				uploadErr = fmt.Errorf("upload context cancelled: %w", r.Context().Err())
-				sess.ClosePipesIfMatch(pr, pw, uploadErr)
-			}
-
-			if uploadErr != nil {
-				http.Error(w, uploadErr.Error(), http.StatusInternalServerError)
+			// Stream data to pipe
+			_, copyErr := io.Copy(aw, part)
+			if copyErr != nil {
+				pw.CloseWithError(copyErr)
+				pr.CloseWithError(copyErr)
+				part.Close()
+				http.Error(w, fmt.Sprintf("upload failed: %v", copyErr), http.StatusInternalServerError)
 				return
 			}
+			pw.Close()
+			part.Close()
 
 			if uploadErr != nil {
 				http.Error(w, fmt.Sprintf("upload error: %v", uploadErr), http.StatusInternalServerError)
