@@ -107,6 +107,22 @@ func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err er
 }
 
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
+	if s.UploadPipeW != nil {
+		if err != nil {
+			s.UploadPipeW.CloseWithError(err)
+		} else {
+			s.UploadPipeW.Close()
+		}
+		s.UploadPipeW = nil
+	}
+	if s.UploadPipeR != nil {
+		if err != nil {
+			s.UploadPipeR.CloseWithError(err)
+		} else {
+			s.UploadPipeR.Close()
+		}
+		s.UploadPipeR = nil
+	}
 	if pr == nil || s.DataPipeR == pr {
 		if s.DataPipeW != nil {
 			if err != nil {
@@ -160,10 +176,13 @@ type failedAttempt struct {
 	firstSeen time.Time
 }
 
+const maxFailedAttemptsEntries = 10000
+
 type Server struct {
 	sessions           map[string]*Session
 	sessionTTL         time.Duration
 	cleanupInterval    time.Duration
+	UploadTimeout      time.Duration
 	stopChan           chan struct{}
 	ticker             *time.Ticker
 	wg                 sync.WaitGroup
@@ -183,6 +202,7 @@ func NewServerWithConfig(ttl, cleanupInterval time.Duration) *Server {
 		failedAttempts:  make(map[string]*failedAttempt),
 		sessionTTL:      ttl,
 		cleanupInterval: cleanupInterval,
+		UploadTimeout:   30 * time.Second,
 		stopChan:        make(chan struct{}),
 	}
 	s.startSweeper()
@@ -249,6 +269,22 @@ func (s *Server) SweepExpiredSessions() {
 		sess.ClosePipes(fmt.Errorf("session expired"))
 		sess.ClearDownloadQueue()
 	}
+
+	s.SweepExpiredIPs()
+}
+
+func (s *Server) SweepExpiredIPs() {
+	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	if s.failedAttempts == nil {
+		return
+	}
+	now := time.Now()
+	for ip, fa := range s.failedAttempts {
+		if fa == nil || now.Sub(fa.firstSeen) > time.Minute {
+			delete(s.failedAttempts, ip)
+		}
+	}
 }
 
 func (s *Server) GetSession(id string) *Session {
@@ -287,6 +323,14 @@ func (s *Server) recordFailedAttempt(ip string) {
 	defer s.failedAttemptsMu.Unlock()
 	if s.failedAttempts == nil {
 		s.failedAttempts = make(map[string]*failedAttempt)
+	}
+	if len(s.failedAttempts) >= maxFailedAttemptsEntries {
+		now := time.Now()
+		for k, fa := range s.failedAttempts {
+			if fa == nil || now.Sub(fa.firstSeen) > time.Minute {
+				delete(s.failedAttempts, k)
+			}
+		}
 	}
 	fa, ok := s.failedAttempts[ip]
 	if !ok || time.Since(fa.firstSeen) > time.Minute {
@@ -1018,6 +1062,22 @@ func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 }
 
+type activityWriter struct {
+	w        io.Writer
+	activity chan struct{}
+}
+
+func (aw *activityWriter) Write(p []byte) (int, error) {
+	n, err := aw.w.Write(p)
+	if n > 0 {
+		select {
+		case aw.activity <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
+}
+
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1059,6 +1119,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		if part.FormName() == "file" {
 			sess.mu.Lock()
+			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
+				if sess.UploadPipeW != nil {
+					sess.UploadPipeW.CloseWithError(fmt.Errorf("replaced by new upload request"))
+				}
+				if sess.UploadPipeR != nil {
+					sess.UploadPipeR.CloseWithError(fmt.Errorf("replaced by new upload request"))
+				}
+			}
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
@@ -1070,9 +1138,57 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 
+			uploadTimeout := s.UploadTimeout
+			if uploadTimeout <= 0 {
+				uploadTimeout = 30 * time.Second
+			}
+
+			activity := make(chan struct{}, 1)
+			aw := &activityWriter{w: pw, activity: activity}
+
+			done := make(chan struct{})
+			defer close(done)
+
+			timer := time.NewTimer(uploadTimeout)
+			defer timer.Stop()
+
+			go func() {
+				for {
+					select {
+					case <-done:
+						return
+					case <-activity:
+						if !timer.Stop() {
+							select {
+							case <-timer.C:
+							default:
+							}
+						}
+						timer.Reset(uploadTimeout)
+					case <-timer.C:
+						errTimeout := fmt.Errorf("upload transfer write timeout: inactive for %v", uploadTimeout)
+						pw.CloseWithError(errTimeout)
+						pr.CloseWithError(errTimeout)
+						return
+					case <-r.Context().Done():
+						errCtx := fmt.Errorf("upload client context cancelled: %w", r.Context().Err())
+						pw.CloseWithError(errCtx)
+						pr.CloseWithError(errCtx)
+						return
+					}
+				}
+			}()
+
 			// Stream data to pipe
-			_, err = io.Copy(pw, part)
-			pw.CloseWithError(err)
+			_, copyErr := io.Copy(aw, part)
+			if copyErr != nil {
+				pw.CloseWithError(copyErr)
+				pr.CloseWithError(copyErr)
+				part.Close()
+				http.Error(w, fmt.Sprintf("upload failed: %v", copyErr), http.StatusInternalServerError)
+				return
+			}
+			pw.Close()
 			part.Close()
 
 			w.Header().Set("Content-Type", "application/json")
@@ -1099,6 +1215,23 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no active upload", 404)
 		return
 	}
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-r.Context().Done():
+			select {
+			case <-done:
+				return
+			default:
+				pr.CloseWithError(fmt.Errorf("pull client context cancelled: %w", r.Context().Err()))
+			}
+		}
+	}()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	io.Copy(w, pr)
