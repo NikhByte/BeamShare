@@ -770,6 +770,17 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					if len(backlog) > 0 {
 						dc.SendText(string(backlog))
 					}
+					dc.OnClose(func() {
+						channelsMu.Lock()
+						defer channelsMu.Unlock()
+						var updated []*webrtc.DataChannel
+						for _, ch := range activeChannels {
+							if ch != dc {
+								updated = append(updated, ch)
+							}
+						}
+						activeChannels = updated
+					})
 					activeChannels = append(activeChannels, dc)
 					channelsMu.Unlock()
 					fmt.Println("\n  [P2P] Receiver subscribed to live log stream!")
@@ -799,7 +810,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					// Broadcast to WebRTC data channels
 					channelsMu.Lock()
 					for _, dc := range activeChannels {
-						dc.SendText(string(chunk))
+						if dc.ReadyState() == webrtc.DataChannelStateOpen {
+							dc.SendText(string(chunk))
+						}
 					}
 					channelsMu.Unlock()
 				}
@@ -810,7 +823,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					channelsMu.Lock()
 					liveFinished = true
 					for _, dc := range activeChannels {
-						dc.SendText("EOF")
+						if dc.ReadyState() == webrtc.DataChannelStateOpen {
+							dc.SendText("EOF")
+						}
 						dc.Close()
 					}
 					activeChannels = nil
