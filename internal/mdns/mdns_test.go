@@ -154,3 +154,82 @@ func TestBroadcaster_MockRegisterError(t *testing.T) {
 		t.Fatalf("expected error on start, got nil")
 	}
 }
+
+func TestBroadcaster_InterfaceFiltering(t *testing.T) {
+	mockReg := &mockRegistrar{}
+	var receivedIfaces []net.Interface
+
+	mockRegisterFunc := func(instance, service, domain string, port int, text []string, ifaces []net.Interface) (Registrar, error) {
+		receivedIfaces = ifaces
+		return mockReg, nil
+	}
+
+	mockInterfacesFunc := func() ([]net.Interface, error) {
+		return []net.Interface{
+			{Index: 1, Name: "eth0", Flags: net.FlagUp | net.FlagMulticast},
+			{Index: 2, Name: "eth1", Flags: net.FlagMulticast},                    // Down
+			{Index: 3, Name: "tun0", Flags: net.FlagUp},                           // No multicast
+			{Index: 4, Name: "lo", Flags: net.FlagUp | net.FlagLoopback | net.FlagMulticast}, // Loopback
+			{Index: 5, Name: "wlan0", Flags: net.FlagUp | net.FlagMulticast},
+		}, nil
+	}
+
+	b := NewWithRegister("filterbeam", 8080, mockRegisterFunc)
+	b.SetInterfacesFunc(mockInterfacesFunc)
+
+	err := b.Start()
+	if err != nil {
+		t.Fatalf("unexpected error starting broadcaster: %v", err)
+	}
+
+	if len(receivedIfaces) != 2 {
+		t.Fatalf("expected 2 valid interfaces, got %d", len(receivedIfaces))
+	}
+	if receivedIfaces[0].Name != "eth0" {
+		t.Errorf("expected first valid interface eth0, got %s", receivedIfaces[0].Name)
+	}
+	if receivedIfaces[1].Name != "wlan0" {
+		t.Errorf("expected second valid interface wlan0, got %s", receivedIfaces[1].Name)
+	}
+
+	b.Stop()
+	if !mockReg.shutdownCalled {
+		t.Fatalf("expected Shutdown to be called on mock registrar")
+	}
+}
+
+func TestBroadcaster_NoValidMulticastInterfaces(t *testing.T) {
+	mockRegisterFunc := func(instance, service, domain string, port int, text []string, ifaces []net.Interface) (Registrar, error) {
+		return &mockRegistrar{}, nil
+	}
+
+	mockInterfacesFunc := func() ([]net.Interface, error) {
+		return []net.Interface{
+			{Index: 1, Name: "eth1", Flags: net.FlagMulticast}, // Down
+			{Index: 2, Name: "tun0", Flags: net.FlagUp},        // No multicast
+			{Index: 3, Name: "lo", Flags: net.FlagUp | net.FlagLoopback | net.FlagMulticast},
+		}, nil
+	}
+
+	b := NewWithRegister("nomanbeam", 8080, mockRegisterFunc)
+	b.SetInterfacesFunc(mockInterfacesFunc)
+
+	err := b.Start()
+	if err == nil {
+		t.Fatalf("expected error when no valid multicast interface exists, got nil")
+	}
+}
+
+func TestBroadcaster_InterfacesFuncError(t *testing.T) {
+	mockInterfacesFunc := func() ([]net.Interface, error) {
+		return nil, errors.New("network interface list failed")
+	}
+
+	b := NewWithRegister("errbeam", 8080, nil)
+	b.SetInterfacesFunc(mockInterfacesFunc)
+
+	err := b.Start()
+	if err == nil {
+		t.Fatalf("expected error when interfaces function fails, got nil")
+	}
+}
