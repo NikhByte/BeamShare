@@ -821,6 +821,10 @@ function setMode(mode, label) {
 
 // ── Service Worker Pipe ───────────────────────────────────────────────────────
 async function getSWPipe(fileMeta) {
+  // Service Worker pipe synthetic iframe downloads do not trigger browser downloads in Firefox
+  const isFirefox = typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.includes('Firefox');
+  if (isFirefox) return null;
+
   if (!('serviceWorker' in navigator)) return null;
 
   try {
@@ -829,7 +833,19 @@ async function getSWPipe(fileMeta) {
     const reg = await Promise.race([swReady, timeout]);
     if (!reg) return null;
 
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
+    let sw = navigator.serviceWorker.controller;
+    if (!sw) {
+      await new Promise(resolve => {
+        if (navigator.serviceWorker.controller) { resolve(); return; }
+        const onControllerChange = () => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          resolve();
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+        setTimeout(resolve, 1500);
+      });
+      sw = navigator.serviceWorker.controller;
+    }
     if (!sw) return null;
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
@@ -1663,7 +1679,10 @@ async function startWebRTC() {
   setWebRTCSub('Waiting for data channel…');
   const dc = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('data channel timeout')), 30000);
-    pc.ondatachannel = (e) => { clearTimeout(timer); resolve(e.channel); };
+    pc.ondatachannel = (e) => {
+      clearTimeout(timer);
+      resolve(e.channel);
+    };
   });
   markStep('step-open');
   webrtcDataChannel = dc;
@@ -1790,10 +1809,24 @@ async function startWebRTC() {
 
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
+      let offsetSent = false;
+      const sendOffset = () => {
+        if (offsetSent) return;
+        offsetSent = true;
+        try {
+          dc.send(`OFFSET:${initialOffset}`);
+        } catch (err) {
+          console.error('Error sending OFFSET:', err);
+        }
+      };
+
       if (dc.readyState === 'open') {
-        dc.send(`OFFSET:${initialOffset}`);
+        sendOffset();
       } else {
-        dc.onopen = () => dc.send(`OFFSET:${initialOffset}`);
+        dc.addEventListener('open', sendOffset, { once: true });
+        if (dc.readyState === 'open') {
+          sendOffset();
+        }
       }
 
       const chunkQueue = new SequentialChunkQueue({
