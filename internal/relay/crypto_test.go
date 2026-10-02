@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
+	"runtime"
 	"testing"
 )
 
@@ -182,3 +184,80 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 		t.Fatal("consecutive frames reused the same nonce")
 	}
 }
+
+func TestOversizedFrameHeader(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name        string
+		frameLength uint32
+	}{
+		{
+			name:        "1GB frame length header",
+			frameLength: 1024 * 1024 * 1024,
+		},
+		{
+			name:        "MaxFrameSize + 1 frame length header",
+			frameLength: MaxFrameSize + 1,
+		},
+		{
+			name:        "Max uint32 frame length header",
+			frameLength: ^uint32(0),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tc.frameLength)
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if !errors.Is(err, ErrFrameTooLarge) {
+				t.Fatalf("expected ErrFrameTooLarge for frame length %d, got %v", tc.frameLength, err)
+			}
+		})
+	}
+}
+
+func TestMemoryFlatOnOversizedFrameHeader(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	runtime.GC()
+	var mBefore runtime.MemStats
+	runtime.ReadMemStats(&mBefore)
+
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, uint32(1024*1024*1024))
+
+	decReader, err := NewDecryptingReader(buf, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	out := make([]byte, 64)
+	_, err = decReader.Read(out)
+	if !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+	}
+
+	var mAfter runtime.MemStats
+	runtime.ReadMemStats(&mAfter)
+
+	allocated := mAfter.TotalAlloc - mBefore.TotalAlloc
+	if allocated > 1024*1024 {
+		t.Fatalf("excessive heap memory allocated (%d bytes) when processing oversized frame header", allocated)
+	}
+}
+
