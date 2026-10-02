@@ -2113,7 +2113,6 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -2129,53 +2128,15 @@ async function startWebRTC() {
                     const file = await diskFileHandle.getFile();
                     triggerSave(file, currentFile.name);
                   }
-                  chunkQueue.enqueueEOF();
-                  try {
-                    await chunkQueue.drain();
-                    if (diskWritableStream) {
-                      await diskWritableStream.close();
-                      if (useOPFS) {
-                        const file = await diskFileHandle.getFile();
-                        triggerSave(file, currentFile.name);
-                      }
-                    } else if (swPipePort) {
-                      swPipePort.postMessage("EOF");
-                    } else {
-                      let finalBlob;
-                      if (useIndexedDB) {
-                        finalBlob = await getAllChunksIDB(currentFile.mime);
-                        await clearIDB();
-                      } else {
-                        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                      }
-                      triggerSave(finalBlob, currentFile.name);
-                    }
-                    resolve();
-                  } catch (err) {
-                    hasError = true;
-                    // Handled in chunkQueue onError callback
-                  }
-                });
-              } else {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
-                  if (diskWritableStream) {
-                    await diskWritableStream.close();
-                    if (useOPFS) {
-                      const file = await diskFileHandle.getFile();
-                      triggerSave(file, currentFile.name);
-                    }
-                  } else if (swPipePort) {
-                    swPipePort.postMessage("EOF");
+                } else if (swPipePort) {
+                  swPipePort.postMessage("EOF");
+                } else {
+                  let finalBlob;
+                  if (useIndexedDB) {
+                    finalBlob = await getAllChunksIDB(currentFile.mime);
+                    await clearIDB();
                   } else {
-                    let finalBlob;
-                    if (useIndexedDB) {
-                      finalBlob = await getAllChunksIDB(currentFile.mime);
-                      await clearIDB();
-                    } else {
-                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                    }
-                    triggerSave(finalBlob, currentFile.name);
+                    finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
                   }
                   triggerSave(finalBlob, currentFile.name);
                 }
@@ -2325,6 +2286,74 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
         resolve();
       }
     }, pollMs);
+  });
+}
+
+async function waitForDataChannelBuffer(dc, targetAmount = 1024 * 1024, lowThreshold = 512 * 1024) {
+  if (!dc) return;
+  if (dc.readyState === 'closed' || dc.readyState === 'closing') {
+    throw new Error('Data channel is closed or closing');
+  }
+
+  dc.bufferedAmountLowThreshold = lowThreshold;
+
+  if (dc.bufferedAmount <= targetAmount) {
+    return;
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let intervalId = null;
+
+    const cleanup = () => {
+      settled = true;
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+      if (dc && typeof dc.removeEventListener === 'function') {
+        dc.removeEventListener('bufferedamountlow', check);
+        dc.removeEventListener('close', onClose);
+        dc.removeEventListener('error', onError);
+      }
+    };
+
+    const check = () => {
+      if (settled) return;
+      if (!dc || dc.readyState === 'closed' || dc.readyState === 'closing') {
+        cleanup();
+        reject(new Error('Data channel is closed or closing'));
+        return;
+      }
+      if (dc.bufferedAmount <= targetAmount) {
+        cleanup();
+        resolve();
+      }
+    };
+
+    const onClose = () => {
+      if (settled) return;
+      cleanup();
+      reject(new Error('Data channel is closed or closing'));
+    };
+
+    const onError = (err) => {
+      if (settled) return;
+      cleanup();
+      reject(err || new Error('Data channel error'));
+    };
+
+    if (typeof dc.addEventListener === 'function') {
+      dc.addEventListener('bufferedamountlow', check);
+      dc.addEventListener('close', onClose);
+      dc.addEventListener('error', onError);
+    }
+
+    check();
+
+    if (!settled) {
+      intervalId = setInterval(check, 250);
+    }
   });
 }
 
@@ -2669,7 +2698,8 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    const qrEndpoint = apiPath("/api/qr");
+    document.getElementById('send-qr-img').src = qrEndpoint + (qrEndpoint.includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -2802,10 +2832,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(senderDataChannel, 512 * 1024);
+    while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
+      if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+      if (dc.bufferedAmount > 1024 * 1024) {
+        await waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -2845,11 +2875,12 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (senderDataChannel.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(senderDataChannel, 0);
+  if (dc.bufferedAmount > 0) {
+    await waitForDataChannelBuffer(dc, 0, 0);
   }
-  senderDataChannel.send("EOF");
-  document.getElementById('send-status-label').textContent = "Transfer Complete!";
+  dc.send("EOF");
+  const sendLabelEl = document.getElementById('send-status-label');
+  if (sendLabelEl) sendLabelEl.textContent = "Transfer Complete!";
 }
 
 async function startSenderPolling(backend) {
@@ -3085,6 +3116,9 @@ if (typeof module !== 'undefined' && module.exports) {
     extractKeyFragment,
     parseDecryptionKeyFromHash,
     parseSessionInput,
-    getIceServers
+    getIceServers,
+    waitForDataChannelBuffer,
+    uploadFileP2P,
+    sendWebRTCFile
   };
 }
