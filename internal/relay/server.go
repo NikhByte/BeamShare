@@ -161,16 +161,20 @@ type failedAttempt struct {
 }
 
 type Server struct {
-	sessions           map[string]*Session
-	sessionTTL         time.Duration
-	cleanupInterval    time.Duration
-	stopChan           chan struct{}
-	ticker             *time.Ticker
-	wg                 sync.WaitGroup
-	SessionIDGenerator func() string
-	mu                 sync.Mutex
-	failedAttemptsMu   sync.Mutex
-	failedAttempts     map[string]*failedAttempt
+	sessions                 map[string]*Session
+	sessionTTL               time.Duration
+	cleanupInterval          time.Duration
+	rateLimitWindow          time.Duration
+	rateLimitCleanupInterval time.Duration
+	stopChan                 chan struct{}
+	ticker                   *time.Ticker
+	rateLimitTicker          *time.Ticker
+	wg                       sync.WaitGroup
+	SessionIDGenerator       func() string
+	mu                       sync.Mutex
+	failedAttemptsMu         sync.Mutex
+	failedAttempts           map[string]*failedAttempt
+	uploadTimeout            time.Duration
 }
 
 func NewServer() *Server {
@@ -178,12 +182,19 @@ func NewServer() *Server {
 }
 
 func NewServerWithConfig(ttl, cleanupInterval time.Duration) *Server {
+	rlInterval := 5 * time.Minute
+	if cleanupInterval > 0 && cleanupInterval < 5*time.Minute {
+		rlInterval = cleanupInterval
+	}
 	s := &Server{
-		sessions:        make(map[string]*Session),
-		failedAttempts:  make(map[string]*failedAttempt),
-		sessionTTL:      ttl,
-		cleanupInterval: cleanupInterval,
-		stopChan:        make(chan struct{}),
+		sessions:                 make(map[string]*Session),
+		failedAttempts:           make(map[string]*failedAttempt),
+		sessionTTL:               ttl,
+		cleanupInterval:          cleanupInterval,
+		uploadTimeout:            30 * time.Second,
+		rateLimitWindow:          1 * time.Minute,
+		rateLimitCleanupInterval: rlInterval,
+		stopChan:                 make(chan struct{}),
 	}
 	s.startSweeper()
 	return s
@@ -196,35 +207,72 @@ func (s *Server) startSweeper() {
 }
 
 func (s *Server) startSweeperLocked() {
-	if s.cleanupInterval <= 0 || s.ticker != nil {
-		return
-	}
 	if s.stopChan == nil {
 		s.stopChan = make(chan struct{})
 	}
-	ticker := time.NewTicker(s.cleanupInterval)
-	s.ticker = ticker
 
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		for {
-			select {
-			case <-ticker.C:
-				s.SweepExpiredSessions()
-			case <-s.stopChan:
-				return
+	if s.cleanupInterval > 0 && s.ticker == nil {
+		ticker := time.NewTicker(s.cleanupInterval)
+		s.ticker = ticker
+
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			for {
+				select {
+				case <-ticker.C:
+					s.SweepExpiredSessions()
+				case <-s.stopChan:
+					return
+				}
 			}
+		}()
+	}
+
+	rlInterval := s.rateLimitCleanupInterval
+	if rlInterval <= 0 {
+		if s.cleanupInterval > 0 && s.cleanupInterval < 5*time.Minute {
+			rlInterval = s.cleanupInterval
+		} else {
+			rlInterval = 5 * time.Minute
 		}
-	}()
+	}
+
+	if rlInterval > 0 && s.rateLimitTicker == nil {
+		rlTicker := time.NewTicker(rlInterval)
+		s.rateLimitTicker = rlTicker
+
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			for {
+				select {
+				case <-rlTicker.C:
+					s.SweepExpiredFailedAttempts()
+				case <-s.stopChan:
+					return
+				}
+			}
+		}()
+	}
 }
 
 func (s *Server) Stop() {
 	s.mu.Lock()
 	if s.ticker != nil {
 		s.ticker.Stop()
-		close(s.stopChan)
 		s.ticker = nil
+	}
+	if s.rateLimitTicker != nil {
+		s.rateLimitTicker.Stop()
+		s.rateLimitTicker = nil
+	}
+	if s.stopChan != nil {
+		select {
+		case <-s.stopChan:
+		default:
+			close(s.stopChan)
+		}
 	}
 	s.mu.Unlock()
 	s.wg.Wait()
@@ -264,7 +312,47 @@ func (s *Server) getSession(id string) *Session {
 	return s.GetSession(id)
 }
 
+func (s *Server) getUploadTimeout() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.uploadTimeout <= 0 {
+		return 30 * time.Second
+	}
+	return s.uploadTimeout
+}
+
+func (s *Server) getRateLimitWindow() time.Duration {
+	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	if s.rateLimitWindow <= 0 {
+		return 1 * time.Minute
+	}
+	return s.rateLimitWindow
+}
+
+func (s *Server) SetRateLimitWindow(d time.Duration) {
+	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	s.rateLimitWindow = d
+}
+
+func (s *Server) SweepExpiredFailedAttempts() {
+	window := s.getRateLimitWindow()
+	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	if s.failedAttempts == nil {
+		return
+	}
+	now := time.Now()
+	for ip, fa := range s.failedAttempts {
+		if fa != nil && now.Sub(fa.firstSeen) > window {
+			delete(s.failedAttempts, ip)
+		}
+	}
+}
+
 func (s *Server) checkFailedAttempts(ip string) bool {
+	window := s.getRateLimitWindow()
 	s.failedAttemptsMu.Lock()
 	defer s.failedAttemptsMu.Unlock()
 	if s.failedAttempts == nil {
@@ -275,7 +363,7 @@ func (s *Server) checkFailedAttempts(ip string) bool {
 	if !ok {
 		return true
 	}
-	if time.Since(fa.firstSeen) > time.Minute {
+	if time.Since(fa.firstSeen) > window {
 		delete(s.failedAttempts, ip)
 		return true
 	}
@@ -283,13 +371,14 @@ func (s *Server) checkFailedAttempts(ip string) bool {
 }
 
 func (s *Server) recordFailedAttempt(ip string) {
+	window := s.getRateLimitWindow()
 	s.failedAttemptsMu.Lock()
 	defer s.failedAttemptsMu.Unlock()
 	if s.failedAttempts == nil {
 		s.failedAttempts = make(map[string]*failedAttempt)
 	}
 	fa, ok := s.failedAttempts[ip]
-	if !ok || time.Since(fa.firstSeen) > time.Minute {
+	if !ok || time.Since(fa.firstSeen) > window {
 		s.failedAttempts[ip] = &failedAttempt{count: 1, firstSeen: time.Now()}
 		return
 	}
@@ -1018,6 +1107,23 @@ func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 }
 
+type timeoutWriter struct {
+	pw      *io.PipeWriter
+	timeout time.Duration
+}
+
+func (tw *timeoutWriter) Write(p []byte) (int, error) {
+	if tw.timeout <= 0 {
+		return tw.pw.Write(p)
+	}
+	timer := time.AfterFunc(tw.timeout, func() {
+		tw.pw.CloseWithError(fmt.Errorf("upload write timeout: idle for %v", tw.timeout))
+	})
+	n, err := tw.pw.Write(p)
+	timer.Stop()
+	return n, err
+}
+
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1047,6 +1153,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uploadTimeout := s.getUploadTimeout()
+
 	for {
 		part, err := reader.NextPart()
 		if err == io.EOF {
@@ -1070,9 +1178,32 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 
+			tw := &timeoutWriter{
+				pw:      pw,
+				timeout: uploadTimeout,
+			}
+
+			done := make(chan struct{})
+			defer close(done)
+
+			go func() {
+				select {
+				case <-done:
+					return
+				case <-r.Context().Done():
+					pw.CloseWithError(r.Context().Err())
+				}
+			}()
+
 			// Stream data to pipe
-			_, err = io.Copy(pw, part)
-			pw.CloseWithError(err)
+			_, copyErr := io.Copy(tw, part)
+			if copyErr != nil {
+				pw.CloseWithError(copyErr)
+				part.Close()
+				http.Error(w, fmt.Sprintf("upload transfer failed: %v", copyErr), http.StatusGatewayTimeout)
+				return
+			}
+			pw.Close()
 			part.Close()
 
 			w.Header().Set("Content-Type", "application/json")
@@ -1101,5 +1232,17 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-r.Context().Done():
+			pr.CloseWithError(r.Context().Err())
+		}
+	}()
+
 	io.Copy(w, pr)
 }
