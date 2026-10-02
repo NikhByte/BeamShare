@@ -556,3 +556,76 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 }
 
+func TestConcurrentUpdateSharedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "testfile.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("hello world"), 0600))
+
+	srv, err := New("", 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+
+	// Continuous GET /api/meta
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				resp, err := http.Get(ts.URL + "/api/meta")
+				if err == nil {
+					io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+				}
+			}
+		}
+	}()
+
+	// Continuous GET /api/download
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				resp, err := http.Get(ts.URL + "/api/download")
+				if err == nil {
+					io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+				}
+			}
+		}
+	}()
+
+	// Continuous UpdateSharedFile
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				i++
+				fileName := fmt.Sprintf("file_%d.txt", i)
+				srv.UpdateSharedFile(filePath, fileName, int64(100+i))
+				time.Sleep(1 * time.Millisecond)
+			}
+		}
+	}()
+
+	wg.Wait()
+}
+
