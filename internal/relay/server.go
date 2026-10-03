@@ -590,6 +590,18 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var sessDone <-chan struct{}
+	if sess.ctx != nil {
+		sessDone = sess.ctx.Done()
+	}
+
+	select {
+	case <-sessDone:
+		http.Error(w, "session expired", http.StatusGone)
+		return
+	default:
+	}
+
 	if dlReq, ok := sess.DequeueDownload(); ok {
 		respondWithDownload(w, dlReq)
 		return
