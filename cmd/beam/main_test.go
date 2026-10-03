@@ -112,3 +112,35 @@ func TestDownloadFile_Relay(t *testing.T) {
 		t.Fatalf("downloadFile failed: %v", err)
 	}
 }
+
+func TestDownloadFile_WithToken(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("token") != "secret123" && r.Header.Get("X-Beam-Token") != "secret123" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		meta := server.FileMeta{
+			Name: "test_download_token.txt",
+			Size: 10,
+		}
+		json.NewEncoder(w).Encode(meta)
+	})
+	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("token") != "secret123" && r.Header.Get("X-Beam-Token") != "secret123" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Write([]byte("Token Data"))
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	defer os.Remove("received_test_download_token.txt")
+
+	err := downloadFile(ts.URL + "/?token=secret123")
+	if err != nil {
+		t.Fatalf("downloadFile with token failed: %v", err)
+	}
+}
