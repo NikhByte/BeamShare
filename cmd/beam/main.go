@@ -503,19 +503,21 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 			// Hook up data channel handler
 			session.OnOpen = func(dc *webrtc.DataChannel) {
 				pauseCtrl := newPauseController()
+
+				// Single-flight context management for file streaming transfers
 				var (
-					streamMu     sync.Mutex
-					streamCancel context.CancelFunc
+					transferCtxMu  sync.Mutex
+					transferCancel context.CancelFunc
 				)
 
 				dc.OnClose(func() {
 					pauseCtrl.Close()
-					streamMu.Lock()
-					if streamCancel != nil {
-						streamCancel()
-						streamCancel = nil
+					transferCtxMu.Lock()
+					if transferCancel != nil {
+						transferCancel()
+						transferCancel = nil
 					}
-					streamMu.Unlock()
+					transferCtxMu.Unlock()
 				})
 
 				// Upload state variables for incoming files from receiver
@@ -527,18 +529,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					uploadStat time.Time
 				)
 				var isStreaming atomic.Bool
-
-				var senderMu sync.Mutex
-				var activeCancel context.CancelFunc
-
-				dc.OnClose(func() {
-					senderMu.Lock()
-					if activeCancel != nil {
-						activeCancel()
-						activeCancel = nil
-					}
-					senderMu.Unlock()
-				})
 
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
@@ -593,13 +583,14 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if len(parts) == 2 {
 								offset, _ = strconv.ParseInt(parts[1], 10, 64)
 							}
-							streamMu.Lock()
-							if streamCancel != nil {
-								streamCancel()
+
+							transferCtxMu.Lock()
+							if transferCancel != nil {
+								transferCancel()
 							}
-							var streamCtx context.Context
-							streamCtx, streamCancel = context.WithCancel(mainCtx)
-							streamMu.Unlock()
+							var transferCtx context.Context
+							transferCtx, transferCancel = context.WithCancel(context.Background())
+							transferCtxMu.Unlock()
 
 							// File sender goroutine (Direct-to-Disk + Backpressure + Pause/Resume Flow Control)
 							go func(ctx context.Context, reqOffset int64) {
@@ -612,7 +603,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									return
 								}
 								defer file.Close()
-								defer pauseCtrl.Close()
 
 								if reqOffset > 0 {
 									_, err = file.Seek(reqOffset, io.SeekStart)
@@ -635,44 +625,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									return
 								}
 
-								bufferedAmountLowChan := make(chan struct{}, 1)
-								dc.OnBufferedAmountLow(func() {
-									select {
-									case bufferedAmountLowChan <- struct{}{}:
-									default:
-									}
-								})
-
-								waitForBufferLow := func(targetThreshold uint64) error {
-									dc.SetBufferedAmountLowThreshold(targetThreshold)
-									if uint64(dc.BufferedAmount()) <= targetThreshold {
-										return nil
-									}
-									ticker := time.NewTicker(20 * time.Millisecond)
-									defer ticker.Stop()
-
-									for {
-										if dc.ReadyState() != webrtc.DataChannelStateOpen {
-											return fmt.Errorf("data channel is no longer open")
-										}
-										if uint64(dc.BufferedAmount()) <= targetThreshold {
-											return nil
-										}
-										select {
-										case <-ctx.Done():
-											return ctx.Err()
-										case <-bufferedAmountLowChan:
-											if uint64(dc.BufferedAmount()) <= targetThreshold {
-												return nil
-											}
-										case <-ticker.C:
-											if uint64(dc.BufferedAmount()) <= targetThreshold {
-												return nil
-											}
-										}
-									}
-								}
-
 								buffer := make([]byte, 64*1024) // 64KB chunk size
 								totalSent := reqOffset
 								start := time.Now()
@@ -688,10 +640,20 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 										return
 									}
 
-									// Backpressure check: wait if buffered amount > 1MB
-									if dc.BufferedAmount() > 1024*1024 {
-										if errWait := waitForBufferLow(512 * 1024); errWait != nil {
-											fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
+									select {
+									case <-ctx.Done():
+										return
+									default:
+									}
+
+									// Backpressure check: active buffer polling
+									for dc.BufferedAmount() > 1024*1024 {
+										select {
+										case <-ctx.Done():
+											return
+										case <-time.After(5 * time.Millisecond):
+										}
+										if !pauseCtrl.WaitIfPaused() {
 											return
 										}
 									}
@@ -728,18 +690,17 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									}
 								}
 
-								// Wait for buffer to clear before sending EOF
-								if dc.BufferedAmount() > 0 {
-									if errWait := waitForBufferLow(0); errWait != nil {
-										fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
+								// Wait for outbound buffer to clear before sending EOF
+								for dc.BufferedAmount() > 0 {
+									select {
+									case <-ctx.Done():
 										return
+									case <-time.After(5 * time.Millisecond):
 									}
 								}
 
-								select {
-								case <-ctx.Done():
+								if ctx.Err() != nil {
 									return
-								default:
 								}
 
 								dc.SendText("EOF")
@@ -751,7 +712,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									elapsed.Seconds(),
 									ui.FormatSpeed(sentInSession, elapsed),
 								)
-							}(streamCtx, offset)
+							}(transferCtx, offset)
 						}
 					} else {
 						if uploadFile != nil {
