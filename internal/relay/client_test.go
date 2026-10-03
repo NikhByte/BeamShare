@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -225,4 +226,50 @@ func TestUploadReaderAtOffset(t *testing.T) {
 			t.Fatalf("expected offset uploaded data '%s', got '%s'", string(offsetData), string(receivedOffset))
 		}
 	})
+
+	t.Run("InvalidKeyLength", func(t *testing.T) {
+		invalidLengths := []int{1, 16, 24, 31, 33, 64}
+		for _, keyLen := range invalidLengths {
+			httpCalled := false
+			client := &Client{
+				BaseURL:   "http://invalid.local",
+				SessionID: "test-session",
+				HTTP: &mockHTTPClient{
+					doFunc: func(req *http.Request) (*http.Response, error) {
+						httpCalled = true
+						return nil, fmt.Errorf("HTTP call should not occur")
+					},
+				},
+				Key: make([]byte, keyLen),
+			}
+
+			err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader([]byte("secret payload")), 0)
+			if err == nil {
+				t.Fatalf("expected error for key length %d, got nil", keyLen)
+			}
+			if httpCalled {
+				t.Fatalf("expected zero HTTP requests for key length %d, but HTTP request occurred", keyLen)
+			}
+		}
+	})
 }
+
+type mockHTTPClient struct {
+	doFunc func(req *http.Request) (*http.Response, error)
+}
+
+func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	if m.doFunc != nil {
+		return m.doFunc(req)
+	}
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (m *mockHTTPClient) Get(url string) (*http.Response, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (m *mockHTTPClient) Post(url, contentType string, body io.Reader) (*http.Response, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
