@@ -441,25 +441,88 @@ func TestOversizedFrameHeader_NoAllocationOrOOM(t *testing.T) {
 	}
 }
 
-func TestFrameHeader_LessThanNonceSize_UnexpectedEOF(t *testing.T) {
+func TestOversizedFrameHeader(t *testing.T) {
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
 
-	// Frame length = 11 bytes (GCM nonce is 12 bytes)
-	buf := make([]byte, 4+11)
-	binary.BigEndian.PutUint32(buf[0:4], 11)
+	tests := []struct {
+		name   string
+		length uint32
+	}{
+		{
+			name:   "OneByteOverMax",
+			length: MaxFrameSize + 1,
+		},
+		{
+			name:   "2GBHeaderAttack",
+			length: 2 * 1024 * 1024 * 1024,
+		},
+		{
+			name:   "MaxUint32Header",
+			length: 0xFFFFFFFF,
+		},
+	}
 
-	decReader, err := NewDecryptingReader(bytes.NewReader(buf), key)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tt.length)
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if !errors.Is(err, ErrFrameTooLarge) {
+				t.Fatalf("expected ErrFrameTooLarge for length %d, got %v", tt.length, err)
+			}
+		})
+	}
+}
+
+func TestMaxValidFramePayload(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// 64KB full chunk
+	plaintext := make([]byte, 64*1024)
+	if _, err := io.ReadFull(rand.Reader, plaintext); err != nil {
+		t.Fatalf("failed to generate random plaintext: %v", err)
+	}
+
+	encReader, err := NewEncryptingReader(bytes.NewReader(plaintext), key)
+	if err != nil {
+		t.Fatalf("NewEncryptingReader failed: %v", err)
+	}
+
+	encryptedData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("reading encrypted data failed: %v", err)
+	}
+
+	frameLen := binary.BigEndian.Uint32(encryptedData[0:4])
+	if frameLen != MaxFramePayloadSize {
+		t.Fatalf("expected frame payload size to be %d, got %d", MaxFramePayloadSize, frameLen)
+	}
+
+	decReader, err := NewDecryptingReader(bytes.NewReader(encryptedData), key)
 	if err != nil {
 		t.Fatalf("NewDecryptingReader failed: %v", err)
 	}
 
-	out := make([]byte, 64)
-	_, err = decReader.Read(out)
-	if err != io.ErrUnexpectedEOF {
-		t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+	decryptedData, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("reading decrypted data failed: %v", err)
+	}
+
+	if !bytes.Equal(decryptedData, plaintext) {
+		t.Fatal("decrypted max frame data does not match original plaintext")
 	}
 }
 
@@ -480,12 +543,12 @@ func TestZeroAllocationsPerFrame(t *testing.T) {
 		t.Fatalf("NewEncryptingReader failed: %v", err)
 	}
 
-	encrypted, err := io.ReadAll(encReader)
+	encryptedData, err := io.ReadAll(encReader)
 	if err != nil {
 		t.Fatalf("reading encrypted data failed: %v", err)
 	}
 
-	decReader, err := NewDecryptingReader(bytes.NewReader(encrypted), key)
+	decReader, err := NewDecryptingReader(bytes.NewReader(encryptedData), key)
 	if err != nil {
 		t.Fatalf("NewDecryptingReader failed: %v", err)
 	}
@@ -598,6 +661,51 @@ func TestDecryptingReaderZeroAllocations(t *testing.T) {
 
 	if allocs > 0 {
 		t.Fatalf("expected 0 allocations per frame read, got %f", allocs)
+	}
+}
+
+func TestZeroAllocationOnInvalidFrameHeader(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	oversizedBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(oversizedBuf, MaxFrameSize+100)
+
+	truncatedBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(truncatedBuf, 5)
+
+	out := make([]byte, 64)
+
+	rOversized := bytes.NewReader(oversizedBuf)
+	drOversized, err := NewDecryptingReader(rOversized, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	allocsReadOversized := testing.AllocsPerRun(100, func() {
+		rOversized.Seek(0, io.SeekStart)
+		_, _ = drOversized.Read(out)
+	})
+
+	if allocsReadOversized != 0 {
+		t.Fatalf("expected 0 allocations in Read for oversized frame header, got %f", allocsReadOversized)
+	}
+
+	rTruncated := bytes.NewReader(truncatedBuf)
+	drTruncated, err := NewDecryptingReader(rTruncated, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	allocsReadTruncated := testing.AllocsPerRun(100, func() {
+		rTruncated.Seek(0, io.SeekStart)
+		_, _ = drTruncated.Read(out)
+	})
+
+	if allocsReadTruncated != 0 {
+		t.Fatalf("expected 0 allocations in Read for truncated frame header, got %f", allocsReadTruncated)
 	}
 }
 

@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	MinFrameLength = 28
-	MaxFrameLength = 65564
-	MaxFrameSize   = MaxFrameLength
+	MinFrameLength      = 28
+	MaxFrameLength      = 65564
+	MaxFrameSize        = MaxFrameLength
+	MaxFramePayloadSize = MaxFrameLength
 )
 
 var (
