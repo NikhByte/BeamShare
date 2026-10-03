@@ -976,18 +976,43 @@ func downloadFile(code string) error {
 	backend = strings.TrimRight(backend, "/")
 
 	s := u.Query().Get("s")
+	token := u.Query().Get("token")
+	if token == "" {
+		if bu, err := url.Parse(backend); err == nil {
+			token = bu.Query().Get("token")
+		}
+	}
 	k := u.Fragment
 	if strings.HasPrefix(k, "k=") {
 		k = k[2:]
 	}
 
 	metaURL := backend + "/api/meta"
+	var metaParams []string
 	if s != "" {
-		metaURL += "?s=" + s
+		metaParams = append(metaParams, "s="+s)
+	}
+	if token != "" {
+		metaParams = append(metaParams, "token="+token)
+	}
+	if len(metaParams) > 0 {
+		if strings.Contains(metaURL, "?") {
+			metaURL += "&" + strings.Join(metaParams, "&")
+		} else {
+			metaURL += "?" + strings.Join(metaParams, "&")
+		}
+	}
+
+	reqMeta, err := http.NewRequest(http.MethodGet, metaURL, nil)
+	if err != nil {
+		return fmt.Errorf("invalid meta request: %w", err)
+	}
+	if token != "" {
+		reqMeta.Header.Set("X-Beam-Token", token)
 	}
 
 	fmt.Printf("  %s\n", dimStr("Fetching metadata..."))
-	respMeta, err := http.Get(metaURL)
+	respMeta, err := http.DefaultClient.Do(reqMeta)
 	if err != nil {
 		return fmt.Errorf("failed to fetch metadata: %w", err)
 	}
@@ -1004,12 +1029,31 @@ func downloadFile(code string) error {
 	ui.PrintFileMeta(meta.Name, meta.Size)
 
 	downloadURL := backend + "/api/download"
+	var dlParams []string
 	if s != "" {
-		downloadURL += "?s=" + s
+		dlParams = append(dlParams, "s="+s)
+	}
+	if token != "" {
+		dlParams = append(dlParams, "token="+token)
+	}
+	if len(dlParams) > 0 {
+		if strings.Contains(downloadURL, "?") {
+			downloadURL += "&" + strings.Join(dlParams, "&")
+		} else {
+			downloadURL += "?" + strings.Join(dlParams, "&")
+		}
+	}
+
+	reqDL, err := http.NewRequest(http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return fmt.Errorf("invalid download request: %w", err)
+	}
+	if token != "" {
+		reqDL.Header.Set("X-Beam-Token", token)
 	}
 
 	fmt.Printf("  %s\n", dimStr("Starting download..."))
-	respDL, err := http.Get(downloadURL)
+	respDL, err := http.DefaultClient.Do(reqDL)
 	if err != nil {
 		return fmt.Errorf("failed to start download: %w", err)
 	}
