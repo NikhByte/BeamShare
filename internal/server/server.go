@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -479,11 +478,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if part.FormName() == "file" {
-			cleanBase := filepath.Base(filepath.Clean(part.FileName()))
-			cleanBase = strings.Trim(cleanBase, "\x00./\\")
-			if cleanBase == "" {
-				cleanBase = "upload.bin"
-			}
+			cleanBase := SanitizeFilename(part.FileName(), "upload.bin")
 			outName := "received_" + cleanBase
 			outFile, err := os.OpenFile(outName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 			if err != nil {
@@ -548,7 +543,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 				formatBytes(int64(speed)),
 			)
 
-			s.UpdateSharedFile(outName, part.FileName(), totalReceived)
+			s.UpdateSharedFile(outName, cleanBase, totalReceived)
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": outName})
