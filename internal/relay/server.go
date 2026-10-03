@@ -45,6 +45,9 @@ type Session struct {
 	expiresAt time.Time
 	mu        sync.Mutex
 
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	downloadQueue  []DownloadRequest
 	downloadNotify chan struct{}
 }
@@ -246,6 +249,9 @@ func (s *Server) SweepExpiredSessions() {
 	s.mu.Unlock()
 
 	for _, sess := range expired {
+		if sess.cancel != nil {
+			sess.cancel()
+		}
 		sess.ClosePipes(fmt.Errorf("session expired"))
 		sess.ClearDownloadQueue()
 	}
@@ -351,12 +357,15 @@ func (s *Server) createSession() *Session {
 		}
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	sess := &Session{
 		ID:             id,
 		AnswerReady:    make(chan string, 1),
 		downloadNotify: make(chan struct{}, maxDownloadQueueSize),
 		UploadReq:      make(chan string, 1),
 		expiresAt:      time.Now().Add(s.sessionTTL),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 	s.sessions[id] = sess
 
@@ -493,6 +502,18 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var sessDone <-chan struct{}
+	if sess.ctx != nil {
+		sessDone = sess.ctx.Done()
+	}
+
+	select {
+	case <-sessDone:
+		http.Error(w, "session expired", http.StatusGone)
+		return
+	default:
+	}
+
 	if dlReq, ok := sess.DequeueDownload(); ok {
 		select {
 		case <-sess.downloadNotify:
@@ -521,6 +542,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 				respondWithDownload(w, dlReq)
 				return
 			}
+		case <-sessDone:
+			http.Error(w, "session expired", http.StatusGone)
+			return
 		case <-r.Context().Done():
 			return
 		}
