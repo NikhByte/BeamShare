@@ -2836,7 +2836,7 @@ async function startHTTPDownload() {
           while (encBuffer.length >= 4) {
             const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
             const frameLen = dv.getUint32(0, false);
-            const maxFrameSize = 65536 + 12 + 16; // 64KB chunk + 12B nonce + 16B tag
+            const maxFrameSize = 1024 * 1024; // 1MB maximum frame limit
             if (frameLen < 12 || frameLen > maxFrameSize) {
               console.error("Invalid encrypted frame size:", frameLen);
               encBuffer = new Uint8Array(0);

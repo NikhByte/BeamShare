@@ -11,7 +11,7 @@ import (
 )
 
 // MaxFrameSize is the maximum allowable payload size for an encrypted frame (1MB).
-const MaxFrameSize = 1 * 1024 * 1024
+const MaxFrameSize = 1024 * 1024
 
 var (
 	// ErrFrameTooLarge is returned when a frame length header exceeds MaxFrameSize.
@@ -81,12 +81,11 @@ func (er *EncryptingReader) Read(p []byte) (int, error) {
 }
 
 type DecryptingReader struct {
-	r            io.Reader
-	gcm          cipher.AEAD
-	buf          []byte
-	frameBuf     []byte
-	plaintextBuf []byte
-	headerBuf    [4]byte
+	r         io.Reader
+	gcm       cipher.AEAD
+	buf       []byte // slice of unread decrypted plaintext
+	frameBuf  []byte // 1MB reusable buffer for frame payload and in-place decryption
+	headerBuf [4]byte
 }
 
 func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
@@ -102,10 +101,9 @@ func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
 		return nil, err
 	}
 	return &DecryptingReader{
-		r:            r,
-		gcm:          gcm,
-		frameBuf:     make([]byte, MaxFrameSize),
-		plaintextBuf: make([]byte, MaxFrameSize),
+		r:        r,
+		gcm:      gcm,
+		frameBuf: make([]byte, MaxFrameSize),
 	}, nil
 }
 
@@ -124,13 +122,12 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 	}
 	length := binary.BigEndian.Uint32(dr.headerBuf[:])
 
-	if length > MaxFrameSize {
-		return 0, ErrFrameTooLarge
-	}
-
 	nonceSize := dr.gcm.NonceSize()
 	if int(length) < nonceSize {
 		return 0, io.ErrUnexpectedEOF
+	}
+	if length > MaxFrameSize {
+		return 0, fmt.Errorf("frame length %d exceeds maximum limit of %d bytes: %w", length, MaxFrameSize, ErrFrameTooLarge)
 	}
 
 	frameData := dr.frameBuf[:length]
@@ -141,7 +138,7 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 	nonce := frameData[:nonceSize]
 	ciphertext := frameData[nonceSize:]
 
-	plaintext, err := dr.gcm.Open(dr.plaintextBuf[:0], nonce, ciphertext, nil)
+	plaintext, err := dr.gcm.Open(ciphertext[:0], nonce, ciphertext, nil)
 	if err != nil {
 		return 0, err
 	}
