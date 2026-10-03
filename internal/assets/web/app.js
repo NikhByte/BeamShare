@@ -1406,6 +1406,9 @@ async function startHTTPDownload() {
           while (encBuffer.length >= 4) {
             const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
             const frameLen = dv.getUint32(0, false);
+            if (frameLen < 12 || frameLen > 1024 * 1024) {
+              throw new Error("Invalid encrypted frame length: " + frameLen);
+            }
             if (encBuffer.length >= 4 + frameLen) {
               const frame = encBuffer.slice(4, 4 + frameLen);
               encBuffer = encBuffer.slice(4 + frameLen);
