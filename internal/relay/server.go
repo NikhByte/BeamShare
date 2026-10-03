@@ -597,7 +597,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-sessDone:
-		http.Error(w, "session expired", http.StatusGone)
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	default:
 	}
