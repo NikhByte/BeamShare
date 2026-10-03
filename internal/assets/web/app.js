@@ -823,6 +823,10 @@ function setMode(mode, label) {
 async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator)) return null;
 
+  // WebKit/Safari blocks downloads initiated inside subframes (iframes)
+  const isWebKit = /AppleWebKit/i.test(navigator.userAgent) && !/Chrome|Edg|OPR|Chromium/i.test(navigator.userAgent);
+  if (isWebKit) return null;
+
   try {
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));

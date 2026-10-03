@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -259,6 +260,92 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestServer_SessionContextCancellationOnExpiration(t *testing.T) {
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+	require.NotNil(t, sess)
+	require.NotNil(t, sess.ctx, "Session ctx must be initialized")
+	require.NotNil(t, sess.cancel, "Session cancel must be initialized")
+	assert.NoError(t, sess.ctx.Err(), "Session context should initially not be canceled")
+
+	// Start long-polling on the created session
+	pollStatusCh := make(chan int, 1)
+	go func() {
+		resp, err := http.Get(ts.URL + "/relay/poll?session=" + sess.ID)
+		if err != nil {
+			pollStatusCh <- -1
+			return
+		}
+		defer resp.Body.Close()
+		pollStatusCh <- resp.StatusCode
+	}()
+
+	// Give poll goroutine time to block
+	time.Sleep(20 * time.Millisecond)
+
+	// Wait for session to expire and sweeper to run
+	assert.Eventually(t, func() bool {
+		return srv.GetSession(sess.ID) == nil
+	}, 2*time.Second, 10*time.Millisecond, "Session did not expire")
+
+	// Verify session context was canceled
+	assert.ErrorIs(t, sess.ctx.Err(), context.Canceled, "Session context should be canceled upon expiration sweep")
+
+	// Verify long-polling request received 410 Gone status
+	select {
+	case status := <-pollStatusCh:
+		assert.Equal(t, http.StatusGone, status, "handlePoll must return HTTP 410 Gone when session context cancels")
+	case <-time.After(2 * time.Second):
+		t.Fatal("long-polling request did not unblock after session expiration")
+	}
+}
+
+func TestServer_GoroutineLeakPrevention(t *testing.T) {
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	initialGoroutines := runtime.NumGoroutine()
+
+	// Spawn 10 concurrent long-polling requests across 10 sessions
+	numSessions := 10
+	var wg sync.WaitGroup
+	wg.Add(numSessions)
+
+	for i := 0; i < numSessions; i++ {
+		sess := srv.createSession()
+		go func(id string) {
+			defer wg.Done()
+			resp, err := http.Get(ts.URL + "/relay/poll?session=" + id)
+			if err == nil {
+				resp.Body.Close()
+			}
+		}(sess.ID)
+	}
+
+	// Wait for all poll goroutines to complete after session expiration
+	wg.Wait()
+
+	// Ensure all sessions are purged
+	assert.Eventually(t, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return len(srv.sessions) == 0
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Verify goroutine count returns to baseline
+	assert.Eventually(t, func() bool {
+		return runtime.NumGoroutine() <= initialGoroutines+2
+	}, 2*time.Second, 10*time.Millisecond, "Goroutine count did not return to baseline")
 }
 
 
