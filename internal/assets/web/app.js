@@ -483,20 +483,40 @@ function getBackendURL() {
       backend = 'https://beamshare.onrender.com';
     }
   }
-  if (backend && backend.endsWith('/')) {
-    backend = backend.slice(0, -1);
+  try {
+    const u = new URL(backend);
+    return u.origin;
+  } catch (e) {
+    if (backend && backend.endsWith('/')) {
+      backend = backend.slice(0, -1);
+    }
+    return backend;
   }
-  return backend;
 }
 
 function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
-  let fullPath = path;
-  if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+  let token = params.get('token') || params.get('t');
+  if (!token) {
+    const rawBackend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || '';
+    if (rawBackend) {
+      try {
+        const bu = new URL(rawBackend);
+        token = bu.searchParams.get('token') || bu.searchParams.get('t');
+      } catch (e) {}
+    }
   }
+
+  let fullPath = path;
+  if (s && !fullPath.includes('s=')) {
+    fullPath += (fullPath.includes('?') ? '&s=' : '?s=') + encodeURIComponent(s);
+  }
+  if (token && !fullPath.includes('token=')) {
+    fullPath += (fullPath.includes('?') ? '&token=' : '?token=') + encodeURIComponent(token);
+  }
+
   if (backend) {
     return backend + fullPath;
   }
@@ -2630,7 +2650,18 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      let metaURL = `${localURL}/api/meta`;
+      try {
+        const u = new URL(localURL);
+        const tok = u.searchParams.get('token');
+        u.pathname = '/api/meta';
+        if (tok) {
+          u.searchParams.set('token', tok);
+        }
+        metaURL = u.toString();
+      } catch (e) {}
+
+      const res = await fetch(metaURL, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
