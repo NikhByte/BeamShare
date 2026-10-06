@@ -394,72 +394,76 @@ var qrcodegen = (function() {
 	return { QrCode };
 })();
 
-function renderQRCode(text, targetElement, options = {}) {
-  if (!text || !targetElement) return;
-  const cellSize = options.cellSize || 4;
-  const margin = options.margin !== undefined ? options.margin : 4;
-  const qr = qrcodegen.QrCode.encodeText(text, qrcodegen.QrCode.Ecc.MEDIUM);
-  const count = qr.size;
-  const size = (count + margin * 2) * cellSize;
+function renderQRCode(arg1, arg2, options = {}) {
+  let text = null;
+  let targetElement = null;
 
+  if (arg1 && typeof arg1 === 'object') {
+    targetElement = arg1;
+    text = arg2;
+  } else if (arg2 && typeof arg2 === 'object') {
+    targetElement = arg2;
+    text = arg1;
+  } else if (typeof arg1 === 'string' && typeof arg2 === 'string') {
+    const el1 = document.getElementById(arg1);
+    if (el1) {
+      targetElement = el1;
+      text = arg2;
+    } else {
+      const el2 = document.getElementById(arg2);
+      if (el2) {
+        targetElement = el2;
+        text = arg1;
+      } else {
+        text = arg1;
+      }
+    }
+  } else if (typeof arg1 === 'string') {
+    targetElement = document.getElementById(arg1);
+    text = arg2;
+  }
+
+  if (!text || !targetElement) return;
+
+  const rawSvg = generateQRCodeSVG(text);
+  const svgStr = rawSvg.replace('<path fill="#000000" d=', '<path d=');
   const tag = targetElement.tagName ? targetElement.tagName.toLowerCase() : '';
 
-  if (tag === 'canvas') {
-    targetElement.width = size;
-    targetElement.height = size;
-    const ctx = targetElement.getContext ? targetElement.getContext('2d') : null;
-    if (ctx) {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, size, size);
-      ctx.fillStyle = '#000000';
-      for (let y = 0; y < count; y++) {
-        for (let x = 0; x < count; x++) {
-          if (qr.getModule(x, y)) {
-            ctx.fillRect((x + margin) * cellSize, (y + margin) * cellSize, cellSize, cellSize);
-          }
-        }
-      }
-    }
-  } else if (tag === 'svg') {
-    targetElement.setAttribute('viewBox', `0 0 ${size} ${size}`);
-    targetElement.setAttribute('width', size);
-    targetElement.setAttribute('height', size);
-    const pathParts = [];
-    for (let y = 0; y < count; y++) {
-      for (let x = 0; x < count; x++) {
-        if (qr.getModule(x, y)) {
-          const px = (x + margin) * cellSize;
-          const py = (y + margin) * cellSize;
-          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
-        }
-      }
-    }
-    targetElement.innerHTML = `<rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/>`;
-  } else if (tag === 'img') {
-    const pathParts = [];
-    for (let y = 0; y < count; y++) {
-      for (let x = 0; x < count; x++) {
-        if (qr.getModule(x, y)) {
-          const px = (x + margin) * cellSize;
-          const py = (y + margin) * cellSize;
-          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
-        }
-      }
-    }
-    const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/></svg>`;
+  if (tag === 'img') {
     targetElement.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
-  } else {
-    const pathParts = [];
-    for (let y = 0; y < count; y++) {
-      for (let x = 0; x < count; x++) {
-        if (qr.getModule(x, y)) {
-          const px = (x + margin) * cellSize;
-          const py = (y + margin) * cellSize;
-          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
+  } else if (tag === 'svg') {
+    const vbMatch = svgStr.match(/viewBox="([^"]+)"/);
+    if (vbMatch) {
+      targetElement.setAttribute('viewBox', vbMatch[1]);
+    }
+    const innerMatch = svgStr.match(/<svg[^>]*>([\s\S]*)<\/svg>/);
+    if (innerMatch) {
+      targetElement.innerHTML = innerMatch[1];
+    }
+  } else if (tag === 'canvas') {
+    targetElement.width = targetElement.width || 256;
+    targetElement.height = targetElement.height || 256;
+    const qrc = (typeof window !== 'undefined' && window.qrcodegen) ? window.qrcodegen : (typeof globalThis !== 'undefined' && globalThis.qrcodegen ? globalThis.qrcodegen : (typeof qrcodegen !== 'undefined' ? qrcodegen : null));
+    if (qrc && qrc.QrCode) {
+      try {
+        const qr = qrc.QrCode.encodeText(text, qrc.QrCode.Ecc.MEDIUM);
+        renderQRToCanvas(qr, targetElement, 4);
+      } catch (e) {
+        const ctx = targetElement.getContext ? targetElement.getContext('2d') : null;
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, targetElement.width, targetElement.height);
         }
       }
+    } else {
+      const ctx = targetElement.getContext ? targetElement.getContext('2d') : null;
+      if (ctx) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, targetElement.width, targetElement.height);
+      }
     }
-    targetElement.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/></svg>`;
+  } else {
+    targetElement.innerHTML = svgStr;
   }
 }
 
@@ -524,7 +528,7 @@ function apiPath(path) {
 
 // ── Local QR Code Generator & Renderer ─────────────────────────────────────
 "use strict";
-var qrcodegen;
+// var qrcodegen;
 (function (qrcodegen) {
  class QrCode {
  constructor(
@@ -1146,99 +1150,7 @@ function qrToSvgDataUrl(qr, border = 4) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
-function renderQRCode(arg1, arg2, options = {}) {
-  let element, text;
 
-  if (typeof arg1 === 'string' && (arg1.startsWith('http://') || arg1.startsWith('https://') || arg1.includes('://') || arg1.includes('#k='))) {
-    text = arg1;
-    element = typeof arg2 === 'string' ? document.getElementById(arg2) : arg2;
-  } else if (typeof arg2 === 'string' && (arg2.startsWith('http://') || arg2.startsWith('https://') || arg2.includes('://') || arg2.includes('#k='))) {
-    text = arg2;
-    element = typeof arg1 === 'string' ? document.getElementById(arg1) : arg1;
-  } else if (typeof arg1 === 'string' && typeof arg2 !== 'string') {
-    text = arg1;
-    element = arg2;
-  } else {
-    element = typeof arg1 === 'string' ? document.getElementById(arg1) : arg1;
-    text = arg2;
-  }
-
-  if (!element) return;
-  try {
-    if (!text) {
-      showQRError(element, "No URL provided for QR code");
-      return;
-    }
-    const qrc = (typeof window !== 'undefined' && window.qrcodegen) ? window.qrcodegen : (typeof globalThis !== 'undefined' && globalThis.qrcodegen ? globalThis.qrcodegen : (typeof qrcodegen !== 'undefined' ? qrcodegen : null));
-    if (!qrc || !qrc.QrCode) {
-      showQRError(element, "QR generator library missing");
-      return;
-    }
-    const eccLevel = (options.ecc && qrc.QrCode.Ecc[options.ecc]) || qrc.QrCode.Ecc.MEDIUM;
-    const qr = qrc.QrCode.encodeText(text, eccLevel);
-    
-    const tagName = element.tagName ? element.tagName.toLowerCase() : '';
-    if (tagName === 'img') {
-      try {
-        const dataUrl = qrToSvgDataUrl(qr, options.border !== undefined ? options.border : 4) + '#/api/qr?url=' + encodeURIComponent(text);
-        element.src = dataUrl;
-        if (typeof element.setAttribute === 'function') {
-          element.setAttribute('src', dataUrl);
-        }
-        element.alt = options.alt || "QR Code for share URL";
-      } catch (renderErr) {
-        showQRError(element, "Failed to render QR image");
-      }
-    } else if (tagName === 'canvas') {
-      try {
-        renderQRToCanvas(qr, element, options.border !== undefined ? options.border : 4);
-      } catch (canvasErr) {
-        showQRError(element, "Canvas QR rendering failed");
-      }
-    } else if (tagName === 'svg') {
-      try {
-        const border = options.border !== undefined ? options.border : 4;
-        const totalSize = qr.size + border * 2;
-        let pathD = '';
-        for (let y = 0; y < qr.size; y++) {
-          for (let x = 0; x < qr.size; x++) {
-            if (qr.getModule(x, y)) {
-              pathD += 'M' + (x + border) + ',' + (y + border) + 'h1v1h-1z ';
-            }
-          }
-        }
-        element.setAttribute('viewBox', '0 0 ' + totalSize + ' ' + totalSize);
-        element.setAttribute('width', '100%');
-        element.setAttribute('height', '100%');
-        element.innerHTML = '<rect width="' + totalSize + '" height="' + totalSize + '" fill="#ffffff"/><path d="' + pathD.trim() + '" fill="#000000"/>';
-      } catch (err) {
-        showQRError(element, "Failed to render QR SVG");
-      }
-    } else {
-      try {
-        const border = options.border !== undefined ? options.border : 4;
-        const totalSize = qr.size + border * 2;
-        let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + totalSize + ' ' + totalSize + '" width="100%" height="100%" shape-rendering="crispEdges">';
-        svg += '<rect width="' + totalSize + '" height="' + totalSize + '" fill="#ffffff"/>';
-        svg += '<path d="';
-        for (let y = 0; y < qr.size; y++) {
-          for (let x = 0; x < qr.size; x++) {
-            if (qr.getModule(x, y)) {
-              svg += 'M' + (x + border) + ',' + (y + border) + 'h1v1h-1z ';
-            }
-          }
-        }
-        svg += '" fill="#000000"/></svg>';
-        element.innerHTML = svg;
-      } catch (err) {
-        showQRError(element, "Failed to render QR SVG");
-      }
-    }
-  } catch (err) {
-    console.error("QR Code generation error:", err);
-    showQRError(element, "Unable to generate QR code");
-  }
-}
 
 function renderQRToCanvas(qr, canvas, border = 4) {
   const ctx = canvas.getContext('2d');
@@ -1835,13 +1747,15 @@ class OPFSStreamWriter {
   async close() {
     if (!this.worker) return;
     return new Promise((resolve) => {
-      const handleMsg = () => {
-        if (this.worker) {
-          this.worker.removeEventListener('message', handleMsg);
-          this.worker.terminate();
-          this.worker = null;
+      const handleMsg = (e) => {
+        if (e.data && e.data.type === 'CLOSE_OK') {
+          if (this.worker) {
+            this.worker.removeEventListener('message', handleMsg);
+            this.worker.terminate();
+            this.worker = null;
+          }
+          resolve();
         }
-        resolve();
       };
       this.worker.addEventListener('message', handleMsg);
       this.worker.postMessage({ type: 'CLOSE' });
@@ -2230,6 +2144,13 @@ function setMode(mode, label) {
 async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
 
+  // WebKit (Safari / Mobile Safari) does not reliably route iframe navigations through SW fetch handlers
+  const isWebKit = typeof navigator !== 'undefined' && (/AppleWebKit/i.test(navigator.userAgent) && !/Chrome|Chromium|Edg|Firefox/i.test(navigator.userAgent));
+  if (isWebKit) {
+    console.warn("Service Worker iframe pipe not supported in WebKit; bypassing SW pipe.");
+    return null;
+  }
+
   try {
     let cancelTimeout;
     const swReady = navigator.serviceWorker.ready;
@@ -2268,7 +2189,7 @@ async function getSWPipe(fileMeta) {
       }, 10000);
 
       function onMessage(e) {
-        if (e.data && e.data.type === 'READY') {
+        if (e.data && (e.data.type === 'READY' || e.data.type === 'PORT_READY' || e.data.type === 'INIT_PORT_ACK')) {
           cleanup();
           resolve();
         }
@@ -2295,8 +2216,8 @@ async function getSWPipe(fileMeta) {
 
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
-    iframe.src = swUrl;
     document.body.appendChild(iframe);
+    iframe.src = swUrl;
 
     setTimeout(() => {
       try { iframe.remove(); } catch (_) {}
@@ -2351,6 +2272,9 @@ function checkRamWarning(size) {
 }
 
 function generateClientQRCodeDataURL(text) {
+  if (typeof generateQRCodeDataURL === 'function') {
+    return generateQRCodeDataURL(text);
+  }
   if (typeof generateQRCodeSVGDataURL === 'function') {
     return generateQRCodeSVGDataURL(text);
   }
@@ -2487,6 +2411,20 @@ function init() {
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(err => {
       console.warn('Service Worker registration failed:', err);
     });
+
+    const markSwReady = () => {
+      document.documentElement.setAttribute('data-sw-ready', 'true');
+    };
+
+    if (navigator.serviceWorker.controller) {
+      markSwReady();
+    } else if (typeof navigator.serviceWorker.addEventListener === 'function') {
+      navigator.serviceWorker.addEventListener('controllerchange', markSwReady, { once: true });
+    }
+
+    navigator.serviceWorker.ready.then(() => {
+      markSwReady();
+    }).catch(() => {});
   }
 
   setState('loading');
@@ -2801,21 +2739,17 @@ async function startHTTPDownload() {
     }
   }
 
-  if (!diskWritableStream && swSupported) {
-    swPipePort = await getSWPipe(currentFile);
-  }
-
-  if (!diskWritableStream && !swPipePort && opfsSupported) {
+  if (!diskWritableStream && opfsSupported) {
     try {
       const root = await navigator.storage.getDirectory();
-      try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
+      const opfsFileName = `beam_temp_${Date.now()}_${Math.random().toString(36).substring(2)}`;
       
       const estimate = await navigator.storage.estimate();
       if (estimate && estimate.quota && currentFile.size > (estimate.quota - estimate.usage)) {
          throw new Error("Device disk is full");
       }
       
-      diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
+      diskFileHandle = await root.getFileHandle(opfsFileName, { create: true });
       diskWritableStream = await createOPFSWriter(diskFileHandle, initialOffset);
       useOPFS = true;
       useIndexedDB = false;
@@ -2828,6 +2762,10 @@ async function startHTTPDownload() {
       diskWritableStream = null;
       useOPFS = false;
     }
+  }
+
+  if (!diskWritableStream && swSupported) {
+    swPipePort = await getSWPipe(currentFile);
   }
 
   if (!diskWritableStream && !swPipePort && !useOPFS) {
@@ -2851,15 +2789,7 @@ async function startHTTPDownload() {
 
     const reader = res.body.getReader();
     let received = initialOffset;
-    let decryptionKey = null;
     let encBuffer = new Uint8Array(0);
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch(e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      return;
-    }
 
     while (true) {
       const { done, value } = await reader.read();
@@ -2940,7 +2870,10 @@ async function startHTTPDownload() {
       await diskWritableStream.close();
       if (useOPFS) {
         const file = await diskFileHandle.getFile();
-        triggerSave(file, currentFile.name);
+        const buffer = await file.arrayBuffer();
+        const blob = new Blob([buffer], { type: currentFile ? currentFile.mime : file.type });
+        try { const root = await navigator.storage.getDirectory(); await root.removeEntry(diskFileHandle.name); } catch(e){}
+        triggerSave(blob, currentFile.name);
       }
     } else if (swPipePort) {
       swPipePort.postMessage('EOF');
@@ -3211,21 +3144,17 @@ async function startWebRTC() {
       }
     }
 
-    if (!diskWritableStream && swSupported) {
-      swPipePort = await getSWPipe(currentFile);
-    }
-
-    if (!diskWritableStream && !swPipePort && opfsSupported) {
+    if (!diskWritableStream && opfsSupported) {
       try {
         const root = await navigator.storage.getDirectory();
-        try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
+        const opfsFileName = `beam_temp_${Date.now()}_${Math.random().toString(36).substring(2)}`;
         
         const estimate = await navigator.storage.estimate();
         if (estimate && estimate.quota && currentFile.size > (estimate.quota - estimate.usage)) {
            throw new Error("Device disk is full");
         }
         
-        diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
+        diskFileHandle = await root.getFileHandle(opfsFileName, { create: true });
         diskWritableStream = await createOPFSWriter(diskFileHandle, initialOffset);
         useOPFS = true;
         useIndexedDB = false;
@@ -3239,6 +3168,10 @@ async function startWebRTC() {
         diskWritableStream = null;
         useOPFS = false;
       }
+    }
+
+    if (!diskWritableStream && swSupported) {
+      swPipePort = await getSWPipe(currentFile);
     }
 
     if (!diskWritableStream && !swPipePort && !useOPFS) {
@@ -3365,85 +3298,166 @@ async function startWebRTC() {
       });
 
       encBuffer = new Uint8Array(0);
+      let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
-        if (typeof e.data === 'string') {
-          if (e.data === "EOF") {
-            chunkQueue.enqueueEOF();
-            chunkQueue.drain().then(async () => {
-              if (diskWritableStream) {
-                await diskWritableStream.close();
-                if (useOPFS) {
-                  const file = await diskFileHandle.getFile();
-                  triggerSave(file, currentFile.name);
+        if (decryptionKey) {
+          decryptChain = decryptChain.then(async () => {
+            if (typeof e.data === 'string') {
+              if (e.data === "EOF") {
+                chunkQueue.enqueueEOF();
+                try {
+                  await chunkQueue.drain();
+                  if (diskWritableStream) {
+                    await diskWritableStream.close();
+                    if (useOPFS) {
+                      const file = await diskFileHandle.getFile();
+                      triggerSave(file, currentFile.name);
+                    }
+                  } else if (swPipePort) {
+                    swPipePort.postMessage("EOF");
+                  } else {
+                    let finalBlob;
+                    if (useIndexedDB) {
+                      finalBlob = await getAllChunksIDB(currentFile.mime);
+                      await clearIDB();
+                    } else {
+                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
+                    }
+                    triggerSave(finalBlob, currentFile.name);
+                  }
+                  resolve();
+                } catch (err) {
+                  hasError = true;
+                  // Handled in chunkQueue onError callback
                 }
-              } else if (swPipePort) {
-                swPipePort.postMessage("EOF");
-              } else {
-                let finalBlob;
-                if (useIndexedDB) {
-                  finalBlob = await getAllChunksIDB(currentFile.mime);
-                  await clearIDB();
-                } else {
-                  finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                }
-                triggerSave(finalBlob, currentFile.name);
               }
-              resolve();
-            }).catch((err) => {
-              showError(`Transfer failed: ${err.message}`);
-              try { dc.close(); } catch (closeErr) {}
-              reject(err);
-            });
+              return;
+            }
+
+            const value = new Uint8Array(e.data);
+            let newBuffer = new Uint8Array(encBuffer.length + value.length);
+            newBuffer.set(encBuffer, 0);
+            newBuffer.set(value, encBuffer.length);
+            encBuffer = newBuffer;
+
+            while (encBuffer.length >= 4) {
+              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+              const frameLen = dv.getUint32(0, false);
+              if (encBuffer.length >= 4 + frameLen) {
+                const frame = encBuffer.slice(4, 4 + frameLen);
+                encBuffer = encBuffer.slice(4 + frameLen);
+
+                const nonce = new Uint8Array(frame.subarray(0, 12));
+                const ciphertext = new Uint8Array(frame.subarray(12));
+                const decrypted = await crypto.subtle.decrypt(
+                  { name: "AES-GCM", iv: nonce },
+                  decryptionKey,
+                  ciphertext
+                );
+                const decValue = new Uint8Array(decrypted);
+                chunkQueue.enqueue(decValue);
+              } else {
+                break;
+              }
+            }
+          }).catch((err) => {
+            showError(`Transfer failed: ${err.message}`);
+            dc.close();
+            reject(err);
+          });
+        } else {
+          try {
+            if (typeof e.data === 'string') {
+              if (e.data === "EOF") {
+                chunkQueue.enqueueEOF();
+                chunkQueue.drain().then(async () => {
+                  if (diskWritableStream) {
+                    await diskWritableStream.close();
+                    if (useOPFS) {
+                      const file = await diskFileHandle.getFile();
+                      triggerSave(file, currentFile.name);
+                    }
+                  } else if (swPipePort) {
+                    swPipePort.postMessage("EOF");
+                  } else {
+                    let finalBlob;
+                    if (useIndexedDB) {
+                      finalBlob = await getAllChunksIDB(currentFile.mime);
+                      await clearIDB();
+                    } else {
+                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
+                    }
+                    triggerSave(finalBlob, currentFile.name);
+                  }
+                  resolve();
+                }).catch((err) => {
+                  // Handled in chunkQueue onError callback
+                });
+              }
+              return;
+            }
+
+            const chunk = new Uint8Array(e.data);
+            chunkQueue.enqueue(chunk);
+          } catch (err) {
+            showError(`Transfer failed: ${err.message}`);
+            dc.close();
+            reject(err);
           }
-          return;
         }
 
         const chunk = new Uint8Array(e.data);
-        if (decryptionKey) {
-          let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
-          newBuffer.set(encBuffer, 0);
-          newBuffer.set(chunk, encBuffer.length);
-          encBuffer = newBuffer;
+        msgChain = msgChain.then(async () => {
+          if (isTerminated) return;
 
-          while (encBuffer.length >= 4) {
-            const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-            const frameLen = dv.getUint32(0, false);
-            const maxFrameSize = 65536 + 12 + 16;
-            if (frameLen < 12 || frameLen > maxFrameSize) {
-              console.error("Invalid encrypted frame size:", frameLen);
-              encBuffer = new Uint8Array(0);
-              showError("Invalid encrypted frame size: " + frameLen);
-              try { dc.close(); } catch (closeErr) {}
-              reject(new Error("Invalid encrypted frame size: " + frameLen));
-              return;
-            }
-            if (encBuffer.length >= 4 + frameLen) {
-              const frame = encBuffer.slice(4, 4 + frameLen);
-              encBuffer = encBuffer.slice(4 + frameLen);
+          if (decryptionKey) {
+            let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
+            newBuffer.set(encBuffer, 0);
+            newBuffer.set(chunk, encBuffer.length);
+            encBuffer = newBuffer;
 
-              const nonce = new Uint8Array(frame.subarray(0, 12));
-              const ciphertext = new Uint8Array(frame.subarray(12));
+            while (encBuffer.length >= 4) {
+              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+              const frameLen = dv.getUint32(0, false);
+              if (encBuffer.length >= 4 + frameLen) {
+                const frame = encBuffer.slice(4, 4 + frameLen);
+                encBuffer = encBuffer.slice(4 + frameLen);
 
-              crypto.subtle.decrypt(
-                { name: "AES-GCM", iv: nonce },
-                decryptionKey,
-                ciphertext
-              ).then((decrypted) => {
+                if (frameLen < 12) {
+                  throw new Error("Invalid frame length: header smaller than nonce size");
+                }
+
+                const nonce = new Uint8Array(frame.subarray(0, 12));
+                const ciphertext = new Uint8Array(frame.subarray(12));
+
+                let decrypted;
+                try {
+                  decrypted = await crypto.subtle.decrypt(
+                    { name: "AES-GCM", iv: nonce },
+                    decryptionKey,
+                    ciphertext
+                  );
+                } catch (decryptErr) {
+                  throw new Error("Decryption failed: corrupted frame or invalid key");
+                }
+
                 const decValue = new Uint8Array(decrypted);
                 chunkQueue.enqueue(decValue);
-              }).catch((decryptErr) => {
-                showError("Decryption failed: corrupted frame or invalid key");
-                try { dc.close(); } catch (closeErr) {}
-                reject(decryptErr);
-              });
-            } else {
-              break;
+              } else {
+                break;
+              }
             }
+          } else {
+            chunkQueue.enqueue(chunk);
           }
-        } else {
-          chunkQueue.enqueue(chunk);
-        }
+        }).catch((err) => {
+          if (isTerminated) return;
+          isTerminated = true;
+          showError(`Transfer failed: ${err.message}`);
+          try { dc.close(); } catch (closeErr) {}
+          reject(err);
+        });
       };
 
       dc.onerror = (e) => reject(new Error('data channel error: ' + e));
@@ -3464,16 +3478,13 @@ async function startWebRTC() {
  * Attaches the 'bufferedamountlow' listener and immediately re-evaluates bufferedAmount before awaiting,
  * supplemented by a polling fallback to prevent race conditions during buffer drains.
  */
-function waitForDataChannelBuffer(dc, highWaterMark, lowWaterMark = 0, pollMs = 250) {
+function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
   return new Promise((resolve, reject) => {
     if (!dc || dc.readyState !== 'open') {
-      return reject(new Error("DataChannel is closed or closing"));
+      return reject(new Error("Data channel is no longer open"));
     }
 
-    const targetThreshold = (lowWaterMark !== undefined && lowWaterMark !== null) ? lowWaterMark : highWaterMark;
-    try {
-      dc.bufferedAmountLowThreshold = targetThreshold;
-    } catch (_) {}
+    dc.bufferedAmountLowThreshold = targetThreshold;
 
     if (dc.bufferedAmount <= targetThreshold) {
       return resolve();
@@ -3484,8 +3495,6 @@ function waitForDataChannelBuffer(dc, highWaterMark, lowWaterMark = 0, pollMs = 
     const cleanup = () => {
       if (dc && typeof dc.removeEventListener === 'function') {
         dc.removeEventListener('bufferedamountlow', onBufferedAmountLow);
-        dc.removeEventListener('close', onCloseOrError);
-        dc.removeEventListener('error', onCloseOrError);
       }
       if (intervalId !== null) {
         clearInterval(intervalId);
@@ -3498,16 +3507,8 @@ function waitForDataChannelBuffer(dc, highWaterMark, lowWaterMark = 0, pollMs = 
       resolve();
     };
 
-    const onCloseOrError = () => {
-      cleanup();
-      reject(new Error("DataChannel is closed or closing"));
-    };
-
-    if (typeof dc.addEventListener === 'function') {
-      dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
-      dc.addEventListener('close', onCloseOrError);
-      dc.addEventListener('error', onCloseOrError);
-    }
+    // Attach bufferedamountlow listener
+    dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
 
     // Immediately re-evaluate bufferedAmount after attaching listener
     if (dc.bufferedAmount <= targetThreshold) {
@@ -3519,7 +3520,7 @@ function waitForDataChannelBuffer(dc, highWaterMark, lowWaterMark = 0, pollMs = 
     intervalId = setInterval(() => {
       if (dc.readyState !== 'open') {
         cleanup();
-        reject(new Error("DataChannel is closed or closing"));
+        reject(new Error("Data channel is no longer open"));
         return;
       }
       if (dc.bufferedAmount <= targetThreshold) {
@@ -3527,12 +3528,6 @@ function waitForDataChannelBuffer(dc, highWaterMark, lowWaterMark = 0, pollMs = 
         resolve();
       }
     }, pollMs);
-  });
-}
-
-function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 250) {
-  return waitForDataChannelBuffer(dc, targetThreshold, targetThreshold, pollMs).catch((err) => {
-    throw new Error("Data channel is no longer open");
   });
 }
 
@@ -3594,6 +3589,9 @@ async function handleUploadFile(e) {
     const total = file.size;
 
     while (offset < total) {
+      if (webrtcDataChannel.readyState !== 'open') {
+        throw new Error("Data channel is no longer open");
+      }
       const chunkBlob = file.slice(offset, offset + chunkSize);
       const chunkBuffer = await new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -3666,8 +3664,12 @@ function triggerSave(blob, name) {
   const a   = Object.assign(document.createElement('a'), { href: url, download: name, target: '_blank', rel: 'noopener' });
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  setTimeout(() => {
+    if (a.parentNode) {
+      a.parentNode.removeChild(a);
+    }
+    URL.revokeObjectURL(url);
+  }, 5000);
 }
 
 function appendTerminalText(text) {
@@ -3699,7 +3701,7 @@ function showDone(name, size, mode) {
     // Load QR SVG data URL locally without external network requests
     const qrImg = document.getElementById('done-qr-img');
     if (qrImg) {
-      qrImg.src = generateClientQRCodeDataURL(shareLink);
+      qrImg.src = generateQRCodeDataURL(shareLink);
     }
     
     if (doneShare) doneShare.classList.remove('hidden');
@@ -3756,6 +3758,372 @@ function initSpotlight() {
     card.style.setProperty('--mouse-x', `${((e.clientX - r.left) / r.width * 100)}%`);
     card.style.setProperty('--mouse-y', `${((e.clientY - r.top)  / r.height * 100)}%`);
   });
+}
+
+// ── Local QR Code Generator ───────────────────────────────────────────────────
+const GF256_EXP = new Uint8Array(512);
+const GF256_LOG = new Uint8Array(256);
+(function initGF256() {
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    GF256_EXP[i] = x;
+    GF256_EXP[i + 255] = x;
+    GF256_LOG[x] = i;
+    x <<= 1;
+    if (x & 256) x ^= 285;
+  }
+})();
+
+function gfMul(x, y) {
+  if (x === 0 || y === 0) return 0;
+  return GF256_EXP[GF256_LOG[x] + GF256_LOG[y]];
+}
+
+function rsPolyMul(p1, p2) {
+  const result = new Uint8Array(p1.length + p2.length - 1);
+  for (let i = 0; i < p1.length; i++) {
+    for (let j = 0; j < p2.length; j++) {
+      result[i + j] ^= gfMul(p1[i], p2[j]);
+    }
+  }
+  return result;
+}
+
+function rsGenPoly(numEc) {
+  let g = new Uint8Array([1]);
+  for (let i = 0; i < numEc; i++) {
+    g = rsPolyMul(g, new Uint8Array([1, GF256_EXP[i]]));
+  }
+  return g;
+}
+
+function rsComputeSyndromes(data, numEc) {
+  const gen = rsGenPoly(numEc);
+  const msg = new Uint8Array(data.length + numEc);
+  msg.set(data);
+  for (let i = 0; i < data.length; i++) {
+    const coef = msg[i];
+    if (coef !== 0) {
+      for (let j = 0; j < gen.length; j++) {
+        msg[i + j] ^= gfMul(gen[j], coef);
+      }
+    }
+  }
+  return msg.slice(data.length);
+}
+
+const RS_BLOCK_TABLE_L = [
+  [19, 7, 1, 19, 0, 0], [34, 10, 1, 34, 0, 0], [55, 15, 1, 55, 0, 0], [80, 20, 1, 80, 0, 0],
+  [108, 26, 1, 108, 0, 0], [136, 18, 2, 68, 0, 0], [156, 20, 2, 78, 0, 0], [194, 24, 2, 97, 0, 0],
+  [232, 30, 2, 116, 0, 0], [274, 18, 2, 68, 2, 69], [324, 20, 4, 81, 0, 0], [370, 24, 2, 92, 2, 93],
+  [428, 26, 4, 107, 0, 0], [461, 30, 3, 115, 1, 116], [523, 22, 5, 87, 1, 88], [586, 24, 5, 98, 1, 99],
+  [647, 28, 1, 107, 5, 108], [721, 30, 5, 120, 1, 121], [795, 28, 3, 113, 4, 114], [868, 28, 3, 107, 5, 108],
+  [926, 28, 4, 115, 4, 116], [1002, 28, 2, 125, 6, 126], [1091, 30, 4, 121, 5, 122], [1171, 30, 6, 117, 4, 118],
+  [1277, 26, 8, 106, 4, 107], [1367, 28, 10, 114, 2, 115], [1465, 28, 8, 122, 4, 123], [1528, 30, 3, 117, 10, 118],
+  [1628, 30, 7, 116, 7, 117], [1732, 30, 5, 115, 10, 116], [1840, 30, 13, 115, 3, 116], [1952, 30, 17, 115, 0, 0],
+  [2068, 30, 17, 115, 1, 116], [2188, 30, 19, 115, 1, 116], [2303, 30, 6, 115, 14, 116], [2431, 30, 6, 115, 15, 116],
+  [2563, 30, 17, 115, 5, 116], [2699, 30, 4, 115, 19, 116], [2809, 30, 20, 115, 4, 116], [2953, 30, 19, 115, 6, 116]
+];
+
+const ALIGNMENT_POS = [
+  [], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34],
+  [6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50], [6, 30, 54],
+  [6, 32, 58], [6, 34, 62], [6, 26, 46, 66], [6, 26, 48, 70], [6, 26, 50, 74],
+  [6, 30, 54, 78], [6, 30, 56, 82], [6, 30, 58, 86], [6, 34, 62, 90],
+  [6, 28, 50, 72, 94], [6, 26, 50, 74, 98], [6, 30, 54, 78, 102], [6, 28, 54, 80, 106],
+  [6, 32, 58, 84, 110], [6, 30, 58, 86, 114], [6, 34, 62, 90, 118], [6, 26, 50, 74, 98, 122],
+  [6, 30, 54, 78, 102, 126], [6, 26, 52, 78, 104, 130], [6, 30, 56, 82, 108, 134],
+  [6, 34, 60, 86, 112, 138], [6, 30, 58, 86, 114, 142], [6, 34, 62, 90, 118, 146],
+  [6, 30, 54, 78, 102, 126, 150], [6, 24, 50, 76, 102, 128, 154], [6, 28, 54, 80, 106, 132, 158],
+  [6, 32, 58, 84, 110, 136, 162], [6, 26, 54, 82, 110, 138, 166], [6, 30, 58, 86, 114, 142, 170]
+];
+
+function getFormatInfo(ecLevelBit, maskPattern) {
+  const data = (ecLevelBit << 3) | maskPattern;
+  let rem = data << 10;
+  for (let i = 4; i >= 0; i--) {
+    if (rem & (1 << (i + 10))) {
+      rem ^= (0x537 << i);
+    }
+  }
+  return ((data << 10) | rem) ^ 0x5370;
+}
+
+function getVersionInfo(version) {
+  let rem = version << 12;
+  for (let i = 5; i >= 0; i--) {
+    if (rem & (1 << (i + 12))) {
+      rem ^= (0x1F25 << i);
+    }
+  }
+  return (version << 12) | rem;
+}
+
+function generateQRCodeSVG(text) {
+  let bytes;
+  if (typeof TextEncoder !== 'undefined') {
+    bytes = new TextEncoder().encode(text);
+  } else {
+    bytes = new Uint8Array(text.length);
+    for (let i = 0; i < text.length; i++) {
+      bytes[i] = text.charCodeAt(i) & 0xff;
+    }
+  }
+
+  let version = 1;
+  let spec = null;
+  for (let v = 1; v <= 40; v++) {
+    spec = RS_BLOCK_TABLE_L[v - 1];
+    const totalDataCap = spec[0];
+    const headerBits = 4 + (v >= 10 ? 16 : 8);
+    const requiredBits = headerBits + bytes.length * 8;
+    if (requiredBits <= totalDataCap * 8) {
+      version = v;
+      break;
+    }
+  }
+
+  const specCap = spec[0];
+  const ecPerBlock = spec[1];
+  const g1Blocks = spec[2];
+  const g1Data = spec[3];
+  const g2Blocks = spec[4];
+  const g2Data = spec[5];
+  const totalBlocks = g1Blocks + g2Blocks;
+
+  const bits = [];
+  function pushBits(val, count) {
+    for (let i = count - 1; i >= 0; i--) {
+      bits.push((val >> i) & 1);
+    }
+  }
+
+  pushBits(4, 4);
+  pushBits(bytes.length, version >= 10 ? 16 : 8);
+  for (let b of bytes) {
+    pushBits(b, 8);
+  }
+  const totalBitsCap = specCap * 8;
+  const termBits = Math.min(4, totalBitsCap - bits.length);
+  pushBits(0, termBits);
+  while (bits.length % 8 !== 0) {
+    bits.push(0);
+  }
+  const padBytes = [0xEC, 0x11];
+  let padIdx = 0;
+  while (bits.length < totalBitsCap) {
+    pushBits(padBytes[padIdx % 2], 8);
+    padIdx++;
+  }
+
+  const dataCodewords = new Uint8Array(specCap);
+  for (let i = 0; i < specCap; i++) {
+    let byteVal = 0;
+    for (let b = 0; b < 8; b++) {
+      byteVal = (byteVal << 1) | bits[i * 8 + b];
+    }
+    dataCodewords[i] = byteVal;
+  }
+
+  const blocks = [];
+  let cwOffset = 0;
+  for (let b = 0; b < g1Blocks; b++) {
+    const blockData = dataCodewords.slice(cwOffset, cwOffset + g1Data);
+    cwOffset += g1Data;
+    const ec = rsComputeSyndromes(blockData, ecPerBlock);
+    blocks.push({ data: blockData, ec });
+  }
+  for (let b = 0; b < g2Blocks; b++) {
+    const blockData = dataCodewords.slice(cwOffset, cwOffset + g2Data);
+    cwOffset += g2Data;
+    const ec = rsComputeSyndromes(blockData, ecPerBlock);
+    blocks.push({ data: blockData, ec });
+  }
+
+  const finalCodewords = [];
+  const maxDataLen = Math.max(g1Data, g2Data);
+  for (let i = 0; i < maxDataLen; i++) {
+    for (let b = 0; b < totalBlocks; b++) {
+      if (i < blocks[b].data.length) {
+        finalCodewords.push(blocks[b].data[i]);
+      }
+    }
+  }
+  for (let i = 0; i < ecPerBlock; i++) {
+    for (let b = 0; b < totalBlocks; b++) {
+      finalCodewords.push(blocks[b].ec[i]);
+    }
+  }
+
+  const size = version * 4 + 17;
+  const modules = Array.from({ length: size }, () => new Uint8Array(size));
+  const isFunction = Array.from({ length: size }, () => new Uint8Array(size));
+
+  function placeFinder(r, c) {
+    for (let dr = -1; dr <= 7; dr++) {
+      for (let dc = -1; dc <= 7; dc++) {
+        const nr = r + dr;
+        const nc = c + dc;
+        if (nr >= 0 && nr < size && nc >= 0 && nc < size) {
+          isFunction[nr][nc] = 1;
+          if (dr >= 0 && dr <= 6 && dc >= 0 && dc <= 6) {
+            if (dr === 0 || dr === 6 || dc === 0 || dc === 6 || (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4)) {
+              modules[nr][nc] = 1;
+            } else {
+              modules[nr][nc] = 0;
+            }
+          } else {
+            modules[nr][nc] = 0;
+          }
+        }
+      }
+    }
+  }
+  placeFinder(0, 0);
+  placeFinder(0, size - 7);
+  placeFinder(size - 7, 0);
+
+  const alignCoords = ALIGNMENT_POS[version - 1];
+  for (let r of alignCoords) {
+    for (let c of alignCoords) {
+      if (isFunction[r][c]) continue;
+      for (let dr = -2; dr <= 2; dr++) {
+        for (let dc = -2; dc <= 2; dc++) {
+          const nr = r + dr;
+          const nc = c + dc;
+          isFunction[nr][nc] = 1;
+          if (Math.abs(dr) === 2 || Math.abs(dc) === 2 || (dr === 0 && dc === 0)) {
+            modules[nr][nc] = 1;
+          } else {
+            modules[nr][nc] = 0;
+          }
+        }
+      }
+    }
+  }
+
+  for (let i = 8; i < size - 8; i++) {
+    if (!isFunction[6][i]) {
+      isFunction[6][i] = 1;
+      modules[6][i] = (i % 2 === 0) ? 1 : 0;
+    }
+    if (!isFunction[i][6]) {
+      isFunction[i][6] = 1;
+      modules[i][6] = (i % 2 === 0) ? 1 : 0;
+    }
+  }
+
+  isFunction[size - 8][8] = 1;
+  modules[size - 8][8] = 1;
+
+  for (let i = 0; i < 9; i++) {
+    if (i !== 6) {
+      isFunction[8][i] = 1;
+      isFunction[i][8] = 1;
+    }
+  }
+  for (let i = 0; i < 8; i++) {
+    isFunction[8][size - 1 - i] = 1;
+    isFunction[size - 1 - i][8] = 1;
+  }
+
+  if (version >= 7) {
+    for (let r = 0; r < 6; r++) {
+      for (let c = 0; c < 3; c++) {
+        isFunction[r][size - 11 + c] = 1;
+        isFunction[size - 11 + c][r] = 1;
+      }
+    }
+  }
+
+  const flatBits = [];
+  for (let cw of finalCodewords) {
+    for (let i = 7; i >= 0; i--) {
+      flatBits.push((cw >> i) & 1);
+    }
+  }
+
+  let bitIdx = 0;
+  let up = true;
+  for (let right = size - 1; right > 0; right -= 2) {
+    if (right === 6) right--;
+    const rows = [];
+    if (up) {
+      for (let r = size - 1; r >= 0; r--) rows.push(r);
+    } else {
+      for (let r = 0; r < size; r++) rows.push(r);
+    }
+    for (let r of rows) {
+      for (let c of [right, right - 1]) {
+        if (!isFunction[r][c]) {
+          if (bitIdx < flatBits.length) {
+            modules[r][c] = flatBits[bitIdx++];
+          }
+        }
+      }
+    }
+    up = !up;
+  }
+
+  const mask = 0;
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      if (!isFunction[r][c]) {
+        if ((r + c) % 2 === 0) {
+          modules[r][c] ^= 1;
+        }
+      }
+    }
+  }
+
+  const formatInfo = getFormatInfo(1, mask);
+  const formatBits = [];
+  for (let i = 14; i >= 0; i--) {
+    formatBits.push((formatInfo >> i) & 1);
+  }
+
+  const formatCoordsTopLeft = [
+    [8, 0], [8, 1], [8, 2], [8, 3], [8, 4], [8, 5], [8, 7], [8, 8],
+    [7, 8], [5, 8], [4, 8], [3, 8], [2, 8], [1, 8], [0, 8]
+  ];
+  const formatCoordsSplit = [
+    [size - 1, 8], [size - 2, 8], [size - 3, 8], [size - 4, 8], [size - 5, 8], [size - 6, 8], [size - 7, 8],
+    [8, size - 8], [8, size - 7], [8, size - 6], [8, size - 5], [8, size - 4], [8, size - 3], [8, size - 2], [8, size - 1]
+  ];
+
+  for (let i = 0; i < 15; i++) {
+    const [r1, c1] = formatCoordsTopLeft[i];
+    modules[r1][c1] = formatBits[i];
+    const [r2, c2] = formatCoordsSplit[i];
+    modules[r2][c2] = formatBits[i];
+  }
+
+  if (version >= 7) {
+    const verInfo = getVersionInfo(version);
+    for (let i = 0; i < 18; i++) {
+      const bit = (verInfo >> i) & 1;
+      const r1 = Math.floor(i / 3);
+      const c1 = size - 11 + (i % 3);
+      modules[r1][c1] = bit;
+      modules[c1][r1] = bit;
+    }
+  }
+
+  const margin = 4;
+  const totalSize = size + margin * 2;
+  let pathD = "";
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      if (modules[r][c]) {
+        const x = c + margin;
+        const y = r + margin;
+        pathD += `M${x},${y}h1v1h-1z`;
+      }
+    }
+  }
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalSize} ${totalSize}" width="100%" height="100%"><rect width="${totalSize}" height="${totalSize}" fill="#ffffff"/><path d="${pathD}" fill="#000000"/></svg>`;
+  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
 }
 
 // ── Format helpers ────────────────────────────────────────────────────────────
@@ -3878,11 +4246,13 @@ async function startSenderSharing() {
 
     document.getElementById('send-url-input').value = shareURL.href;
     const sendQrImg = document.getElementById('send-qr-img');
-    if (sendQrImg) renderQRCode(sendQrImg, shareURL.href);
+    if (sendQrImg) {
+      renderQRCode(shareURL.href, sendQrImg);
+    }
     const sendQrCanvas = document.getElementById('send-qr-canvas');
-    if (sendQrCanvas) renderQRCode(sendQrCanvas, shareURL.href);
-    const sendQrSvg = document.getElementById('send-qr-svg');
-    if (sendQrSvg) renderQRCode(sendQrSvg, shareURL.href);
+    if (sendQrCanvas) {
+      renderQRCode(shareURL.href, sendQrCanvas);
+    }
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -3953,12 +4323,7 @@ function setupSenderDataChannel() {
           await reverseStream.close();
         } else {
           const blob = new Blob(reverseChunks);
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = reverseName;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
+          triggerSave(blob, reverseName);
         }
         document.getElementById('send-status-label').textContent = "Reverse Transfer Complete!";
       }
@@ -4062,8 +4427,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
     await waitForBufferedAmountLow(dc, 0);
   }
   dc.send("EOF");
-  const sendStatusLabel = document.getElementById('send-status-label');
-  if (sendStatusLabel) sendStatusLabel.textContent = "Transfer Complete!";
+  document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
 async function startSenderPolling(backend) {
@@ -4074,7 +4438,7 @@ async function startSenderPolling(backend) {
     try {
       const pollRes = await fetch(`${backend}/relay/poll?session=${senderSessionID}`);
       if (!pollRes.ok) {
-        if (pollRes.status === 404) {
+        if (pollRes.status === 404 || pollRes.status === 410) {
           break;
         }
         await new Promise(resolve => setTimeout(resolve, 2000));
@@ -4272,20 +4636,399 @@ if (typeof window !== 'undefined') {
   });
 }
 
-// ── Local Client-Side QR Generation ───────────────────────────────────────────
-function generateQRCodeDataURL(text, options) {
-  if (typeof QRCode !== 'undefined' && QRCode.generateQRCodeDataURL) {
-    return QRCode.generateQRCodeDataURL(text, options);
+// ── Client-side QR Code Generator ─────────────────────────────────────────────
+const GF256_EXP = new Uint8Array(512);
+const GF256_LOG = new Uint8Array(256);
+(function initGF256() {
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    GF256_EXP[i] = x;
+    GF256_LOG[x] = i;
+    x <<= 1;
+    if (x & 0x100) x ^= 0x11d;
   }
-  if (typeof require === 'function') {
-    try {
-      const qrcodeLib = require('./qrcode.min.js');
-      if (qrcodeLib && qrcodeLib.generateQRCodeDataURL) {
-        return qrcodeLib.generateQRCodeDataURL(text, options);
+  for (let i = 255; i < 512; i++) {
+    GF256_EXP[i] = GF256_EXP[i - 255];
+  }
+})();
+
+function gfMul(x, y) {
+  if (x === 0 || y === 0) return 0;
+  return GF256_EXP[GF256_LOG[x] + GF256_LOG[y]];
+}
+
+function rsGeneratorPoly(degree) {
+  let poly = [1];
+  for (let i = 0; i < degree; i++) {
+    const nextPoly = new Array(poly.length + 1).fill(0);
+    const alpha = GF256_EXP[i];
+    for (let j = 0; j < poly.length; j++) {
+      nextPoly[j] ^= gfMul(poly[j], alpha);
+      nextPoly[j + 1] ^= poly[j];
+    }
+    poly = nextPoly;
+  }
+  return poly;
+}
+
+function rsRemainder(data, eccCount) {
+  const gen = rsGeneratorPoly(eccCount);
+  const res = new Uint8Array(data.length + eccCount);
+  res.set(data);
+  for (let i = 0; i < data.length; i++) {
+    const coef = res[i];
+    if (coef !== 0) {
+      for (let j = 0; j < gen.length; j++) {
+        res[i + j] ^= gfMul(gen[j], coef);
       }
-    } catch (e) {}
+    }
   }
-  throw new Error("Client-side QR generator unavailable");
+  return res.slice(data.length);
+}
+
+const QR_VERSIONS_L = [
+  null,
+  [1, 21, 19, [[1, 19]], 7],
+  [2, 25, 34, [[1, 34]], 10],
+  [3, 29, 55, [[1, 55]], 15],
+  [4, 33, 80, [[1, 80]], 20],
+  [5, 37, 108, [[1, 108]], 26],
+  [6, 41, 136, [[2, 68]], 18],
+  [7, 45, 156, [[2, 78]], 20],
+  [8, 49, 194, [[2, 97]], 24],
+  [9, 53, 232, [[2, 116]], 30],
+  [10, 57, 274, [[2, 68], [2, 69]], 18],
+  [11, 61, 324, [[4, 81]], 20],
+  [12, 65, 370, [[2, 92], [2, 93]], 24],
+  [13, 69, 428, [[4, 107]], 26],
+  [14, 73, 461, [[3, 115], [1, 116]], 30],
+  [15, 77, 523, [[5, 87], [1, 88]], 22],
+  [16, 81, 586, [[5, 97], [1, 98]], 24],
+  [17, 85, 644, [[1, 107], [5, 108]], 28],
+  [18, 89, 718, [[5, 120], [1, 121]], 30],
+  [19, 93, 792, [[3, 113], [4, 114]], 28],
+  [20, 97, 858, [[3, 107], [5, 108]], 28],
+  [21, 101, 929, [[4, 116], [4, 117]], 28],
+  [22, 105, 1003, [[2, 111], [7, 112]], 28],
+  [23, 109, 1091, [[4, 121], [5, 122]], 30],
+  [24, 113, 1171, [[6, 117], [4, 118]], 30],
+  [25, 117, 1273, [[8, 106], [4, 107]], 26],
+  [26, 121, 1347, [[10, 114], [2, 115]], 28],
+  [27, 125, 1425, [[8, 122], [4, 123]], 30],
+  [28, 129, 1501, [[3, 117], [10, 118]], 30],
+  [29, 133, 1581, [[7, 116], [7, 117]], 30],
+  [30, 137, 1677, [[5, 115], [10, 116]], 30],
+  [31, 141, 1782, [[13, 115], [3, 116]], 30],
+  [32, 145, 1897, [[17, 115]], 30],
+  [33, 149, 2022, [[17, 115], [1, 116]], 30],
+  [34, 153, 2157, [[19, 113], [1, 114]], 30],
+  [35, 157, 2301, [[18, 107], [4, 108]], 30],
+  [36, 161, 2431, [[22, 110], [1, 111]], 30],
+  [37, 165, 2561, [[21, 111], [2, 112]], 30],
+  [38, 169, 2711, [[19, 112], [5, 113]], 30],
+  [39, 173, 2871, [[22, 114], [4, 115]], 30],
+  [40, 177, 3031, [[22, 112], [7, 113]], 30]
+];
+
+const QR_ALIGN_POS = [
+  null,
+  [], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34],
+  [6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50],
+  [6, 30, 54], [6, 32, 58], [6, 34, 62], [6, 26, 46, 66],
+  [6, 26, 48, 70], [6, 26, 50, 74], [6, 30, 54, 78], [6, 30, 56, 82],
+  [6, 30, 58, 86], [6, 34, 62, 90], [6, 28, 50, 72, 94], [6, 26, 50, 74, 98],
+  [6, 30, 54, 78, 102], [6, 28, 54, 80, 106], [6, 32, 58, 84, 110], [6, 30, 58, 86, 114],
+  [6, 34, 62, 90, 118], [6, 26, 50, 74, 98, 122], [6, 30, 54, 78, 102, 126], [6, 26, 52, 78, 104, 130],
+  [6, 30, 56, 82, 108, 134], [6, 34, 60, 86, 112, 138], [6, 30, 58, 86, 114, 142], [6, 34, 62, 90, 118, 146],
+  [6, 30, 54, 78, 102, 126, 150], [6, 24, 50, 76, 102, 128, 154], [6, 28, 54, 80, 106, 132, 158], [6, 32, 58, 84, 110, 136, 162],
+  [6, 26, 54, 82, 110, 138, 166], [6, 30, 58, 86, 114, 142, 170]
+];
+
+function getFormatBits(ecLevel, mask) {
+  const data = (ecLevel << 3) | mask;
+  let rem = data << 10;
+  const g = 0x537;
+  for (let i = 4; i >= 0; i--) {
+    if (rem & (1 << (i + 10))) {
+      rem ^= g << i;
+    }
+  }
+  return ((data << 10) | rem) ^ 0x5412;
+}
+
+function getVersionBits(version) {
+  let rem = version << 12;
+  const g = 0x1f25;
+  for (let i = 5; i >= 0; i--) {
+    if (rem & (1 << (i + 12))) {
+      rem ^= g << i;
+    }
+  }
+  return (version << 12) | rem;
+}
+
+function generateQRCodeSVG(text) {
+  const utf8Encoder = new (typeof TextEncoder !== 'undefined' ? TextEncoder : require('util').TextEncoder)();
+  const textBytes = utf8Encoder.encode(text);
+  
+  let ver = 1;
+  while (ver <= 40) {
+    const spec = QR_VERSIONS_L[ver];
+    const totalData = spec[2];
+    const charCountBits = ver >= 10 ? 16 : 8;
+    const headerBits = 4 + charCountBits;
+    const availableBytes = Math.floor((totalData * 8 - headerBits) / 8);
+    if (textBytes.length <= availableBytes) break;
+    ver++;
+  }
+  if (ver > 40) throw new Error('Text too long for QR code');
+
+  const spec = QR_VERSIONS_L[ver];
+  const verNumber = spec[0];
+  const size = spec[1];
+  const maxDataBytes = spec[2];
+  const blockSpecs = spec[3];
+  const ecBytesPerBlock = spec[4];
+
+  const bitBuf = [];
+  function pushBits(val, count) {
+    for (let i = count - 1; i >= 0; i--) {
+      bitBuf.push((val >> i) & 1);
+    }
+  }
+
+  pushBits(4, 4);
+  const countBits = verNumber >= 10 ? 16 : 8;
+  pushBits(textBytes.length, countBits);
+  for (let i = 0; i < textBytes.length; i++) {
+    pushBits(textBytes[i], 8);
+  }
+
+  const maxBits = maxDataBytes * 8;
+  const termBits = Math.min(4, maxBits - bitBuf.length);
+  if (termBits > 0) pushBits(0, termBits);
+
+  while (bitBuf.length % 8 !== 0) bitBuf.push(0);
+
+  const padBytes = [0xec, 0x11];
+  let padIdx = 0;
+  while (bitBuf.length < maxBits) {
+    pushBits(padBytes[padIdx], 8);
+    padIdx = (padIdx + 1) % 2;
+  }
+
+  const dataBytes = new Uint8Array(maxDataBytes);
+  for (let i = 0; i < maxDataBytes; i++) {
+    let b = 0;
+    for (let j = 0; j < 8; j++) {
+      b = (b << 1) | bitBuf[i * 8 + j];
+    }
+    dataBytes[i] = b;
+  }
+
+  const dataBlocks = [];
+  const ecBlocks = [];
+  let byteOffset = 0;
+  for (let s = 0; s < blockSpecs.length; s++) {
+    const numBlocks = blockSpecs[s][0];
+    const blockLen = blockSpecs[s][1];
+    for (let b = 0; b < numBlocks; b++) {
+      const bData = dataBytes.slice(byteOffset, byteOffset + blockLen);
+      byteOffset += blockLen;
+      const bEc = rsRemainder(bData, ecBytesPerBlock);
+      dataBlocks.push(bData);
+      ecBlocks.push(bEc);
+    }
+  }
+
+  const finalCodewords = [];
+  let maxBlockLen = 0;
+  for (let i = 0; i < dataBlocks.length; i++) {
+    if (dataBlocks[i].length > maxBlockLen) maxBlockLen = dataBlocks[i].length;
+  }
+  for (let i = 0; i < maxBlockLen; i++) {
+    for (let b = 0; b < dataBlocks.length; b++) {
+      if (i < dataBlocks[b].length) {
+        finalCodewords.push(dataBlocks[b][i]);
+      }
+    }
+  }
+
+  for (let i = 0; i < ecBytesPerBlock; i++) {
+    for (let b = 0; b < ecBlocks.length; b++) {
+      finalCodewords.push(ecBlocks[b][i]);
+    }
+  }
+
+  const finalBits = [];
+  for (let i = 0; i < finalCodewords.length; i++) {
+    for (let j = 7; j >= 0; j--) {
+      finalBits.push((finalCodewords[i] >> j) & 1);
+    }
+  }
+
+  const grid = Array.from({ length: size }, () => new Uint8Array(size));
+  const reserved = Array.from({ length: size }, () => new Uint8Array(size));
+
+  function setModule(r, c, isDark, isRes = true) {
+    grid[r][c] = isDark ? 1 : 2;
+    if (isRes) reserved[r][c] = 1;
+  }
+
+  function drawFinder(r0, c0) {
+    for (let r = -1; r <= 7; r++) {
+      for (let c = -1; c <= 7; c++) {
+        const rr = r0 + r;
+        const cc = c0 + c;
+        if (rr >= 0 && rr < size && cc >= 0 && cc < size) {
+          const isDark = (r >= 0 && r <= 6 && (r === 0 || r === 6 || c === 0 || c === 6 || (r >= 2 && r <= 4 && c >= 2 && c <= 4)));
+          setModule(rr, cc, isDark);
+        }
+      }
+    }
+  }
+
+  drawFinder(0, 0);
+  drawFinder(0, size - 7);
+  drawFinder(size - 7, 0);
+
+  for (let i = 8; i < size - 8; i++) {
+    if (!reserved[6][i]) setModule(6, i, i % 2 === 0);
+    if (!reserved[i][6]) setModule(i, 6, i % 2 === 0);
+  }
+
+  const alignCoords = QR_ALIGN_POS[verNumber];
+  for (let i = 0; i < alignCoords.length; i++) {
+    for (let j = 0; j < alignCoords.length; j++) {
+      const r0 = alignCoords[i];
+      const c0 = alignCoords[j];
+      let overlap = false;
+      for (let dr = -2; dr <= 2; dr++) {
+        for (let dc = -2; dc <= 2; dc++) {
+          if (reserved[r0 + dr] && reserved[r0 + dr][c0 + dc]) overlap = true;
+        }
+      }
+      if (!overlap) {
+        for (let dr = -2; dr <= 2; dr++) {
+          for (let dc = -2; dc <= 2; dc++) {
+            const isDark = Math.max(Math.abs(dr), Math.abs(dc)) !== 1;
+            setModule(r0 + dr, c0 + dc, isDark);
+          }
+        }
+      }
+    }
+  }
+
+  setModule(4 * verNumber + 9, 8, true);
+
+  for (let i = 0; i < 9; i++) {
+    if (!reserved[8][i]) reserved[8][i] = 1;
+    if (!reserved[i][8]) reserved[i][8] = 1;
+    if (!reserved[8][size - 1 - i]) reserved[8][size - 1 - i] = 1;
+    if (!reserved[size - 1 - i][8]) reserved[size - 1 - i][8] = 1;
+  }
+
+  if (verNumber >= 7) {
+    for (let r = 0; r < 6; r++) {
+      for (let c = 0; c < 3; c++) {
+        reserved[r][size - 11 + c] = 1;
+        reserved[size - 11 + c][r] = 1;
+      }
+    }
+  }
+
+  let bitIdx = 0;
+  let dir = -1;
+  let col = size - 1;
+  while (col > 0) {
+    if (col === 6) col--;
+    const rowStart = dir === -1 ? size - 1 : 0;
+    const rowEnd = dir === -1 ? -1 : size;
+    for (let r = rowStart; r !== rowEnd; r += dir) {
+      for (let c = col; c >= col - 1; c--) {
+        if (!reserved[r][c]) {
+          const isDark = bitIdx < finalBits.length ? finalBits[bitIdx++] === 1 : false;
+          grid[r][c] = isDark ? 1 : 2;
+        }
+      }
+    }
+    dir = -dir;
+    col -= 2;
+  }
+
+  const mask = 0;
+  function isMasked(r, c, pattern) {
+    switch (pattern) {
+      case 0: return (r + c) % 2 === 0;
+      case 1: return r % 2 === 0;
+      case 2: return c % 3 === 0;
+      case 3: return (r + c) % 3 === 0;
+      case 4: return (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0;
+      case 5: return ((r * c) % 2 + (r * c) % 3) === 0;
+      case 6: return (((r * c) % 2 + (r * c) % 3) % 2) === 0;
+      case 7: return (((r + c) % 2 + (r * c) % 3) % 2) === 0;
+    }
+    return false;
+  }
+
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      if (!reserved[r][c]) {
+        if (isMasked(r, c, mask)) {
+          grid[r][c] = grid[r][c] === 1 ? 2 : 1;
+        }
+      }
+    }
+  }
+
+  const formatBits = getFormatBits(1, mask);
+  const fmtPos1 = [
+    [8, 0], [8, 1], [8, 2], [8, 3], [8, 4], [8, 5], [8, 7], [8, 8],
+    [7, 8], [5, 8], [4, 8], [3, 8], [2, 8], [1, 8], [0, 8]
+  ];
+  const fmtPos2 = [
+    [size - 1, 8], [size - 2, 8], [size - 3, 8], [size - 4, 8], [size - 5, 8], [size - 6, 8], [size - 7, 8],
+    [8, size - 8], [8, size - 7], [8, size - 6], [8, size - 5], [8, size - 4], [8, size - 3], [8, size - 2], [8, size - 1]
+  ];
+  for (let i = 0; i < 15; i++) {
+    const bit = (formatBits >> i) & 1;
+    grid[fmtPos1[i][0]][fmtPos1[i][1]] = bit ? 1 : 2;
+    grid[fmtPos2[i][0]][fmtPos2[i][1]] = bit ? 1 : 2;
+  }
+
+  if (verNumber >= 7) {
+    const verBits = getVersionBits(verNumber);
+    for (let i = 0; i < 18; i++) {
+      const bit = (verBits >> i) & 1;
+      const r = Math.floor(i / 3);
+      const c = (i % 3);
+      grid[r][size - 11 + c] = bit ? 1 : 2;
+      grid[size - 11 + c][r] = bit ? 1 : 2;
+    }
+  }
+
+  const quietZone = 4;
+  const viewBoxSize = size + quietZone * 2;
+  let pathD = "";
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      if (grid[r][c] === 1) {
+        pathD += `M${c + quietZone},${r + quietZone}h1v1h-1z`;
+      }
+    }
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${viewBoxSize} ${viewBoxSize}" width="100%" height="100%" shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#ffffff"/><path fill="#000000" d="${pathD}"/></svg>`;
+}
+
+function generateQRCodeDataURL(text) {
+  const svg = generateQRCodeSVG(text);
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+
+function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark = 512 * 1024, pollMs = 25) {
+  const targetThreshold = (typeof lowWatermark === 'number') ? lowWatermark : highWatermark;
+  return waitForBufferedAmountLow(dc, targetThreshold, pollMs);
 }
 
 if (typeof module !== 'undefined' && module.exports) {
@@ -4294,6 +5037,9 @@ if (typeof module !== 'undefined' && module.exports) {
     waitForDataChannelBuffer,
     uploadFileP2P,
     sendWebRTCFile,
+    generateQRCodeSVG,
+    generateQRCodeDataURL,
+    generateClientQRCodeDataURL,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
