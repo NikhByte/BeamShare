@@ -524,7 +524,7 @@ function apiPath(path) {
 
 // ── Local QR Code Generator & Renderer ─────────────────────────────────────
 "use strict";
-var qrcodegen;
+// var qrcodegen;
 (function (qrcodegen) {
  class QrCode {
  constructor(
@@ -2230,7 +2230,7 @@ async function getSWPipe(fileMeta) {
       }, 10000);
 
       function onMessage(e) {
-        if (e.data && e.data.type === 'READY') {
+        if (e.data && (e.data.type === 'READY' || e.data.type === 'PORT_READY')) {
           cleanup();
           resolve();
         }
@@ -3226,16 +3226,6 @@ async function startWebRTC() {
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
 
-    let decryptionKey = null;
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch (e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      pc.close();
-      return;
-    }
-
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
       if (dc.readyState === 'open') {
@@ -3336,7 +3326,7 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
+      encBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -3344,42 +3334,6 @@ async function startWebRTC() {
           decryptChain = decryptChain.then(async () => {
             if (typeof e.data === 'string') {
               if (e.data === "EOF") {
-                chunkQueue.enqueueEOF();
-                await chunkQueue.drain();
-                if (diskWritableStream) {
-                  await diskWritableStream.close();
-                  if (useOPFS) {
-                    const file = await diskFileHandle.getFile();
-                    triggerSave(file, currentFile.name);
-                  }
-                  chunkQueue.enqueueEOF();
-                  try {
-                    await chunkQueue.drain();
-                    if (diskWritableStream) {
-                      await diskWritableStream.close();
-                      if (useOPFS) {
-                        const file = await diskFileHandle.getFile();
-                        triggerSave(file, currentFile.name);
-                      }
-                    } else if (swPipePort) {
-                      swPipePort.postMessage("EOF");
-                    } else {
-                      let finalBlob;
-                      if (useIndexedDB) {
-                        finalBlob = await getAllChunksIDB(currentFile.mime);
-                        await clearIDB();
-                      } else {
-                        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                      }
-                      triggerSave(finalBlob, currentFile.name);
-                    }
-                    resolve();
-                  } catch (err) {
-                    hasError = true;
-                    // Handled in chunkQueue onError callback
-                  }
-                });
-              } else {
                 chunkQueue.enqueueEOF();
                 chunkQueue.drain().then(async () => {
                   if (diskWritableStream) {
@@ -3400,9 +3354,10 @@ async function startWebRTC() {
                     }
                     triggerSave(finalBlob, currentFile.name);
                   }
-                  triggerSave(finalBlob, currentFile.name);
-                }
-                resolve();
+                  resolve();
+                }).catch((err) => {
+                  // Handled in chunkQueue onError callback
+                });
               }
               return;
             }
