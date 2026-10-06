@@ -582,4 +582,3 @@ func TestBufferReuseZeroAllocations(t *testing.T) {
 		t.Fatalf("expected 0 heap allocations per frame Read call, got %f", allocs)
 	}
 }
-
