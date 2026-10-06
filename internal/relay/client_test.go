@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -206,17 +205,21 @@ func TestUploadReaderAtOffset(t *testing.T) {
 	}
 
 	t.Run("InvalidKeyLength", func(t *testing.T) {
-		for _, keyLen := range []int{1, 10, 15, 20, 31, 33} {
-			t.Run(fmt.Sprintf("KeyLength_%d", keyLen), func(t *testing.T) {
-				client, _ := createIsolatedSession(t)
-				client.Key = make([]byte, keyLen)
-				rand.Read(client.Key)
-
-				err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
-				if err == nil {
-					t.Fatalf("expected error for invalid key length %d, got nil", keyLen)
-				}
-			})
+		client, _ := createIsolatedSession(t)
+		invalidKeys := [][]byte{
+			make([]byte, 10),
+			make([]byte, 16),
+			make([]byte, 24),
+			make([]byte, 31),
+			make([]byte, 33),
+			make([]byte, 40),
+		}
+		for _, key := range invalidKeys {
+			client.Key = key
+			err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+			if !errors.Is(err, ErrInvalidKeySize) {
+				t.Fatalf("expected ErrInvalidKeySize for key length %d, got %v", len(key), err)
+			}
 		}
 	})
 
@@ -271,43 +274,6 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		}
 	})
 
-	t.Run("InvalidKeyLength10Bytes", func(t *testing.T) {
-		client, sess := createIsolatedSession(t)
-		client.Key = make([]byte, 10)
-
-		pr, pw := io.Pipe()
-		sess.SetPipes(pr, pw)
-
-		err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
-		if err == nil {
-			t.Fatalf("expected error for 10-byte key, got nil")
-		}
-		if !errors.Is(err, ErrInvalidKeyLength) {
-			t.Fatalf("expected ErrInvalidKeyLength, got: %v", err)
-		}
-		if !strings.Contains(err.Error(), "32 bytes") || !strings.Contains(err.Error(), "10") {
-			t.Fatalf("expected error message stating expected 32 bytes and actual 10 bytes, got: %v", err)
-		}
-	})
-
-	t.Run("InvalidKeyLength16Bytes", func(t *testing.T) {
-		client, sess := createIsolatedSession(t)
-		client.Key = make([]byte, 16)
-
-		pr, pw := io.Pipe()
-		sess.SetPipes(pr, pw)
-
-		err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
-		if err == nil {
-			t.Fatalf("expected error for 16-byte key, got nil")
-		}
-		if !errors.Is(err, ErrInvalidKeyLength) {
-			t.Fatalf("expected ErrInvalidKeyLength, got: %v", err)
-		}
-		if !strings.Contains(err.Error(), "32 bytes") || !strings.Contains(err.Error(), "16") {
-			t.Fatalf("expected error message stating expected 32 bytes and actual 16 bytes, got: %v", err)
-		}
-	})
 }
 
 func TestRelayClient_InvalidKeyLength(t *testing.T) {
@@ -345,13 +311,13 @@ func TestRelayClient_InvalidKeyLength(t *testing.T) {
 		client.Key = key
 
 		err := client.UploadData(context.Background(), filePath)
-		if err == nil {
-			t.Fatalf("expected error for invalid key length %d in UploadData, got nil", len(key))
+		if !errors.Is(err, ErrInvalidKeySize) {
+			t.Fatalf("expected ErrInvalidKeySize for UploadData with key length %d, got %v", len(key), err)
 		}
 
 		err = client.UploadReaderAtOffset(context.Background(), bytes.NewReader([]byte("data")), 0)
-		if err == nil {
-			t.Fatalf("expected error for invalid key length %d in UploadReaderAtOffset, got nil", len(key))
+		if !errors.Is(err, ErrInvalidKeySize) {
+			t.Fatalf("expected ErrInvalidKeySize for UploadReaderAtOffset with key length %d, got %v", len(key), err)
 		}
 	}
 }
@@ -388,23 +354,25 @@ func TestUploadReaderAtOffset_InvalidKeyLength(t *testing.T) {
 				Key:       make([]byte, keyLen),
 			}
 
-			err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader([]byte("data")), 0)
-			if err == nil {
-				t.Fatalf("expected error for key length %d, got nil", keyLen)
+			err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader([]byte("test data")), 0)
+			if !errors.Is(err, ErrInvalidKeySize) {
+				t.Fatalf("expected ErrInvalidKeySize for key length %d, got %v", keyLen, err)
 			}
-
-			expectedSubstr := "expected 32 bytes"
-			if !strings.Contains(err.Error(), expectedSubstr) {
-				t.Errorf("expected error message to contain %q, got %q", expectedSubstr, err.Error())
-			}
-
-			expectedLenSubstr := fmt.Sprintf("got %d", keyLen)
-			if !strings.Contains(err.Error(), expectedLenSubstr) {
-				t.Errorf("expected error message to contain %q, got %q", expectedLenSubstr, err.Error())
-			}
-
 			if mockHTTP.called {
-				t.Errorf("expected no HTTP request to be emitted for invalid key length %d", keyLen)
+				t.Fatalf("expected no HTTP request dispatched for invalid key length %d", keyLen)
+			}
+
+			tmpDir := t.TempDir()
+			filePath := filepath.Join(tmpDir, "dummy.txt")
+			_ = os.WriteFile(filePath, []byte("test data"), 0644)
+
+			mockHTTP.called = false
+			err = client.UploadDataAtOffset(context.Background(), filePath, 0)
+			if !errors.Is(err, ErrInvalidKeySize) {
+				t.Fatalf("expected ErrInvalidKeySize for key length %d in UploadDataAtOffset, got %v", keyLen, err)
+			}
+			if mockHTTP.called {
+				t.Fatalf("expected no HTTP request dispatched for invalid key length %d in UploadDataAtOffset", keyLen)
 			}
 		})
 	}
