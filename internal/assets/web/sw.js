@@ -114,9 +114,8 @@ self.addEventListener('message', (event) => {
     };
 
     streamMap.set(url, { stream, filename, size, mime, cleanup, ttlTimer, port });
-
     try {
-      port.postMessage({ type: 'INIT_ACK' });
+      port.postMessage({ type: 'READY' });
     } catch (_) {}
   }
 });

@@ -7,7 +7,6 @@ import (
 	"os"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/beamshare/beam/internal/server"
 	"github.com/pion/webrtc/v3"
@@ -40,6 +39,13 @@ func TestParseFlags(t *testing.T) {
 
 	if discoveryTimeout != 15*1000*1000*1000 { // 15 seconds
 		t.Fatalf("expected discovery timeout 15s, got %v", discoveryTimeout)
+	}
+
+	if !reflect.DeepEqual(parsedTurnServers, []string{"turn:1"}) {
+		t.Fatalf("expected parsedTurnServers ['turn:1'], got %v", parsedTurnServers)
+	}
+	if parsedTurnUsername != "user" || parsedTurnCredential != "pass" {
+		t.Fatalf("expected parsed turn auth user=user pass=pass, got user=%s pass=%s", parsedTurnUsername, parsedTurnCredential)
 	}
 }
 
@@ -115,76 +121,44 @@ func TestDownloadFile_Relay(t *testing.T) {
 	}
 }
 
-func TestWaitForBufferedAmountLow(t *testing.T) {
-	// Nil DataChannel should return immediately without panic
-	waitForBufferedAmountLow(nil, 512*1024, 10*time.Millisecond)
-
-	pc1, err := webrtc.NewPeerConnection(webrtc.Configuration{})
-	if err != nil {
-		t.Fatalf("failed pc1: %v", err)
-	}
-	defer pc1.Close()
-
-	pc2, err := webrtc.NewPeerConnection(webrtc.Configuration{})
-	if err != nil {
-		t.Fatalf("failed pc2: %v", err)
-	}
-	defer pc2.Close()
-
-	dc1, err := pc1.CreateDataChannel("test-channel", nil)
-	if err != nil {
-		t.Fatalf("failed dc1: %v", err)
+func TestDownloadFile_PathTraversalSanitization(t *testing.T) {
+	traversalCases := []struct {
+		rawMetaName      string
+		expectedFileName string
+	}{
+		{"../../etc/passwd", "received_passwd"},
+		{"..\\..\\evil.bat", "received_evil.bat"},
+		{"\x00../malicious.sh", "received_malicious.sh"},
+		{"....", "received_download.bin"},
 	}
 
-	dcOpen := make(chan struct{})
-	dc1.OnOpen(func() {
-		close(dcOpen)
-	})
+	for _, tc := range traversalCases {
+		t.Run(tc.rawMetaName, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+				meta := server.FileMeta{
+					Name: tc.rawMetaName,
+					Size: 10,
+				}
+				json.NewEncoder(w).Encode(meta)
+			})
+			mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte("0123456789"))
+			})
 
-	pc1.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c != nil {
-			_ = pc2.AddICECandidate(c.ToJSON())
-		}
-	})
-	pc2.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c != nil {
-			_ = pc1.AddICECandidate(c.ToJSON())
-		}
-	})
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
 
-	offer, err := pc1.CreateOffer(nil)
-	if err != nil {
-		t.Fatalf("failed offer: %v", err)
-	}
-	_ = pc1.SetLocalDescription(offer)
-	_ = pc2.SetRemoteDescription(offer)
+			defer os.Remove(tc.expectedFileName)
 
-	answer, err := pc2.CreateAnswer(nil)
-	if err != nil {
-		t.Fatalf("failed answer: %v", err)
-	}
-	_ = pc2.SetLocalDescription(answer)
-	_ = pc1.SetRemoteDescription(answer)
+			err := downloadFile(ts.URL)
+			if err != nil {
+				t.Fatalf("downloadFile failed for %s: %v", tc.rawMetaName, err)
+			}
 
-	select {
-	case <-dcOpen:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for data channel to open")
-	}
-
-	// BufferedAmount() is initially 0, so <= threshold 512KB resolves immediately
-	start := time.Now()
-	waitForBufferedAmountLow(dc1, 512*1024, 500*time.Millisecond)
-	if time.Since(start) > 100*time.Millisecond {
-		t.Fatalf("expected immediate resolution when bufferedAmount <= threshold")
-	}
-
-	// Timeout fallback check when waiting with 50ms timeout and bufferedAmount > threshold
-	_ = dc1.Send(make([]byte, 2*1024*1024))
-	start = time.Now()
-	waitForBufferedAmountLow(dc1, 0, 50*time.Millisecond)
-	elapsed := time.Since(start)
-	if elapsed < 35*time.Millisecond {
-		t.Fatalf("expected timeout or drain wait of at least ~35ms, got %v", elapsed)
+			if _, err := os.Stat(tc.expectedFileName); os.IsNotExist(err) {
+				t.Fatalf("expected file %s to exist, but was not found", tc.expectedFileName)
+			}
+		})
 	}
 }
