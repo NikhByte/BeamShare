@@ -897,5 +897,4 @@ func TestSessionTokenAuthentication(t *testing.T) {
 			assert.Equal(t, "true", resp.Header.Get("Access-Control-Allow-Private-Network"))
 		})
 	}
->>>>>>> 0cbc36a (feat(server): enforce 128-bit session token authentication on API endpoints)
 }

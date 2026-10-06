@@ -860,9 +860,11 @@ describe('Gaze Web Sender Test Suite', () => {
   test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
     // Intercept fetch / network calls to verify no external requests are made
     let externalRequests = [];
-    window.fetch = async (url) => {
-      externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+    window.fetch = global.fetch = async (url) => {
+      const urlStr = url.toString();
+      externalRequests.push(urlStr);
+      if (urlStr.includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
