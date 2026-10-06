@@ -82,15 +82,18 @@ func TestEncryptDecryptEmptyData(t *testing.T) {
 }
 
 func TestInvalidKeyLengths(t *testing.T) {
-	invalidKey := make([]byte, 10) // Invalid for AES (requires 16, 24, or 32)
-	_, err := NewEncryptingReader(bytes.NewReader([]byte("test")), invalidKey)
-	if err == nil {
-		t.Fatal("expected error for invalid key length in NewEncryptingReader, got nil")
-	}
+	invalidKeyLengths := []int{1, 10, 16, 24, 31, 33, 64}
+	for _, length := range invalidKeyLengths {
+		invalidKey := make([]byte, length)
+		_, err := NewEncryptingReader(bytes.NewReader([]byte("test")), invalidKey)
+		if err == nil {
+			t.Fatalf("expected error for key length %d in NewEncryptingReader, got nil", length)
+		}
 
-	_, err = NewDecryptingReader(bytes.NewReader([]byte("test")), invalidKey)
-	if err == nil {
-		t.Fatal("expected error for invalid key length in NewDecryptingReader, got nil")
+		_, err = NewDecryptingReader(bytes.NewReader([]byte("test")), invalidKey)
+		if err == nil {
+			t.Fatalf("expected error for key length %d in NewDecryptingReader, got nil", length)
+		}
 	}
 }
 
@@ -184,33 +187,26 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 	}
 }
 
-func TestMaxFrameSizeValidation(t *testing.T) {
+func TestMaxFrameSizeExceeded(t *testing.T) {
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
 
 	testCases := []struct {
-		name          string
-		lengthHeader  uint32
-		expectedError error
+		name        string
+		claimLength uint32
 	}{
-		{
-			name:          "Exceeds MaxFrameSize by 1",
-			lengthHeader:  MaxFrameSize + 1,
-			expectedError: ErrFrameTooLarge,
-		},
-		{
-			name:          "Max uint32 frame length header",
-			lengthHeader:  0xFFFFFFFF,
-			expectedError: ErrFrameTooLarge,
-		},
+		{name: "One Byte Over MaxFrameSize", claimLength: MaxFrameSize + 1},
+		{name: "10MB Oversized Frame", claimLength: 10 * 1024 * 1024},
+		{name: "Max Uint32 Oversized Frame", claimLength: 0xFFFFFFFF},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			buf := new(bytes.Buffer)
-			binary.Write(buf, binary.BigEndian, tc.lengthHeader)
+			binary.Write(buf, binary.BigEndian, tc.claimLength)
+			// Do not write actual payload data to ensure no large memory allocation/reads take place
 
 			decReader, err := NewDecryptingReader(buf, key)
 			if err != nil {
@@ -219,8 +215,11 @@ func TestMaxFrameSizeValidation(t *testing.T) {
 
 			out := make([]byte, 64)
 			_, err = decReader.Read(out)
-			if !errors.Is(err, tc.expectedError) {
-				t.Fatalf("expected error %v, got %v", tc.expectedError, err)
+			if err == nil {
+				t.Fatalf("expected error for frame size %d exceeding MaxFrameSize, got nil", tc.claimLength)
+			}
+			if !errors.Is(err, ErrFrameTooLarge) {
+				t.Fatalf("expected ErrFrameTooLarge (%v), got %v", ErrFrameTooLarge, err)
 			}
 		})
 	}
