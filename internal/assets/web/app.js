@@ -3310,7 +3310,7 @@ async function startWebRTC() {
         }
       });
 
-      encBuffer = new Uint8Array(0);
+      let msgEncBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -3349,17 +3349,17 @@ async function startWebRTC() {
             }
 
             const value = new Uint8Array(e.data);
-            let newBuffer = new Uint8Array(encBuffer.length + value.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(value, encBuffer.length);
-            encBuffer = newBuffer;
+            let newBuffer = new Uint8Array(msgEncBuffer.length + value.length);
+            newBuffer.set(msgEncBuffer, 0);
+            newBuffer.set(value, msgEncBuffer.length);
+            msgEncBuffer = newBuffer;
 
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+            while (msgEncBuffer.length >= 4) {
+              const dv = new DataView(msgEncBuffer.buffer, msgEncBuffer.byteOffset, msgEncBuffer.byteLength);
               const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
+              if (msgEncBuffer.length >= 4 + frameLen) {
+                const frame = msgEncBuffer.slice(4, 4 + frameLen);
+                msgEncBuffer = msgEncBuffer.slice(4 + frameLen);
 
                 const nonce = new Uint8Array(frame.subarray(0, 12));
                 const ciphertext = new Uint8Array(frame.subarray(12));
@@ -3491,10 +3491,10 @@ async function startWebRTC() {
  * Attaches the 'bufferedamountlow' listener and immediately re-evaluates bufferedAmount before awaiting,
  * supplemented by a polling fallback to prevent race conditions during buffer drains.
  */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
+function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 250) {
   return new Promise((resolve, reject) => {
     if (!dc || dc.readyState !== 'open') {
-      return reject(new Error("Data channel is no longer open"));
+      return reject(new Error("Data channel is closed or closing"));
     }
 
     dc.bufferedAmountLowThreshold = targetThreshold;
@@ -3531,9 +3531,9 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
 
     // Polling fallback to check for buffer drain or closed channel
     intervalId = setInterval(() => {
-      if (dc.readyState !== 'open') {
+      if (!dc || dc.readyState !== 'open') {
         cleanup();
-        reject(new Error("Data channel is no longer open"));
+        reject(new Error("Data channel is closed or closing"));
         return;
       }
       if (dc.bufferedAmount <= targetThreshold) {
@@ -3542,6 +3542,10 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
       }
     }, pollMs);
   });
+}
+
+function waitForDataChannelBuffer(dc, targetAmount = 1024 * 1024, lowThreshold = 512 * 1024) {
+  return waitForBufferedAmountLow(dc, lowThreshold);
 }
 
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
@@ -4394,7 +4398,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
     });
 
     while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+      if (dc.readyState !== 'open') throw new Error("Data channel is closed or closing");
       if (dc.bufferedAmount > 1024 * 1024) {
         await waitForBufferedAmountLow(dc, 512 * 1024);
       } else if (senderPaused) {
@@ -4436,10 +4440,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (dc.bufferedAmount > 0) {
+  if (dc && dc.bufferedAmount > 0) {
     await waitForBufferedAmountLow(dc, 0);
   }
-  dc.send("EOF");
+  if (dc) dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
@@ -5050,9 +5054,7 @@ if (typeof module !== 'undefined' && module.exports) {
     waitForDataChannelBuffer,
     uploadFileP2P,
     sendWebRTCFile,
-    generateQRCodeSVG,
-    generateQRCodeDataURL,
-    generateClientQRCodeDataURL,
+
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
@@ -5068,7 +5070,8 @@ if (typeof module !== 'undefined' && module.exports) {
     resetState,
     stripAnsi,
     parseAnsiToHtml,
-    renderQRCode,
+    generateClientQRCodeDataURL,
+    renderQRCode: generateClientQRCodeDataURL,
     handleSenderFileSelect,
     startSenderSharing,
     get_senderEncryptionKey: () => senderEncryptionKey,
