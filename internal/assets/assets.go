@@ -84,8 +84,8 @@ func PakoJS() string {
 	return pakoJS
 }
 
-// QRCodeJS returns the qrcode.min.js content.
-func QRCodeJS() string {
+// QrcodeJS returns the qrcode.min.js content.
+func QrcodeJS() string {
 	return qrcodeJS
 }
 
