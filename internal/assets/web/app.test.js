@@ -23,6 +23,13 @@ describe('Gaze Web Receiver Test Suite', () => {
     window = dom.window;
     document = window.document;
 
+    global.fetch = window.fetch = async () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({}),
+      text: async () => ''
+    });
+
     window.HTMLCanvasElement.prototype.getContext = function() {
       return {
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
