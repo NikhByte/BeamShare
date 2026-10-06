@@ -15,9 +15,8 @@ import (
 	"time"
 
 	"github.com/beamshare/beam/internal/assets"
+	"github.com/skip2/go-qrcode"
 )
-
-const maxDownloadQueueSize = 100
 
 type DownloadRequest struct {
 	Offset int64  `json:"offset,omitempty"`
@@ -45,19 +44,15 @@ type Session struct {
 	expiresAt time.Time
 	mu        sync.Mutex
 
-	downloadQueue  []DownloadRequest
-	downloadNotify chan struct{}
+	pendingDownload *DownloadRequest
+	downloadNotify  chan struct{}
 }
 
 func (s *Session) EnqueueDownload(req DownloadRequest) bool {
 	s.mu.Lock()
-	if len(s.downloadQueue) >= maxDownloadQueueSize {
-		s.mu.Unlock()
-		return false
-	}
-	s.downloadQueue = append(s.downloadQueue, req)
-	s.mu.Unlock()
-
+	defer s.mu.Unlock()
+	reqCopy := req
+	s.pendingDownload = &reqCopy
 	select {
 	case s.downloadNotify <- struct{}{}:
 	default:
@@ -68,32 +63,35 @@ func (s *Session) EnqueueDownload(req DownloadRequest) bool {
 func (s *Session) DequeueDownload() (DownloadRequest, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.downloadQueue) == 0 {
+	if s.pendingDownload == nil {
 		return DownloadRequest{}, false
 	}
-	req := s.downloadQueue[0]
-	s.downloadQueue = s.downloadQueue[1:]
+	req := *s.pendingDownload
+	s.pendingDownload = nil
+	select {
+	case <-s.downloadNotify:
+	default:
+	}
 	return req, true
 }
 
 func (s *Session) ClearDownloadQueue() {
 	s.mu.Lock()
-	s.downloadQueue = nil
-	s.mu.Unlock()
-
-	for {
-		select {
-		case <-s.downloadNotify:
-		default:
-			return
-		}
+	defer s.mu.Unlock()
+	s.pendingDownload = nil
+	select {
+	case <-s.downloadNotify:
+	default:
 	}
 }
 
 func (s *Session) DownloadQueueLen() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.downloadQueue)
+	if s.pendingDownload != nil {
+		return 1
+	}
+	return 0
 }
 
 func (s *Session) ClosePipes(err error) {
@@ -354,7 +352,7 @@ func (s *Server) createSession() *Session {
 	sess := &Session{
 		ID:             id,
 		AnswerReady:    make(chan string, 1),
-		downloadNotify: make(chan struct{}, maxDownloadQueueSize),
+		downloadNotify: make(chan struct{}, 1),
 		UploadReq:      make(chan string, 1),
 		expiresAt:      time.Now().Add(s.sessionTTL),
 	}
@@ -494,10 +492,6 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if dlReq, ok := sess.DequeueDownload(); ok {
-		select {
-		case <-sess.downloadNotify:
-		default:
-		}
 		respondWithDownload(w, dlReq)
 		return
 	}
@@ -862,6 +856,14 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		} else {
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-/*", rng.start))
 		}
+	}
+
+	if !sess.EnqueueDownload(DownloadRequest{Offset: offset, Range: rangeHdr}) {
+		http.Error(w, "Download queue full", http.StatusServiceUnavailable)
+		return
+	}
+
+	if hasRange {
 		w.WriteHeader(http.StatusPartialContent)
 	} else {
 		w.WriteHeader(http.StatusOK)
@@ -900,9 +902,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
-
-	// Notify sender with offset/range
-	sess.EnqueueDownload(DownloadRequest{Offset: offset, Range: rangeHdr})
 
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
@@ -963,10 +962,22 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 		}
 
 		if !sr.initDone {
-			n, err := sr.pr.Read(p)
 			sr.sess.mu.Lock()
 			reqOff := sr.sess.RequestedOffset
 			sendOff := sr.sess.SenderOffset
+			sr.sess.mu.Unlock()
+
+			sr.bytesToSkip = reqOff - sendOff
+			if sr.bytesToSkip < 0 {
+				sr.initDone = true
+				return 0, fmt.Errorf("relay stream offset mismatch: sender offset %d exceeds requested offset %d", sendOff, reqOff)
+			}
+
+			n, err := sr.pr.Read(p)
+
+			sr.sess.mu.Lock()
+			reqOff = sr.sess.RequestedOffset
+			sendOff = sr.sess.SenderOffset
 			sr.sess.mu.Unlock()
 
 			sr.bytesToSkip = reqOff - sendOff
@@ -994,6 +1005,14 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 			return copied, err
 		}
 
+		if sr.bytesToSkip < 0 {
+			sr.sess.mu.Lock()
+			reqOff := sr.sess.RequestedOffset
+			sendOff := sr.sess.SenderOffset
+			sr.sess.mu.Unlock()
+			return 0, fmt.Errorf("relay stream offset mismatch: sender offset %d exceeds requested offset %d", sendOff, reqOff)
+		}
+
 		if sr.bytesToSkip > 0 {
 			n, err := sr.pr.Read(p)
 			if int64(n) <= sr.bytesToSkip {
@@ -1014,8 +1033,31 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 }
 
 func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
-	// A dummy QR API to prevent 404s
-	w.WriteHeader(200)
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Private-Network", "true")
+	urlParam := r.URL.Query().Get("url")
+	if urlParam == "" {
+		http.Error(w, "missing url parameter", http.StatusBadRequest)
+		return
+	}
+
+	pngBytes, err := qrcode.Encode(urlParam, qrcode.Medium, 256)
+	if err != nil {
+		http.Error(w, "failed to generate qr code: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(pngBytes)))
+	w.Write(pngBytes)
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
