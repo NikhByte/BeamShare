@@ -14,9 +14,8 @@ import (
 const MaxFrameSize = 1024 * 1024
 
 var (
-	// ErrFrameTooLarge is returned when a frame length header exceeds MaxFrameSize.
-	ErrFrameTooLarge = errors.New("frame size exceeds maximum limit")
-	// ErrMaxFrameSizeExceeded is an alias for ErrFrameTooLarge.
+	ErrInvalidFrameLength   = errors.New("invalid frame length")
+	ErrFrameTooLarge        = errors.New("frame size exceeds maximum limit")
 	ErrMaxFrameSizeExceeded = ErrFrameTooLarge
 )
 
@@ -29,7 +28,7 @@ type EncryptingReader struct {
 
 func NewEncryptingReader(r io.Reader, key []byte) (*EncryptingReader, error) {
 	if len(key) != 32 {
-		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d bytes", len(key))
+		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d", len(key))
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -81,16 +80,16 @@ func (er *EncryptingReader) Read(p []byte) (int, error) {
 }
 
 type DecryptingReader struct {
-	r         io.Reader
-	gcm       cipher.AEAD
-	buf       []byte // slice of unread decrypted plaintext
-	frameBuf  []byte // 1MB reusable buffer for frame payload and in-place decryption
-	headerBuf [4]byte
+	r        io.Reader
+	gcm      cipher.AEAD
+	buf      []byte // slice of unread decrypted plaintext
+	frameBuf []byte // 1MB reusable buffer for frame payload and in-place decryption
+	header   [4]byte
 }
 
 func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
 	if len(key) != 32 {
-		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d bytes", len(key))
+		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d", len(key))
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -117,17 +116,17 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 		return n, nil
 	}
 
-	if _, err := io.ReadFull(dr.r, dr.headerBuf[:]); err != nil {
+	if _, err := io.ReadFull(dr.r, dr.header[:]); err != nil {
 		return 0, err
 	}
-	length := binary.BigEndian.Uint32(dr.headerBuf[:])
+	length := binary.BigEndian.Uint32(dr.header[:])
 
 	nonceSize := dr.gcm.NonceSize()
 	if int(length) < nonceSize {
 		return 0, io.ErrUnexpectedEOF
 	}
 	if length > MaxFrameSize {
-		return 0, fmt.Errorf("frame length %d exceeds maximum limit of %d bytes: %w", length, MaxFrameSize, ErrFrameTooLarge)
+		return 0, ErrFrameTooLarge
 	}
 
 	frameData := dr.frameBuf[:length]
