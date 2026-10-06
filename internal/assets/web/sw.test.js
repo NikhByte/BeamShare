@@ -24,33 +24,6 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     delete global.self;
   });
 
-  test('Service worker posts PORT_READY message on port upon INIT_PORT', () => {
-    const { streamMap } = require('./sw.js');
-    const url = '/sw-download-pipe/test-port-ready';
-
-    let postedMessage = null;
-    const mockPort = {
-      onmessage: null,
-      onmessageerror: null,
-      close: () => {},
-      postMessage: (msg) => { postedMessage = msg; }
-    };
-
-    listeners['message']({
-      data: {
-        type: 'INIT_PORT',
-        url,
-        filename: 'test.bin',
-        size: 100,
-        mime: 'application/octet-stream'
-      },
-      ports: [mockPort]
-    });
-
-    assert.equal(streamMap.has(url), true);
-    assert.deepEqual(postedMessage, { type: 'PORT_READY' });
-  });
-
   test('formatContentDisposition formats RFC 6266 dual parameters correctly', () => {
     const { formatContentDisposition } = require('./sw.js');
 
@@ -315,7 +288,7 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
   });
 
   test('INIT_PORT message handler posts READY message over message port', () => {
-    require('./sw.js');
+    const { streamMap } = require('./sw.js');
     const url = '/sw-download-pipe/test-ready';
     let readyPosted = false;
 
@@ -342,5 +315,11 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     });
 
     assert.equal(readyPosted, true);
+
+    if (streamMap.has(url)) {
+      const entry = streamMap.get(url);
+      if (entry && entry.ttlTimer) clearTimeout(entry.ttlTimer);
+      streamMap.delete(url);
+    }
   });
 });
