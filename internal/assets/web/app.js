@@ -3718,7 +3718,8 @@ function showError(msg) {
   if (useOPFS) {
     navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
   }
-  document.getElementById('error-msg').textContent = msg;
+  const errEl = document.getElementById('error-msg');
+  if (errEl) errEl.textContent = msg;
   setState('error');
 }
 
@@ -4208,7 +4209,9 @@ async function startSenderSharing() {
     const offer = await senderPeerConnection.createOffer();
     await senderPeerConnection.setLocalDescription(offer);
 
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
 
     setLoadingSub('Publishing SDP offer to relay…');
     const stateRes = await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
@@ -5033,6 +5036,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     uploadFileP2P,
