@@ -999,6 +999,16 @@ function checkRamWarning(size) {
   });
 }
 
+function generateClientQRCodeDataURL(text) {
+  if (typeof generateQRCodeSVGDataURL === 'function') {
+    return generateQRCodeSVGDataURL(text);
+  }
+  if (typeof window !== 'undefined' && window.qrcode && typeof window.qrcode.generateQRCodeSVGDataURL === 'function') {
+    return window.qrcode.generateQRCodeSVGDataURL(text);
+  }
+  return '';
+}
+
 // ── QR Scanning ───────────────────────────────────────────────────────────────
 let qrStream = null;
 let qrScanFrame = null;
@@ -2281,10 +2291,10 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR PNG dynamically from the server's newly added QR API
+    // Load QR SVG data URL locally without external network requests
     const qrImg = document.getElementById('done-qr-img');
     if (qrImg) {
-      qrImg.src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareLink);
+      qrImg.src = generateClientQRCodeDataURL(shareLink);
     }
     
     if (doneShare) doneShare.classList.remove('hidden');

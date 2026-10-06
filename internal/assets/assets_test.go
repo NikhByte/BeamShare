@@ -20,6 +20,7 @@ func TestStaticHandler_ValidAssets(t *testing.T) {
 		{"/style.css", "text/css; charset=utf-8", "body"},
 		{"/app.js", "application/javascript; charset=utf-8", "function"},
 		{"/pako.min.js", "application/javascript; charset=utf-8", "pako"},
+		{"/qrcode.min.js", "application/javascript; charset=utf-8", "generateQRCodeSVGDataURL"},
 	}
 
 	for _, tc := range tests {

@@ -84,7 +84,13 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.pako = pako;
     window.__BEAM_TEST_ENV__ = true;
 
-    // Load app.js
+    // Load qrcode.min.js and app.js
+    delete require.cache[require.resolve('./qrcode.min.js')];
+    const qrcodeLib1 = require('./qrcode.min.js');
+    global.generateQRCodeSVGDataURL = qrcodeLib1.generateQRCodeSVGDataURL;
+    window.generateQRCodeSVGDataURL = qrcodeLib1.generateQRCodeSVGDataURL;
+    window.qrcode = qrcodeLib1;
+
     delete require.cache[require.resolve('./app.js')];
     app = require('./app.js');
   });
@@ -669,6 +675,12 @@ describe('Gaze Web Sender Test Suite', () => {
     window.RTCPeerConnection = RTCPeerConnection;
     global.RTCPeerConnection = RTCPeerConnection;
     window.__BEAM_TEST_ENV__ = true;
+
+    delete require.cache[require.resolve('./qrcode.min.js')];
+    const qrcodeLib2 = require('./qrcode.min.js');
+    global.generateQRCodeSVGDataURL = qrcodeLib2.generateQRCodeSVGDataURL;
+    window.generateQRCodeSVGDataURL = qrcodeLib2.generateQRCodeSVGDataURL;
+    window.qrcode = qrcodeLib2;
 
     delete require.cache[require.resolve('./app.js')];
     app = require('./app.js');
