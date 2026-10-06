@@ -835,10 +835,9 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
+    // Verify QR code image src uses client-side data URI instead of third-party or backend API calls
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
+    assert.equal(qrImg.src.startsWith('data:image/svg+xml') || qrImg.src.includes('data:image'), true);
     assert.equal(qrImg.src.includes('api.qrserver.com'), false);
   });
 

@@ -33,7 +33,11 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
       onmessage: null,
       onmessageerror: null,
       close: () => {},
-      postMessage: (msg) => { postedMessage = msg; }
+      postMessage: (msg) => {
+        if (msg && msg.type === 'PORT_READY') {
+          postedMessage = msg;
+        }
+      }
     };
 
     listeners['message']({

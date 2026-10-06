@@ -1,5 +1,5 @@
 // ── Client-side QR Code Generator Engine (Zero Network Dependencies) ──────
-const qrcodegen = (function() {
+var qrcodegen = (function() {
 	function QrCode(version, errorCorrectionLevel, dataCodewords, msk) {
 		if (version < QrCode.MIN_VERSION || version > QrCode.MAX_VERSION)
 			throw new RangeError("Version value out of range");
@@ -1146,7 +1146,18 @@ function qrToSvgDataUrl(qr, border = 4) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
-function renderQRCode(element, text, options = {}) {
+function renderQRCode(arg1, arg2, options = {}) {
+  let element, text;
+  if (typeof arg1 === 'string' && typeof arg2 === 'object' && arg2 !== null) {
+    text = arg1;
+    element = arg2;
+  } else if (typeof arg1 === 'string') {
+    element = document.getElementById(arg1);
+    text = arg2;
+  } else {
+    element = arg1;
+    text = arg2;
+  }
   if (!element) return;
   try {
     if (!text) {
@@ -1166,6 +1177,7 @@ function renderQRCode(element, text, options = {}) {
       try {
         const dataUrl = qrToSvgDataUrl(qr, options.border !== undefined ? options.border : 4);
         element.src = dataUrl;
+        element.setAttribute('src', dataUrl);
         element.alt = options.alt || "QR Code for share URL";
       } catch (renderErr) {
         showQRError(element, "Failed to render QR image");
@@ -1175,6 +1187,27 @@ function renderQRCode(element, text, options = {}) {
         renderQRToCanvas(qr, element, options.border !== undefined ? options.border : 4);
       } catch (canvasErr) {
         showQRError(element, "Canvas QR rendering failed");
+      }
+    } else if (tagName === 'svg') {
+      try {
+        const border = options.border !== undefined ? options.border : 4;
+        const totalSize = qr.size + border * 2;
+        element.setAttribute('viewBox', `0 0 ${totalSize} ${totalSize}`);
+        element.setAttribute('width', '100%');
+        element.setAttribute('height', '100%');
+        element.setAttribute('shape-rendering', 'crispEdges');
+        let path = '<rect width="' + totalSize + '" height="' + totalSize + '" fill="#ffffff"/><path d="';
+        for (let y = 0; y < qr.size; y++) {
+          for (let x = 0; x < qr.size; x++) {
+            if (qr.getModule(x, y)) {
+              path += 'M' + (x + border) + ',' + (y + border) + 'h1v1h-1z ';
+            }
+          }
+        }
+        path += '" fill="#000000"/>';
+        element.innerHTML = path;
+      } catch (err) {
+        showQRError(element, "Failed to render QR SVG");
       }
     } else {
       try {
@@ -3225,16 +3258,6 @@ async function startWebRTC() {
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
 
-    let decryptionKey = null;
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch (e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      pc.close();
-      return;
-    }
-
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
       if (dc.readyState === 'open') {
@@ -3374,58 +3397,6 @@ async function startWebRTC() {
           dc.close();
           reject(err);
         }
-
-        const chunk = new Uint8Array(e.data);
-        msgChain = msgChain.then(async () => {
-          if (isTerminated) return;
-
-          if (decryptionKey) {
-            let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(chunk, encBuffer.length);
-            encBuffer = newBuffer;
-
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-              const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
-
-                if (frameLen < 12) {
-                  throw new Error("Invalid frame length: header smaller than nonce size");
-                }
-
-                const nonce = new Uint8Array(frame.subarray(0, 12));
-                const ciphertext = new Uint8Array(frame.subarray(12));
-
-                let decrypted;
-                try {
-                  decrypted = await crypto.subtle.decrypt(
-                    { name: "AES-GCM", iv: nonce },
-                    decryptionKey,
-                    ciphertext
-                  );
-                } catch (decryptErr) {
-                  throw new Error("Decryption failed: corrupted frame or invalid key");
-                }
-
-                const decValue = new Uint8Array(decrypted);
-                chunkQueue.enqueue(decValue);
-              } else {
-                break;
-              }
-            }
-          } else {
-            chunkQueue.enqueue(chunk);
-          }
-        }).catch((err) => {
-          if (isTerminated) return;
-          isTerminated = true;
-          showError(`Transfer failed: ${err.message}`);
-          try { dc.close(); } catch (closeErr) {}
-          reject(err);
-        });
       };
 
       dc.onerror = (e) => reject(new Error('data channel error: ' + e));
@@ -3860,7 +3831,10 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    const sendImg = document.getElementById('send-qr-img');
+    const sendCanvas = document.getElementById('send-qr-canvas');
+    if (sendImg) renderQRCode(sendImg, shareURL.href);
+    if (sendCanvas) renderQRCode(sendCanvas, shareURL.href);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -4251,6 +4225,14 @@ if (typeof window !== 'undefined') {
 
 // ── Local Client-Side QR Generation ───────────────────────────────────────────
 function generateQRCodeDataURL(text, options) {
+  if (typeof qrcodegen !== 'undefined' && qrcodegen.QrCode) {
+    const qr = qrcodegen.QrCode.encodeText(text, qrcodegen.QrCode.Ecc.MEDIUM);
+    return qrToSvgDataUrl(qr, options && options.border !== undefined ? options.border : 4);
+  }
+  if (typeof window !== 'undefined' && window.qrcodegen && window.qrcodegen.QrCode) {
+    const qr = window.qrcodegen.QrCode.encodeText(text, window.qrcodegen.QrCode.Ecc.MEDIUM);
+    return qrToSvgDataUrl(qr, options && options.border !== undefined ? options.border : 4);
+  }
   if (typeof QRCode !== 'undefined' && QRCode.generateQRCodeDataURL) {
     return QRCode.generateQRCodeDataURL(text, options);
   }
@@ -4263,17 +4245,6 @@ function generateQRCodeDataURL(text, options) {
     } catch (e) {}
   }
   throw new Error("Client-side QR generator unavailable");
-}
-
-function renderQRCode(elementOrId, url) {
-  const img = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
-  if (!img) return;
-  try {
-    const dataUrl = generateQRCodeDataURL(url);
-    img.src = dataUrl;
-  } catch (err) {
-    console.error("Failed to generate QR code client-side");
-  }
 }
 
 if (typeof module !== 'undefined' && module.exports) {
@@ -4297,6 +4268,7 @@ if (typeof module !== 'undefined' && module.exports) {
     resetState,
     stripAnsi,
     parseAnsiToHtml,
+    renderQRCode,
     handleSenderFileSelect,
     startSenderSharing,
     get_senderEncryptionKey: () => senderEncryptionKey,
