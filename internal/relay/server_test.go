@@ -3,8 +3,6 @@ package relay
 import (
 	"context"
 	"fmt"
-	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
