@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -556,3 +557,238 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 }
 
+func TestLiveStreamReader_ContinuousStreaming(t *testing.T) {
+	srv, err := New("", 10*1024*1024)
+	require.NoError(t, err)
+
+	srv.WriteLive([]byte("backlog 1\n"))
+
+	reader := srv.NewLiveStreamReader(context.Background(), 0)
+	defer reader.Close()
+
+	buf := make([]byte, 1024)
+
+	// Read initial backlog
+	n, err := reader.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "backlog 1\n", string(buf[:n]))
+
+	// Asynchronously write live chunks
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		srv.WriteLive([]byte("live chunk 2\n"))
+		time.Sleep(20 * time.Millisecond)
+		srv.CloseLive()
+	}()
+
+	// Read live chunk
+	n, err = reader.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "live chunk 2\n", string(buf[:n]))
+
+	// Read EOF after CloseLive
+	_, err = reader.Read(buf)
+	assert.Equal(t, io.EOF, err)
+}
+
+func TestLiveStreamReader_WithOffset(t *testing.T) {
+	srv, err := New("", 10*1024*1024)
+	require.NoError(t, err)
+
+	srv.WriteLive([]byte("0123456789"))
+
+	reader := srv.NewLiveStreamReader(context.Background(), 5)
+	defer reader.Close()
+
+	buf := make([]byte, 1024)
+
+	n, err := reader.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "56789", string(buf[:n]))
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		srv.WriteLive([]byte("next"))
+		srv.CloseLive()
+	}()
+
+	n, err = reader.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "next", string(buf[:n]))
+
+	_, err = reader.Read(buf)
+	assert.Equal(t, io.EOF, err)
+}
+
+func TestLiveStreamReader_CloseAndCleanup(t *testing.T) {
+	srv, err := New("", 10*1024*1024)
+	require.NoError(t, err)
+
+	reader := srv.NewLiveStreamReader(context.Background(), 0)
+
+	srv.mu.Lock()
+	clientCount := len(srv.liveClients)
+	srv.mu.Unlock()
+	assert.Equal(t, 1, clientCount)
+
+	err = reader.Close()
+	require.NoError(t, err)
+
+	srv.mu.Lock()
+	clientCount = len(srv.liveClients)
+	srv.mu.Unlock()
+	assert.Equal(t, 0, clientCount)
+
+	buf := make([]byte, 100)
+	_, err = reader.Read(buf)
+	assert.Equal(t, io.EOF, err)
+}
+
+func TestConcurrentMetaDownloadUpdateSharedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath1 := filepath.Join(tmpDir, "file1.txt")
+	filePath2 := filepath.Join(tmpDir, "file2.txt")
+	content1 := []byte("content of file 1")
+	content2 := []byte("content of file 2 - larger size")
+
+	require.NoError(t, os.WriteFile(filePath1, content1, 0644))
+	require.NoError(t, os.WriteFile(filePath2, content2, 0644))
+
+	srv, err := New(filePath1, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	const iterations = 100
+	var wg sync.WaitGroup
+
+	// Goroutine 1: Continuously update shared file state
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if i%2 == 0 {
+				srv.UpdateSharedFile(filePath1, "file1.txt", int64(len(content1)))
+			} else {
+				srv.UpdateSharedFile(filePath2, "file2.txt", int64(len(content2)))
+			}
+			time.Sleep(500 * time.Microsecond)
+		}
+	}()
+
+	// Goroutine 2: Continuously request /api/meta
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		client := &http.Client{Timeout: 2 * time.Second}
+		for i := 0; i < iterations; i++ {
+			resp, err := client.Get(ts.URL + "/api/meta")
+			if err == nil {
+				assert.Equal(t, http.StatusOK, resp.StatusCode)
+				var meta FileMeta
+				if err := json.NewDecoder(resp.Body).Decode(&meta); err == nil {
+					assert.Contains(t, []string{"file1.txt", "file2.txt"}, meta.Name)
+				}
+				resp.Body.Close()
+			}
+			time.Sleep(500 * time.Microsecond)
+		}
+	}()
+
+	// Goroutine 3: Continuously request /api/download
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		client := &http.Client{Timeout: 2 * time.Second}
+		for i := 0; i < iterations; i++ {
+			resp, err := client.Get(ts.URL + "/api/download")
+			if err == nil {
+				assert.Equal(t, http.StatusOK, resp.StatusCode)
+				_, _ = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
+			time.Sleep(500 * time.Microsecond)
+		}
+	}()
+
+	wg.Wait()
+}
+
+func TestConcurrentMetaAndDownloadDuringUpload(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "test.bin")
+	err := os.WriteFile(filePath, []byte("initial file content"), 0644)
+	require.NoError(t, err)
+
+	srv, err := New(filePath, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Goroutine 1: Rapidly update shared file metadata
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				i++
+				newFile := filepath.Join(tmpDir, fmt.Sprintf("file_%d.bin", i))
+				content := fmt.Sprintf("content_%d", i)
+				_ = os.WriteFile(newFile, []byte(content), 0644)
+				srv.UpdateSharedFile(newFile, fmt.Sprintf("file_%d.bin", i), int64(len(content)))
+				time.Sleep(1 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Goroutine 2: Query /api/meta concurrently
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		client := &http.Client{Timeout: 1 * time.Second}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				resp, err := client.Get(ts.URL + "/api/meta")
+				if err == nil {
+					_, _ = io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+				}
+			}
+		}
+	}()
+
+	// Goroutine 3: Query /api/download concurrently
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		client := &http.Client{Timeout: 1 * time.Second}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				resp, err := client.Get(ts.URL + "/api/download")
+				if err == nil {
+					_, _ = io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+				}
+			}
+		}
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
