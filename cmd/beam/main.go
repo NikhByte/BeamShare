@@ -925,7 +925,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		} else {
 			qrURL = localURL
 			if session != nil {
-				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				sep := "&"
+				if !strings.Contains(localURL, "?") {
+					sep = "/?"
+				}
+				qrURL += fmt.Sprintf("%smode=webrtc&sdp=%s&timeout=%d", sep, session.CompressedOffer(), discoveryTimeout.Milliseconds())
 				if len(parsedTurnServers) > 0 {
 					qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
 					if parsedTurnUsername != "" {
