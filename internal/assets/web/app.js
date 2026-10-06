@@ -3336,7 +3336,7 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
+      encBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -3600,6 +3600,16 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
         resolve();
       }
     }, pollMs);
+  });
+}
+
+function waitForDataChannelBuffer(dc, highWatermark = 0, lowWatermark = 0, pollMs = 250) {
+  const threshold = typeof lowWatermark === 'number' ? lowWatermark : highWatermark;
+  return waitForBufferedAmountLow(dc, threshold, pollMs).catch((err) => {
+    if (err.message === "Data channel is no longer open") {
+      throw new Error("Data channel is closed or closing");
+    }
+    throw err;
   });
 }
 
@@ -4077,10 +4087,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(senderDataChannel, 512 * 1024);
+    while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
+      if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+      if (dc.bufferedAmount > 1024 * 1024) {
+        await waitForBufferedAmountLow(dc, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -4120,10 +4130,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (senderDataChannel.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(senderDataChannel, 0);
+  if (dc.bufferedAmount > 0) {
+    await waitForBufferedAmountLow(dc, 0);
   }
-  senderDataChannel.send("EOF");
+  dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
@@ -4363,6 +4373,9 @@ function renderQRCode(elementOrId, url) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     waitForBufferedAmountLow,
+    waitForDataChannelBuffer,
+    uploadFileP2P,
+    sendWebRTCFile,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
