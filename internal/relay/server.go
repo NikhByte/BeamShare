@@ -1323,12 +1323,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}()
 
 			// Notify sender
+			sess.mu.Lock()
 			if !sess.closed && sess.UploadReq != nil {
 				select {
 				case sess.UploadReq <- part.FileName():
 				default:
 				}
 			}
+			sess.mu.Unlock()
 
 			// Stream data to pipe
 			_, copyErr := io.Copy(pw, part)
