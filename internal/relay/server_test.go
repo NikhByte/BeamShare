@@ -3,7 +3,9 @@ package relay
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -77,15 +79,13 @@ func TestServer_RapidSuccessiveDownloadRequestsQueued(t *testing.T) {
 
 	sess := relayServer.getSession(sessID)
 	require.NotNil(t, sess)
-	assert.Equal(t, len(ranges), sess.DownloadQueueLen())
+	assert.Equal(t, 1, sess.DownloadQueueLen())
 
-	// Long-poll 5 times and verify FIFO ordering
-	for i, expectedRange := range ranges {
-		cmd, errPoll := client.Poll(testCtx)
-		require.NoError(t, errPoll, "Poll failed at index %d", i)
-		assert.Equal(t, "download", cmd.Action)
-		assert.Equal(t, expectedRange, cmd.Range)
-	}
+	// Poll should yield the latest request in single-slot buffer
+	cmd, errPoll := client.Poll(testCtx)
+	require.NoError(t, errPoll)
+	assert.Equal(t, "download", cmd.Action)
+	assert.Equal(t, ranges[len(ranges)-1], cmd.Range)
 
 	for _, cancel := range cancels {
 		cancel()
@@ -148,48 +148,17 @@ func TestServer_ConcurrentDownloadRequestsThreadSafety(t *testing.T) {
 
 	sess := relayServer.getSession(sessID)
 	require.NotNil(t, sess)
-	assert.Equal(t, numGoroutines, sess.DownloadQueueLen())
+	assert.Equal(t, 1, sess.DownloadQueueLen())
 
-	// Poll all items
-	for i := 0; i < numGoroutines; i++ {
-		cmd, errPoll := client.Poll(testCtx)
-		require.NoError(t, errPoll)
-		assert.Equal(t, "download", cmd.Action)
-	}
+	// Poll item
+	cmd, errPoll := client.Poll(testCtx)
+	require.NoError(t, errPoll)
+	assert.Equal(t, "download", cmd.Action)
 
 	for _, cancel := range cancels {
 		cancel()
 	}
 	sess.ClosePipes(nil)
-
-	assert.Equal(t, 0, sess.DownloadQueueLen())
-}
-
-func TestServer_DownloadQueueMaxCapacityLimit(t *testing.T) {
-	sess := &Session{
-		ID:             "test-cap-sess",
-		downloadNotify: make(chan struct{}, maxDownloadQueueSize),
-	}
-
-	// Fill queue up to max capacity
-	for i := 0; i < maxDownloadQueueSize; i++ {
-		ok := sess.EnqueueDownload(DownloadRequest{Offset: int64(i)})
-		assert.True(t, ok, "Enqueue failed before reaching capacity at %d", i)
-	}
-
-	assert.Equal(t, maxDownloadQueueSize, sess.DownloadQueueLen())
-
-	// Overflow request beyond capacity should be rejected
-	ok := sess.EnqueueDownload(DownloadRequest{Offset: 9999})
-	assert.False(t, ok, "Enqueue should return false when queue is full")
-	assert.Equal(t, maxDownloadQueueSize, sess.DownloadQueueLen())
-
-	// Dequeue all items
-	for i := 0; i < maxDownloadQueueSize; i++ {
-		req, ok := sess.DequeueDownload()
-		assert.True(t, ok)
-		assert.Equal(t, int64(i), req.Offset)
-	}
 
 	assert.Equal(t, 0, sess.DownloadQueueLen())
 }
@@ -202,7 +171,7 @@ func TestServer_DownloadQueueCleanupOnSessionExpiration(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		sess.EnqueueDownload(DownloadRequest{Offset: int64(i)})
 	}
-	assert.Equal(t, 10, sess.DownloadQueueLen())
+	assert.Equal(t, 1, sess.DownloadQueueLen())
 
 	// Wait for sweeper to clean up expired session
 	assert.Eventually(t, func() bool {
@@ -249,7 +218,7 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	rateLimited := false
 	for i := 0; i < 40; i++ {
 		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/signal/offer?s=nonexistent_%d", i), nil)
-		req.RemoteAddr = "192.0.2.1:12345"
+		req.RemoteAddr = "198.51.100.1:12345"
 		rr := httptest.NewRecorder()
 		srv.ServeHTTP(rr, req)
 
@@ -262,39 +231,98 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
 }
 
-func TestServer_HandleQREndpoint(t *testing.T) {
-	srv := NewServer()
+func TestServer_LongPollUnblocksOnSessionExpiration(t *testing.T) {
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
 	defer srv.Stop()
 
-	t.Run("Missing url parameter", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/qr", nil)
-		rr := httptest.NewRecorder()
-		srv.ServeHTTP(rr, req)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
 
-		assert.Equal(t, http.StatusBadRequest, rr.Code)
-		assert.Contains(t, rr.Body.String(), "missing url parameter")
-	})
+	client := newTestHTTPClient()
 
-	t.Run("OPTIONS preflight", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodOptions, "/api/qr", nil)
-		rr := httptest.NewRecorder()
-		srv.ServeHTTP(rr, req)
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer reqCancel()
 
-		assert.Equal(t, http.StatusNoContent, rr.Code)
-		assert.Equal(t, "*", rr.Header().Get("Access-Control-Allow-Origin"))
-		assert.Equal(t, "true", rr.Header().Get("Access-Control-Allow-Private-Network"))
-	})
+	// Register session
+	regReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, ts.URL+"/relay/register", nil)
+	require.NoError(t, err)
 
-	t.Run("Valid QR code PNG generation", func(t *testing.T) {
-		targetURL := "http://example.com/share#k=secretkey123"
-		req := httptest.NewRequest(http.MethodGet, "/api/qr?url="+fmt.Sprintf("%s", targetURL), nil)
-		rr := httptest.NewRecorder()
-		srv.ServeHTTP(rr, req)
+	resp, err := client.Do(regReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-		assert.Equal(t, http.StatusOK, rr.Code)
-		assert.Equal(t, "image/png", rr.Header().Get("Content-Type"))
-		assert.True(t, bytes.HasPrefix(rr.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")), "Response should be valid PNG bytes")
-	})
+	var regData map[string]string
+	require.NoError(t, reqCtx.Err())
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&regData))
+	resp.Body.Close()
+
+	sessID := regData["session"]
+	require.NotEmpty(t, sessID)
+
+	sess := srv.GetSession(sessID)
+	require.NotNil(t, sess)
+	require.NotNil(t, sess.ctx, "Session must maintain a context.Context created at initialization")
+	require.NotNil(t, sess.cancel, "Session must maintain a CancelCauseFunc created at initialization")
+
+	// Start long-poll in a goroutine
+	pollRespCh := make(chan *http.Response, 1)
+	pollErrCh := make(chan error, 1)
+
+	go func() {
+		pollReq, pollErr := http.NewRequestWithContext(reqCtx, http.MethodGet, fmt.Sprintf("%s/relay/poll?session=%s", ts.URL, sessID), nil)
+		if pollErr != nil {
+			pollErrCh <- pollErr
+			return
+		}
+		pResp, pErr := client.Do(pollReq)
+		if pErr != nil {
+			pollErrCh <- pErr
+			return
+		}
+		pollRespCh <- pResp
+	}()
+
+	// Ensure long-poll has started and is waiting
+	time.Sleep(20 * time.Millisecond)
+
+	// Wait for session to expire via sweeper
+	select {
+	case pResp := <-pollRespCh:
+		defer pResp.Body.Close()
+		assert.Equal(t, http.StatusNotFound, pResp.StatusCode, "Long poll should respond with HTTP 404 upon session expiration")
+	case pErr := <-pollErrCh:
+		t.Fatalf("Unexpected error during long-poll: %v", pErr)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Long poll did not unblock within timeout after session expiration")
+	}
+
+	assert.Nil(t, srv.GetSession(sessID), "Session should be removed from server after expiration")
 }
 
+func TestServer_SeekingReaderCheckSessionContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	sess := &Session{
+		ID:     "test-sr-sess",
+		ctx:    ctx,
+		cancel: cancel,
+	}
 
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	sr := &seekingReader{
+		pr:   pr,
+		sess: sess,
+		ctx:  context.Background(),
+	}
+
+	// Cancel session context
+	cancel(fmt.Errorf("session expired"))
+
+	// Read should return session context cancellation error
+	buf := make([]byte, 10)
+	n, err := sr.Read(buf)
+	assert.Equal(t, 0, n)
+	assert.ErrorIs(t, err, context.Canceled)
+}
