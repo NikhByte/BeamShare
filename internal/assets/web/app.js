@@ -1150,8 +1150,6 @@ function qrToSvgDataUrl(qr, border = 4) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
-
-
 function renderQRToCanvas(qr, canvas, border = 4) {
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error("Canvas 2D context unavailable");
@@ -1234,64 +1232,7 @@ const CIRCUMFERENCE   = 2 * Math.PI * 42; // SVG progress ring
 // ── State ──────────────────────────────────────────────────────────────────────
 let currentFile      = null;
 
-/**
- * Waits for a WebRTC DataChannel's bufferedAmount to drop to or below targetThreshold.
- * Combines bufferedamountlow listener, post-registration level check, and 250ms timeout fallback.
- *
- * @param {RTCDataChannel} dc
- * @param {number} targetThreshold - Target bufferedAmount in bytes
- * @param {number} timeoutMs - Timeout fallback in milliseconds (default: 250)
- * @returns {Promise<void>}
- */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 250) {
-  if (!dc) return Promise.resolve();
-  try {
-    dc.bufferedAmountLowThreshold = targetThreshold;
-  } catch (e) {}
 
-  if (dc.bufferedAmount <= targetThreshold) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve) => {
-    let timer = null;
-    let resolved = false;
-
-    const cleanupAndResolve = () => {
-      if (resolved) return;
-      resolved = true;
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      try {
-        dc.removeEventListener('bufferedamountlow', listener);
-      } catch (e) {}
-      resolve();
-    };
-
-    const listener = () => {
-      cleanupAndResolve();
-    };
-
-    try {
-      dc.addEventListener('bufferedamountlow', listener);
-    } catch (e) {
-      cleanupAndResolve();
-      return;
-    }
-
-    // Immediate post-registration check in case threshold was crossed during callback setup
-    if (dc.bufferedAmount <= targetThreshold) {
-      cleanupAndResolve();
-      return;
-    }
-
-    timer = setTimeout(() => {
-      cleanupAndResolve();
-    }, timeoutMs);
-  });
-}
 let transferMode     = 'http';   // 'webrtc' | 'http'
 let startTime        = 0;
 let receivedBytes    = 0;
@@ -3530,6 +3471,15 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
         resolve();
       }
     }, pollMs);
+  });
+}
+
+function waitForDataChannelBuffer(dc, maxAmount = 1024 * 1024, targetAmount = 512 * 1024) {
+  if (!dc || dc.readyState !== 'open') {
+    return Promise.reject(new Error("Data channel is closed or closing"));
+  }
+  return waitForBufferedAmountLow(dc, targetAmount, 250).catch((err) => {
+    throw new Error("Data channel is closed or closing");
   });
 }
 
