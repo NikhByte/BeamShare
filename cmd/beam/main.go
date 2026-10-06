@@ -526,7 +526,19 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					uploaded   int64
 					uploadStat time.Time
 				)
-				var streamActive atomic.Bool
+				var isStreaming atomic.Bool
+
+				var senderMu sync.Mutex
+				var activeCancel context.CancelFunc
+
+				dc.OnClose(func() {
+					senderMu.Lock()
+					if activeCancel != nil {
+						activeCancel()
+						activeCancel = nil
+					}
+					senderMu.Unlock()
+				})
 
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
@@ -573,6 +585,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if isLive {
 								return
 							}
+							if !isStreaming.CompareAndSwap(false, true) {
+								return
+							}
 							parts := strings.SplitN(dataStr, ":", 2)
 							var offset int64
 							if len(parts) == 2 {
@@ -588,7 +603,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 							// File sender goroutine (Direct-to-Disk + Backpressure + Pause/Resume Flow Control)
 							go func(ctx context.Context, reqOffset int64) {
-								defer streamActive.Store(false)
+								defer isStreaming.Store(false)
 
 								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
 								file, err := os.Open(filePath)

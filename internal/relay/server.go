@@ -450,6 +450,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range")
+	w.Header().Set("Access-Control-Allow-Private-Network", "true")
 
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
@@ -978,7 +979,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	sess.mu.Lock()
 	if sess.DataPipeR != nil || sess.DataPipeW != nil {
-		sess.closePipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new download request"))
+		if sess.DataPipeR != nil {
+			sess.closePipesIfMatchLocked(sess.DataPipeR, sess.DataPipeW, fmt.Errorf("replaced by new download request"))
+		} else if sess.DataPipeW != nil {
+			sess.DataPipeW.CloseWithError(fmt.Errorf("replaced by new download request"))
+			sess.DataPipeW = nil
+		}
 	}
 	sess.DataPipeR = pr
 	sess.DataPipeW = pw
@@ -1303,6 +1309,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 			if uploadErr != nil {
 				http.Error(w, uploadErr.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			if uploadErr != nil {
+				http.Error(w, fmt.Sprintf("upload error: %v", uploadErr), http.StatusInternalServerError)
 				return
 			}
 
