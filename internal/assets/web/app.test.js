@@ -147,6 +147,12 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.MessageChannel = global.MessageChannel;
     }
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
+    window.fetch = global.fetch = async (url) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ filename: 'test.dat', size: 1024, mime: 'application/octet-stream' }),
+      text: async () => ''
+    });
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
