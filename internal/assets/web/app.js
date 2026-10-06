@@ -3589,6 +3589,9 @@ async function handleUploadFile(e) {
     const total = file.size;
 
     while (offset < total) {
+      if (webrtcDataChannel.readyState !== 'open') {
+        throw new Error("Data channel is no longer open");
+      }
       const chunkBlob = file.slice(offset, offset + chunkSize);
       const chunkBuffer = await new Promise((resolve, reject) => {
         const reader = new FileReader();
