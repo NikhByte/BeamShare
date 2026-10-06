@@ -481,8 +481,8 @@ function renderQRElements(url, canvasId, imgId) {
 function getBackendURL() {
   const params = new URLSearchParams(window.location.search);
   let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
-  if (!backend) {
-    backend = window.location.origin;
+  if (!backend || backend === 'null') {
+    backend = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://localhost';
     if (backend.includes('vercel.app') || backend.startsWith('file://')) {
       backend = 'https://beamshare.onrender.com';
     }
@@ -4208,7 +4208,9 @@ async function startSenderSharing() {
     const offer = await senderPeerConnection.createOffer();
     await senderPeerConnection.setLocalDescription(offer);
 
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
 
     setLoadingSub('Publishing SDP offer to relay…');
     const stateRes = await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
@@ -4226,7 +4228,8 @@ async function startSenderSharing() {
     });
     if (!stateRes.ok) throw new Error(`Publish state failed: HTTP ${stateRes.status}`);
 
-    const shareURL = new URL(window.location.origin);
+    const baseOrigin = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://localhost';
+    const shareURL = new URL(baseOrigin);
     shareURL.searchParams.set('s', senderSessionID);
     shareURL.searchParams.set('backend', backend);
     shareURL.searchParams.set('mode', 'webrtc');
@@ -4637,25 +4640,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Client-side QR Code Generator ─────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
-(function initGF256() {
-  let x = 1;
-  for (let i = 0; i < 255; i++) {
-    GF256_EXP[i] = x;
-    GF256_LOG[x] = i;
-    x <<= 1;
-    if (x & 0x100) x ^= 0x11d;
-  }
-  for (let i = 255; i < 512; i++) {
-    GF256_EXP[i] = GF256_EXP[i - 255];
-  }
-})();
 
-function gfMul(x, y) {
-  if (x === 0 || y === 0) return 0;
-  return GF256_EXP[GF256_LOG[x] + GF256_LOG[y]];
-}
 
 function rsGeneratorPoly(degree) {
   let poly = [1];
@@ -5033,6 +5018,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     uploadFileP2P,
