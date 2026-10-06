@@ -34,10 +34,14 @@ var swJS string
 //go:embed web/pako.min.js
 var pakoJS string
 
+//go:embed web/qrcode.min.js
+var qrcodeJS string
+
 var (
-	styleETag = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(styleCSS)))
-	appETag   = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(appJS)))
-	pakoETag  = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(pakoJS)))
+	styleETag  = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(styleCSS)))
+	appETag    = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(appJS)))
+	pakoETag   = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(pakoJS)))
+	qrcodeETag = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(qrcodeJS)))
 )
 
 // IndexHTML returns the full content of the receiver web page.
@@ -80,6 +84,11 @@ func PakoJS() string {
 	return pakoJS
 }
 
+// QrcodeJS returns the qrcode.min.js content.
+func QrcodeJS() string {
+	return qrcodeJS
+}
+
 // StaticHandler returns an http.Handler that serves the embedded CSS and JS.
 func StaticHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +110,10 @@ func StaticHandler() http.Handler {
 			contentType = "application/javascript; charset=utf-8"
 			etag = pakoETag
 			content = []byte(pakoJS)
+		case "qrcode.min.js":
+			contentType = "application/javascript; charset=utf-8"
+			etag = qrcodeETag
+			content = []byte(qrcodeJS)
 		default:
 			http.NotFound(w, r)
 			return
