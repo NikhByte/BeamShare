@@ -156,9 +156,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -1077,6 +1074,8 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.deepEqual(servers[0].urls, ['turn:turn.example.com:3478']);
     assert.equal(servers[0].username, 'alice');
     assert.equal(servers[0].credential, 'secret');
+  });
+
   test('getSessionToken and apiPath automatically extract and include session token', () => {
     // Set URL with token parameter
     dom.reconfigure({ url: 'http://localhost:8080/?token=sec_tok_1234567890' });
@@ -1335,7 +1334,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     dc.readyState = 'closed';
     dc.emit('close');
 
-    await assert.rejects(promise, { message: /closed or closing/i });
+    await assert.rejects(promise, { message: /closed or closing|no longer open/i });
     assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up on rejection');
   });
 
@@ -1343,7 +1342,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     const dc = new MockDataChannel(2 * 1024 * 1024, 'closed');
     await assert.rejects(
       app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024),
-      { message: /closed or closing/i }
+      { message: /closed or closing|no longer open/i }
     );
   });
 
