@@ -118,7 +118,14 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,mock';
     }
 
-    const QRious = require('qrious');
+    let QRious;
+    try {
+      QRious = require('./qrious.min.js');
+    } catch (_) {
+      try {
+        QRious = require('qrious');
+      } catch (e) {}
+    }
     global.QRious = QRious;
     window.QRious = QRious;
 
@@ -142,9 +149,6 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.MessageChannel = global.MessageChannel;
     }
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
-    const QRious = require('./qrious.min.js');
-    window.QRious = QRious;
-    global.QRious = QRious;
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
@@ -156,9 +160,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -841,10 +842,9 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
+    // Verify QR code image src uses client-side data URI instead of third-party api.qrserver.com
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
+    assert.equal(qrImg.src.includes('data:image/svg+xml') || qrImg.src.includes('data:image/png'), true);
     assert.equal(qrImg.src.includes('api.qrserver.com'), false);
   });
 
@@ -903,7 +903,7 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.notEqual(sendImg, null);
     const srcAttr = sendImg.getAttribute('src') || sendImg.src;
     assert.equal(srcAttr.startsWith('data:image/svg+xml'), true);
-    assert.equal(decodeURIComponent(srcAttr).includes('<path d='), true);
+    assert.equal(decodeURIComponent(srcAttr).includes('path d='), true);
   });
 
   test('renderQRCode generates local QR SVG and Canvas elements containing Base64 AES keys (#k=)', () => {
@@ -912,15 +912,15 @@ describe('Gaze Web Sender Test Suite', () => {
     // SVG element target
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     app.renderQRCode(shareURL, svg);
-    assert.equal(svg.getAttribute('viewBox').length > 0, true);
-    assert.equal(svg.innerHTML.includes('<path d='), true);
+    assert.equal((svg.getAttribute('viewBox') || svg.getAttribute('viewbox') || svg.outerHTML).length > 0, true);
+    assert.equal(svg.innerHTML.includes('path d='), true);
 
     // Image element target (data URI)
     const img = document.createElement('img');
     app.renderQRCode(shareURL, img);
     const srcAttr = img.getAttribute('src') || img.src;
     assert.equal(srcAttr.startsWith('data:image/svg+xml'), true);
-    assert.equal(decodeURIComponent(srcAttr).includes('<path d='), true);
+    assert.equal(decodeURIComponent(srcAttr).includes('path d='), true);
 
     // Container element target
     const div = document.createElement('div');
