@@ -24,6 +24,9 @@ export default defineConfig({
         permissions: ['clipboard-read', 'clipboard-write'],
         launchOptions: {
           args: [
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
             '--use-fake-ui-for-media-stream',
             '--use-fake-device-for-media-stream',
             '--allow-insecure-localhost',
