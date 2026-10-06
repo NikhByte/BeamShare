@@ -109,9 +109,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -667,7 +664,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     assert.equal(errorOccurred, true);
     assert.equal(closed, true);
   });
-  });
 });
 
 describe('Gaze Web Sender Test Suite', () => {
@@ -1069,7 +1065,7 @@ describe('WebRTC Buffer Backpressure Suite', () => {
 
     await assert.rejects(
       async () => await waitPromise,
-      { message: 'Data channel is no longer open' }
+      { message: /closed or closing/i }
     );
 
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);

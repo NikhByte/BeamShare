@@ -100,59 +100,82 @@ let currentFile      = null;
  * Combines bufferedamountlow listener, post-registration level check, and 250ms timeout fallback.
  *
  * @param {RTCDataChannel} dc
- * @param {number} targetThreshold - Target bufferedAmount in bytes
+ * @param {number} maxBufferedAmount - Max allowed bufferedAmount in bytes
+ * @param {number} targetThreshold - Target low threshold in bytes
  * @param {number} timeoutMs - Timeout fallback in milliseconds (default: 250)
  * @returns {Promise<void>}
  */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 250) {
-  if (!dc) return Promise.resolve();
+function waitForDataChannelBuffer(dc, maxBufferedAmount = 1024 * 1024, targetThreshold = 512 * 1024, timeoutMs = 250) {
+  if (!dc || dc.readyState !== 'open') {
+    return Promise.reject(new Error("Data channel is closed or closing"));
+  }
+
+  const threshold = targetThreshold !== undefined ? targetThreshold : maxBufferedAmount;
   try {
-    dc.bufferedAmountLowThreshold = targetThreshold;
+    dc.bufferedAmountLowThreshold = threshold;
   } catch (e) {}
 
-  if (dc.bufferedAmount <= targetThreshold) {
+  if (dc.bufferedAmount <= threshold) {
     return Promise.resolve();
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let timer = null;
     let resolved = false;
 
-    const cleanupAndResolve = () => {
-      if (resolved) return;
-      resolved = true;
+    const cleanup = () => {
       if (timer !== null) {
         clearTimeout(timer);
         timer = null;
       }
-      try {
-        dc.removeEventListener('bufferedamountlow', listener);
-      } catch (e) {}
+      try { dc.removeEventListener('bufferedamountlow', onBufferedLow); } catch (e) {}
+      try { dc.removeEventListener('close', onClose); } catch (e) {}
+      try { dc.removeEventListener('error', onClose); } catch (e) {}
+    };
+
+    const onBufferedLow = () => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
       resolve();
     };
 
-    const listener = () => {
-      cleanupAndResolve();
+    const onClose = () => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      reject(new Error("Data channel is closed or closing"));
     };
 
     try {
-      dc.addEventListener('bufferedamountlow', listener);
+      dc.addEventListener('bufferedamountlow', onBufferedLow);
+      dc.addEventListener('close', onClose);
+      dc.addEventListener('error', onClose);
     } catch (e) {
-      cleanupAndResolve();
-      return;
+      cleanup();
+      return resolve();
     }
 
-    // Immediate post-registration check in case threshold was crossed during callback setup
-    if (dc.bufferedAmount <= targetThreshold) {
-      cleanupAndResolve();
-      return;
+    if (dc.bufferedAmount <= threshold) {
+      resolved = true;
+      cleanup();
+      return resolve();
     }
 
     timer = setTimeout(() => {
-      cleanupAndResolve();
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      if (dc.readyState !== 'open') {
+        reject(new Error("Data channel is closed or closing"));
+      } else {
+        resolve();
+      }
     }, timeoutMs);
   });
 }
+
+const waitForBufferedAmountLow = waitForDataChannelBuffer;
 let transferMode     = 'http';   // 'webrtc' | 'http'
 let startTime        = 0;
 let receivedBytes    = 0;
@@ -2171,65 +2194,6 @@ async function startWebRTC() {
   }
 }
 
-// ── WebRTC Buffer Backpressure Helper ─────────────────────────────────────────
-/**
- * Helper function to wait for WebRTC DataChannel bufferedAmount to drop <= targetThreshold.
- * Attaches the 'bufferedamountlow' listener and immediately re-evaluates bufferedAmount before awaiting,
- * supplemented by a polling fallback to prevent race conditions during buffer drains.
- */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
-  return new Promise((resolve, reject) => {
-    if (!dc || dc.readyState !== 'open') {
-      return reject(new Error("Data channel is no longer open"));
-    }
-
-    dc.bufferedAmountLowThreshold = targetThreshold;
-
-    if (dc.bufferedAmount <= targetThreshold) {
-      return resolve();
-    }
-
-    let intervalId = null;
-
-    const cleanup = () => {
-      if (dc && typeof dc.removeEventListener === 'function') {
-        dc.removeEventListener('bufferedamountlow', onBufferedAmountLow);
-      }
-      if (intervalId !== null) {
-        clearInterval(intervalId);
-        intervalId = null;
-      }
-    };
-
-    const onBufferedAmountLow = () => {
-      cleanup();
-      resolve();
-    };
-
-    // Attach bufferedamountlow listener
-    dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
-
-    // Immediately re-evaluate bufferedAmount after attaching listener
-    if (dc.bufferedAmount <= targetThreshold) {
-      cleanup();
-      return resolve();
-    }
-
-    // Polling fallback to check for buffer drain or closed channel
-    intervalId = setInterval(() => {
-      if (dc.readyState !== 'open') {
-        cleanup();
-        reject(new Error("Data channel is no longer open"));
-        return;
-      }
-      if (dc.bufferedAmount <= targetThreshold) {
-        cleanup();
-        resolve();
-      }
-    }, pollMs);
-  });
-}
-
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
 async function uploadFileP2P(file, dc = webrtcDataChannel) {
   if (!dc || dc.readyState !== 'open') {
@@ -2704,10 +2668,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(senderDataChannel, 512 * 1024);
+    while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
+      if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+      if (dc.bufferedAmount > 1024 * 1024) {
+        await waitForBufferedAmountLow(dc, 1024 * 1024, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -2747,11 +2711,12 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (senderDataChannel.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(senderDataChannel, 0);
+  if (dc.bufferedAmount > 0) {
+    await waitForBufferedAmountLow(dc, 0, 0);
   }
-  senderDataChannel.send("EOF");
-  document.getElementById('send-status-label').textContent = "Transfer Complete!";
+  dc.send("EOF");
+  const sendStatusLabel = document.getElementById('send-status-label');
+  if (sendStatusLabel) sendStatusLabel.textContent = "Transfer Complete!";
 }
 
 async function startSenderPolling(backend) {
@@ -2962,7 +2927,10 @@ if (typeof window !== 'undefined') {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    waitForDataChannelBuffer,
     waitForBufferedAmountLow,
+    uploadFileP2P,
+    sendWebRTCFile,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
