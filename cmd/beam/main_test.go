@@ -423,11 +423,13 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 			str := string(msg.Data)
 			if strings.HasPrefix(str, "META:") {
 				receivedBuf.Reset()
+				eofChan = make(chan struct{})
 			} else if str == "EOF" {
+				ch := eofChan
 				select {
-				case <-eofChan:
+				case <-ch:
 				default:
-					close(eofChan)
+					close(ch)
 				}
 			}
 		} else {
@@ -461,8 +463,23 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 		t.Fatalf("SendText OFFSET second failed: %v", err)
 	}
 
+	secondEOF := make(chan struct{})
+	go func() {
+		for {
+			mu.Lock()
+			ch := eofChan
+			mu.Unlock()
+			select {
+			case <-ch:
+				close(secondEOF)
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}()
+
 	select {
-	case <-eofChan:
+	case <-secondEOF:
 		mu.Lock()
 		receivedBytes := receivedBuf.Bytes()
 		mu.Unlock()
