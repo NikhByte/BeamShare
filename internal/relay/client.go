@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -11,6 +12,9 @@ import (
 	"os"
 	"time"
 )
+
+// ErrInvalidKeyLength indicates that a non-empty encryption key length is not 32 bytes (AES-256).
+var ErrInvalidKeyLength = errors.New("invalid encryption key length")
 
 // BackoffConfig defines exponential backoff retry parameters for relay client reconnections.
 type BackoffConfig struct {
@@ -177,6 +181,13 @@ func (c *Client) Poll(ctx context.Context) (*PollCommand, error) {
 	return &cmd, nil
 }
 
+func (c *Client) validateKey() error {
+	if len(c.Key) > 0 && len(c.Key) != 32 {
+		return fmt.Errorf("%w: expected 32 bytes, got %d", ErrInvalidKeyLength, len(c.Key))
+	}
+	return nil
+}
+
 // UploadData streams file data starting at the beginning of the file.
 func (c *Client) UploadData(ctx context.Context, filePath string) error {
 	return c.UploadDataAtOffset(ctx, filePath, 0)
@@ -184,6 +195,10 @@ func (c *Client) UploadData(ctx context.Context, filePath string) error {
 
 // UploadDataAtOffset streams file data starting at a specified byte offset (for resumable transfers).
 func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset int64) error {
+	if err := c.validateKey(); err != nil {
+		return err
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -201,13 +216,21 @@ func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset
 
 // UploadReaderAtOffset streams data from an io.Reader starting at a specified byte offset.
 func (c *Client) UploadReaderAtOffset(ctx context.Context, reader io.Reader, offset int64) error {
+	if err := c.validateKey(); err != nil {
+		return err
+	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
+	if len(c.Key) > 0 && len(c.Key) != 32 {
+		return fmt.Errorf("invalid key length: key must be exactly 32 bytes, got %d bytes", len(c.Key))
+	}
+
 	var r io.Reader = reader
 	var err error
-	if len(c.Key) == 32 {
+	if len(c.Key) > 0 {
 		r, err = NewEncryptingReader(reader, c.Key)
 		if err != nil {
 			return err
