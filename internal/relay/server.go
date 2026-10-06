@@ -130,6 +130,7 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 	pwClosed := false
 
 	if pr == nil || (pr != nil && s.DataPipeR == pr) || (pw != nil && s.DataPipeW == pw) {
+		dataPipeWWasNotNil := s.DataPipeW != nil
 		if s.DataPipeW != nil {
 			if err != nil {
 				s.DataPipeW.CloseWithError(err)
@@ -142,10 +143,12 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			s.DataPipeW = nil
 		}
 		if s.DataPipeR != nil {
-			if err != nil {
-				s.DataPipeR.CloseWithError(err)
-			} else {
-				s.DataPipeR.Close()
+			if !dataPipeWWasNotNil {
+				if err != nil {
+					s.DataPipeR.CloseWithError(err)
+				} else {
+					s.DataPipeR.Close()
+				}
 			}
 			if pr != nil && s.DataPipeR == pr {
 				prClosed = true
@@ -155,6 +158,7 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 	}
 
 	if pr == nil || (pr != nil && s.UploadPipeR == pr) || (pw != nil && s.UploadPipeW == pw) {
+		uploadPipeWWasNotNil := s.UploadPipeW != nil
 		if s.UploadPipeW != nil {
 			if err != nil {
 				s.UploadPipeW.CloseWithError(err)
@@ -167,10 +171,12 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			s.UploadPipeW = nil
 		}
 		if s.UploadPipeR != nil {
-			if err != nil {
-				s.UploadPipeR.CloseWithError(err)
-			} else {
-				s.UploadPipeR.Close()
+			if !uploadPipeWWasNotNil {
+				if err != nil {
+					s.UploadPipeR.CloseWithError(err)
+				} else {
+					s.UploadPipeR.Close()
+				}
 			}
 			if pr != nil && s.UploadPipeR == pr {
 				prClosed = true
@@ -319,13 +325,21 @@ func (s *Server) SweepExpiredSessions() {
 		sess.ClearDownloadQueue()
 	}
 
+	s.SweepExpiredIPs()
+}
+
+func (s *Server) SweepExpiredIPs() {
 	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	if s.failedAttempts == nil {
+		return
+	}
+	now := time.Now()
 	for ip, fa := range s.failedAttempts {
 		if now.Sub(fa.firstSeen) > time.Minute {
 			delete(s.failedAttempts, ip)
 		}
 	}
-	s.failedAttemptsMu.Unlock()
 }
 
 func (s *Server) GetSession(id string) *Session {
@@ -1312,11 +1326,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			if uploadErr != nil {
-				http.Error(w, fmt.Sprintf("upload error: %v", uploadErr), http.StatusInternalServerError)
-				return
-			}
-
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})
 			return
@@ -1329,8 +1338,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	sess := s.getSession(r.URL.Query().Get("session"))
 	if sess == nil {
-		http.Error(w, "not found", 404)
-		return
+		sess = s.getSession(r.URL.Query().Get("s"))
+		if sess == nil {
+			http.Error(w, "not found", 404)
+			return
+		}
 	}
 
 	sess.mu.Lock()

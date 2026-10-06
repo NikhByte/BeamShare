@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -228,6 +229,165 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestServer_RateLimiterIPEntriesSweptAfterOneMinute(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	// Record failed attempt for IP
+	ip := "192.0.2.100"
+	srv.recordFailedAttempt(ip)
+
+	srv.failedAttemptsMu.Lock()
+	fa, ok := srv.failedAttempts[ip]
+	require.True(t, ok)
+	// Artificially age the entry past 1 minute
+	fa.firstSeen = time.Now().Add(-2 * time.Minute)
+	srv.failedAttemptsMu.Unlock()
+
+	// Sweep expired IPs
+	srv.SweepExpiredIPs()
+
+	srv.failedAttemptsMu.Lock()
+	_, ok = srv.failedAttempts[ip]
+	srv.failedAttemptsMu.Unlock()
+
+	assert.False(t, ok, "Stale IP rate-limiter record should be swept")
+}
+
+func TestServer_UploadPipeTeardownOnSessionExpiration(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+	pr, pw := io.Pipe()
+
+	sess.mu.Lock()
+	sess.UploadPipeR = pr
+	sess.UploadPipeW = pw
+	sess.expiresAt = time.Now().Add(-10 * time.Second)
+	sess.mu.Unlock()
+
+	srv.SweepExpiredSessions()
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+
+	// Ensure pipes were closed with error
+	buf := make([]byte, 10)
+	_, err := pr.Read(buf)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "expired")
+}
+
+func TestServer_UploadHandlerDisconnectUnblocksGoroutine(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	bodyR, bodyW := io.Pipe()
+	mw := multipart.NewWriter(bodyW)
+
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/upload?s="+sess.ID, bodyR)
+	req = req.WithContext(reqCtx)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	rec := httptest.NewRecorder()
+	uploadDone := make(chan struct{})
+
+	go func() {
+		defer close(uploadDone)
+		srv.ServeHTTP(rec, req)
+	}()
+
+	// Write field header to start the multipart upload
+	fw, err := mw.CreateFormFile("file", "test.txt")
+	require.NoError(t, err)
+	fw.Write([]byte("initial chunk"))
+
+	// Give handler time to process part and block writing
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel context to simulate client disconnect
+	reqCancel()
+
+	select {
+	case <-uploadDone:
+		// Success: handler unblocked and returned within 2 seconds
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload handler did not unblock within 2 seconds after context cancellation")
+	}
+
+	bodyW.Close()
+	bodyR.Close()
+}
+
+func TestServer_PullHandlerDisconnectUnblocksGoroutine(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	bodyR, bodyW := io.Pipe()
+	mw := multipart.NewWriter(bodyW)
+
+	uploadReq := httptest.NewRequest(http.MethodPost, "/api/upload?s="+sess.ID, bodyR)
+	uploadReq.Header.Set("Content-Type", mw.FormDataContentType())
+	uploadRec := httptest.NewRecorder()
+
+	uploadDone := make(chan struct{})
+	go func() {
+		defer close(uploadDone)
+		srv.ServeHTTP(uploadRec, uploadReq)
+	}()
+
+	// Start multipart upload
+	fw, err := mw.CreateFormFile("file", "test.txt")
+	require.NoError(t, err)
+	fw.Write([]byte("chunk 1"))
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Now connect pull handler with a cancellable context
+	pullCtx, pullCancel := context.WithCancel(context.Background())
+	pullReq := httptest.NewRequest(http.MethodGet, "/relay/pull?session="+sess.ID, nil)
+	pullReq = pullReq.WithContext(pullCtx)
+	pullRec := httptest.NewRecorder()
+
+	pullDone := make(chan struct{})
+	go func() {
+		defer close(pullDone)
+		srv.ServeHTTP(pullRec, pullReq)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel pull client context
+	pullCancel()
+
+	select {
+	case <-pullDone:
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Fatal("Pull handler did not unblock within 2 seconds after pull client disconnect")
+	}
+
+	bodyW.Close()
+
+	select {
+	case <-uploadDone:
+		// Success: pull cancellation also tore down upload pipe, unblocking upload handler
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload handler did not unblock within 2 seconds after pull client disconnect")
+	}
+
+	bodyR.Close()
 }
 
 func TestServer_LongPollUnblocksOnSessionExpiration(t *testing.T) {
