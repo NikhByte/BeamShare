@@ -2120,7 +2120,7 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
+      encBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -2129,43 +2129,8 @@ async function startWebRTC() {
             if (typeof e.data === 'string') {
               if (e.data === "EOF") {
                 chunkQueue.enqueueEOF();
-                await chunkQueue.drain();
-                if (diskWritableStream) {
-                  await diskWritableStream.close();
-                  if (useOPFS) {
-                    const file = await diskFileHandle.getFile();
-                    triggerSave(file, currentFile.name);
-                  }
-                  chunkQueue.enqueueEOF();
-                  try {
-                    await chunkQueue.drain();
-                    if (diskWritableStream) {
-                      await diskWritableStream.close();
-                      if (useOPFS) {
-                        const file = await diskFileHandle.getFile();
-                        triggerSave(file, currentFile.name);
-                      }
-                    } else if (swPipePort) {
-                      swPipePort.postMessage("EOF");
-                    } else {
-                      let finalBlob;
-                      if (useIndexedDB) {
-                        finalBlob = await getAllChunksIDB(currentFile.mime);
-                        await clearIDB();
-                      } else {
-                        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                      }
-                      triggerSave(finalBlob, currentFile.name);
-                    }
-                    resolve();
-                  } catch (err) {
-                    hasError = true;
-                    // Handled in chunkQueue onError callback
-                  }
-                });
-              } else {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
+                try {
+                  await chunkQueue.drain();
                   if (diskWritableStream) {
                     await diskWritableStream.close();
                     if (useOPFS) {
@@ -2184,9 +2149,10 @@ async function startWebRTC() {
                     }
                     triggerSave(finalBlob, currentFile.name);
                   }
-                  triggerSave(finalBlob, currentFile.name);
+                  resolve();
+                } catch (err) {
+                  // Handled in chunkQueue onError callback
                 }
-                resolve();
               }
               return;
             }
@@ -3083,7 +3049,6 @@ if (typeof module !== 'undefined' && module.exports) {
     resetState,
     stripAnsi,
     parseAnsiToHtml,
-    renderQRCode,
     handleSenderFileSelect,
     startSenderSharing,
     get_senderEncryptionKey: () => senderEncryptionKey,
