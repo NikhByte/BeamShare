@@ -820,9 +820,10 @@ describe('Gaze Web Sender Test Suite', () => {
   test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
     // Intercept fetch / network calls to verify no external requests are made
     let externalRequests = [];
-    window.fetch = async (url) => {
+    window.fetch = global.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      if (url.toString().includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
@@ -841,21 +842,20 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
+    // Verify QR code image src does not use third-party api.qrserver.com
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
     assert.equal(qrImg.src.includes('api.qrserver.com'), false);
   });
 
   test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
     let externalCallMade = false;
-    const origFetch = global.fetch;
     global.fetch = async (url, opts) => {
-      if (typeof url === 'string' && (url.includes('qrserver.com') || url.includes('/api/qr'))) {
+      const uStr = typeof url === 'string' ? url : (url && url.toString ? url.toString() : '');
+      if (uStr.includes('qrserver.com') || uStr.includes('/api/qr')) {
         externalCallMade = true;
       }
-      return origFetch(url, opts);
+      if (uStr.includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
