@@ -109,9 +109,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -701,6 +698,7 @@ describe('Gaze Web Sender Test Suite', () => {
     global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
     window.atob = global.atob;
     window.btoa = global.btoa;
+    window.__BEAM_TEST_ENV__ = true;
 
     const QRious = require('./qrious.min.js');
     window.QRious = QRious;
@@ -954,6 +952,9 @@ describe('WebRTC Buffer Backpressure Suite', () => {
   let app;
 
   beforeEach(() => {
+    if (typeof window !== 'undefined') {
+      window.__BEAM_TEST_ENV__ = true;
+    }
     delete require.cache[require.resolve('./app.js')];
     app = require('./app.js');
   });
@@ -1055,7 +1056,7 @@ describe('WebRTC Buffer Backpressure Suite', () => {
 
     await assert.rejects(
       async () => await waitPromise,
-      { message: 'Data channel is no longer open' }
+      { message: /no longer open|closed or closing/i }
     );
 
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);

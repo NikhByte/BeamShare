@@ -315,5 +315,6 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     });
 
     assert.equal(readyPosted, true);
+    mockPort.onmessage({ data: 'EOF' });
   });
 });
