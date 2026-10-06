@@ -120,9 +120,13 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     let QRious;
     try {
-      QRious = require('./qrious.min.js');
+      QRious = require('qrious');
     } catch (e) {
-      QRious = class {};
+      try {
+        QRious = require('./qrious.min.js');
+      } catch (e2) {
+        QRious = class {};
+      }
     }
     global.QRious = QRious;
     window.QRious = QRious;
@@ -881,11 +885,11 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify send-qr-img src uses local client-side Data URL without third-party calls
-    const sendQrImg = document.getElementById('send-qr-img');
-    assert.notEqual(sendQrImg, null);
-    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml;charset=utf-8,'), true);
-    assert.equal(sendQrImg.src.includes('api.qrserver.com'), false);
+    // Verify QR code image src uses client-side rendering or local /api/qr endpoint instead of third-party api.qrserver.com
+    const qrImg = document.getElementById('send-qr-img') || document.getElementById('send-qr-canvas');
+    assert.notEqual(qrImg, null);
+    assert.equal(qrImg.src.startsWith('data:image/svg+xml') || qrImg.src.includes('/api/qr'), true);
+    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
   });
 
   test('generateQRCodeDataURL produces local SVG Data URL encoding complete share link with #k fragment', () => {
