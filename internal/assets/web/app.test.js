@@ -17,7 +17,10 @@ describe('Gaze Web Receiver Test Suite', () => {
 
   beforeEach(() => {
     dom = new JSDOM(htmlContent, {
-      url: 'http://localhost:8080/?b=http://localhost:8080'
+      url: 'http://localhost:8080/?b=http://localhost:8080',
+      beforeParse(win) {
+        win.__BEAM_TEST_ENV__ = true;
+      }
     });
 
     window = dom.window;
@@ -752,7 +755,10 @@ describe('Gaze Web Sender Test Suite', () => {
   beforeEach(() => {
     fetchedURLs = [];
     dom = new JSDOM(htmlContent, {
-      url: 'http://localhost:8080/'
+      url: 'http://localhost:8080/',
+      beforeParse(win) {
+        win.__BEAM_TEST_ENV__ = true;
+      }
     });
 
     window = dom.window;
