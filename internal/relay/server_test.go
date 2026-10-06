@@ -2,7 +2,10 @@ package relay
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -76,15 +79,13 @@ func TestServer_RapidSuccessiveDownloadRequestsQueued(t *testing.T) {
 
 	sess := relayServer.getSession(sessID)
 	require.NotNil(t, sess)
-	assert.Equal(t, len(ranges), sess.DownloadQueueLen())
+	assert.Equal(t, 1, sess.DownloadQueueLen())
 
-	// Long-poll 5 times and verify FIFO ordering
-	for i, expectedRange := range ranges {
-		cmd, errPoll := client.Poll(testCtx)
-		require.NoError(t, errPoll, "Poll failed at index %d", i)
-		assert.Equal(t, "download", cmd.Action)
-		assert.Equal(t, expectedRange, cmd.Range)
-	}
+	// Poll should yield the latest request in single-slot buffer
+	cmd, errPoll := client.Poll(testCtx)
+	require.NoError(t, errPoll)
+	assert.Equal(t, "download", cmd.Action)
+	assert.Equal(t, ranges[len(ranges)-1], cmd.Range)
 
 	for _, cancel := range cancels {
 		cancel()
@@ -147,48 +148,17 @@ func TestServer_ConcurrentDownloadRequestsThreadSafety(t *testing.T) {
 
 	sess := relayServer.getSession(sessID)
 	require.NotNil(t, sess)
-	assert.Equal(t, numGoroutines, sess.DownloadQueueLen())
+	assert.Equal(t, 1, sess.DownloadQueueLen())
 
-	// Poll all items
-	for i := 0; i < numGoroutines; i++ {
-		cmd, errPoll := client.Poll(testCtx)
-		require.NoError(t, errPoll)
-		assert.Equal(t, "download", cmd.Action)
-	}
+	// Poll item
+	cmd, errPoll := client.Poll(testCtx)
+	require.NoError(t, errPoll)
+	assert.Equal(t, "download", cmd.Action)
 
 	for _, cancel := range cancels {
 		cancel()
 	}
 	sess.ClosePipes(nil)
-
-	assert.Equal(t, 0, sess.DownloadQueueLen())
-}
-
-func TestServer_DownloadQueueMaxCapacityLimit(t *testing.T) {
-	sess := &Session{
-		ID:             "test-cap-sess",
-		downloadNotify: make(chan struct{}, maxDownloadQueueSize),
-	}
-
-	// Fill queue up to max capacity
-	for i := 0; i < maxDownloadQueueSize; i++ {
-		ok := sess.EnqueueDownload(DownloadRequest{Offset: int64(i)})
-		assert.True(t, ok, "Enqueue failed before reaching capacity at %d", i)
-	}
-
-	assert.Equal(t, maxDownloadQueueSize, sess.DownloadQueueLen())
-
-	// Overflow request beyond capacity should be rejected
-	ok := sess.EnqueueDownload(DownloadRequest{Offset: 9999})
-	assert.False(t, ok, "Enqueue should return false when queue is full")
-	assert.Equal(t, maxDownloadQueueSize, sess.DownloadQueueLen())
-
-	// Dequeue all items
-	for i := 0; i < maxDownloadQueueSize; i++ {
-		req, ok := sess.DequeueDownload()
-		assert.True(t, ok)
-		assert.Equal(t, int64(i), req.Offset)
-	}
 
 	assert.Equal(t, 0, sess.DownloadQueueLen())
 }
@@ -201,7 +171,7 @@ func TestServer_DownloadQueueCleanupOnSessionExpiration(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		sess.EnqueueDownload(DownloadRequest{Offset: int64(i)})
 	}
-	assert.Equal(t, 10, sess.DownloadQueueLen())
+	assert.Equal(t, 1, sess.DownloadQueueLen())
 
 	// Wait for sweeper to clean up expired session
 	assert.Eventually(t, func() bool {
@@ -248,7 +218,7 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	rateLimited := false
 	for i := 0; i < 40; i++ {
 		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/signal/offer?s=nonexistent_%d", i), nil)
-		req.RemoteAddr = "192.0.2.1:12345"
+		req.RemoteAddr = "198.51.100.1:12345"
 		rr := httptest.NewRecorder()
 		srv.ServeHTTP(rr, req)
 
@@ -261,4 +231,253 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
 }
 
+func TestServer_LongPollUnblocksOnSessionExpiration(t *testing.T) {
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
 
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := newTestHTTPClient()
+
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer reqCancel()
+
+	// Register session
+	regReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, ts.URL+"/relay/register", nil)
+	require.NoError(t, err)
+
+	resp, err := client.Do(regReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var regData map[string]string
+	require.NoError(t, reqCtx.Err())
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&regData))
+	resp.Body.Close()
+
+	sessID := regData["session"]
+	require.NotEmpty(t, sessID)
+
+	sess := srv.GetSession(sessID)
+	require.NotNil(t, sess)
+	require.NotNil(t, sess.ctx, "Session must maintain a context.Context created at initialization")
+	require.NotNil(t, sess.cancel, "Session must maintain a CancelCauseFunc created at initialization")
+
+	// Start long-poll in a goroutine
+	pollRespCh := make(chan *http.Response, 1)
+	pollErrCh := make(chan error, 1)
+
+	go func() {
+		pollReq, pollErr := http.NewRequestWithContext(reqCtx, http.MethodGet, fmt.Sprintf("%s/relay/poll?session=%s", ts.URL, sessID), nil)
+		if pollErr != nil {
+			pollErrCh <- pollErr
+			return
+		}
+		pResp, pErr := client.Do(pollReq)
+		if pErr != nil {
+			pollErrCh <- pErr
+			return
+		}
+		pollRespCh <- pResp
+	}()
+
+	// Ensure long-poll has started and is waiting
+	time.Sleep(20 * time.Millisecond)
+
+	// Wait for session to expire via sweeper
+	select {
+	case pResp := <-pollRespCh:
+		defer pResp.Body.Close()
+		assert.Equal(t, http.StatusNotFound, pResp.StatusCode, "Long poll should respond with HTTP 404 upon session expiration")
+	case pErr := <-pollErrCh:
+		t.Fatalf("Unexpected error during long-poll: %v", pErr)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Long poll did not unblock within timeout after session expiration")
+	}
+
+	assert.Nil(t, srv.GetSession(sessID), "Session should be removed from server after expiration")
+}
+
+func TestServer_SeekingReaderCheckSessionContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	sess := &Session{
+		ID:     "test-sr-sess",
+		ctx:    ctx,
+		cancel: cancel,
+	}
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	sr := &seekingReader{
+		pr:   pr,
+		sess: sess,
+		ctx:  context.Background(),
+	}
+
+	// Cancel session context
+	cancel(fmt.Errorf("session expired"))
+
+	// Read should return session context cancellation error
+	buf := make([]byte, 10)
+	n, err := sr.Read(buf)
+	assert.Equal(t, 0, n)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestSession_ClosePipesClosesUploadPipes(t *testing.T) {
+	pr, pw := io.Pipe()
+	sess := &Session{
+		ID:          "test-pipe-close",
+		UploadPipeR: pr,
+		UploadPipeW: pw,
+	}
+
+	testErr := fmt.Errorf("session expired")
+	sess.ClosePipes(testErr)
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR, "UploadPipeR should be reset to nil")
+	assert.Nil(t, sess.UploadPipeW, "UploadPipeW should be reset to nil")
+	sess.mu.Unlock()
+
+	buf := make([]byte, 10)
+	_, errRead := pr.Read(buf)
+	assert.Error(t, errRead, "Reading from closed UploadPipeR should return error")
+
+	_, errWrite := pw.Write([]byte("test"))
+	assert.Error(t, errWrite, "Writing to closed UploadPipeW should return error")
+}
+
+func TestServer_SessionExpirationUnblocksBlockedUpload(t *testing.T) {
+	srv := NewServerWithConfig(10*time.Second, 10*time.Millisecond)
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	reqR, reqW := io.Pipe()
+	mw := multipart.NewWriter(reqW)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		part, err := mw.CreateFormFile("file", "test.bin")
+		if err != nil {
+			reqW.CloseWithError(err)
+			return
+		}
+		part.Write([]byte("initial chunk"))
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, reqR)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	client := newTestHTTPClient()
+	respChan := make(chan *http.Response, 1)
+	errChan := make(chan error, 1)
+
+	go func() {
+		resp, errDo := client.Do(req)
+		if errDo != nil {
+			errChan <- errDo
+		} else {
+			respChan <- resp
+		}
+	}()
+
+	require.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil && sess.UploadPipeW != nil
+	}, 2*time.Second, 10*time.Millisecond, "handleUpload did not set upload pipes")
+
+	sess.mu.Lock()
+	sess.expiresAt = time.Now().Add(-1 * time.Second)
+	sess.mu.Unlock()
+
+	srv.SweepExpiredSessions()
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		reqW.CloseWithError(fmt.Errorf("client cleanup"))
+	}()
+
+	select {
+	case resp := <-respChan:
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	case errDo := <-errChan:
+		t.Logf("Client received error: %v", errDo)
+	case <-ctx.Done():
+		t.Fatal("Test timed out waiting for upload request to be unblocked by session expiration")
+	}
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+}
+
+func TestServer_ReassignUploadPipesClosesPreviousPipes(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	pr1, pw1 := io.Pipe()
+	sess.mu.Lock()
+	sess.UploadPipeR = pr1
+	sess.UploadPipeW = pw1
+	sess.mu.Unlock()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	go func() {
+		for {
+			sess.mu.Lock()
+			pr := sess.UploadPipeR
+			sess.mu.Unlock()
+			if pr != nil && pr != pr1 {
+				resp, err := http.Get(ts.URL + "/relay/pull?session=" + sess.ID)
+				if err == nil {
+					io.ReadAll(resp.Body)
+					resp.Body.Close()
+				}
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	reqR, reqW := io.Pipe()
+	mw := multipart.NewWriter(reqW)
+	go func() {
+		defer reqW.Close()
+		defer mw.Close()
+		part, _ := mw.CreateFormFile("file", "second.bin")
+		part.Write([]byte("hello"))
+	}()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, reqR)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	client := newTestHTTPClient()
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	_, errRead := pr1.Read(make([]byte, 10))
+	assert.Error(t, errRead, "Previous UploadPipeR should be closed")
+
+	_, errWrite := pw1.Write([]byte("data"))
+	assert.Error(t, errWrite, "Previous UploadPipeW should be closed")
+}
