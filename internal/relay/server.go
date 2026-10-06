@@ -104,6 +104,25 @@ func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err er
 	s.closePipesIfMatchLocked(pr, pw, err)
 }
 
+func (s *Session) closeUploadPipesLocked(err error) {
+	if s.UploadPipeR != nil {
+		if err != nil {
+			s.UploadPipeR.CloseWithError(err)
+		} else {
+			s.UploadPipeR.Close()
+		}
+		s.UploadPipeR = nil
+	}
+	if s.UploadPipeW != nil {
+		if err != nil {
+			s.UploadPipeW.CloseWithError(err)
+		} else {
+			s.UploadPipeW.Close()
+		}
+		s.UploadPipeW = nil
+	}
+}
+
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
 	prClosed := false
 	pwClosed := false
@@ -262,6 +281,19 @@ func (s *Server) Stop() {
 	s.wg.Wait()
 }
 
+const maxFailedAttemptsEntries = 10000
+
+func (s *Server) purgeFailedAttempts() {
+	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	now := time.Now()
+	for ip, fa := range s.failedAttempts {
+		if now.Sub(fa.firstSeen) > time.Minute {
+			delete(s.failedAttempts, ip)
+		}
+	}
+}
+
 func (s *Server) SweepExpiredSessions() {
 	s.mu.Lock()
 	now := time.Now()
@@ -330,6 +362,9 @@ func (s *Server) recordFailedAttempt(ip string) {
 	}
 	fa, ok := s.failedAttempts[ip]
 	if !ok || time.Since(fa.firstSeen) > time.Minute {
+		if !ok && len(s.failedAttempts) >= maxFailedAttemptsEntries {
+			return
+		}
 		s.failedAttempts[ip] = &failedAttempt{count: 1, firstSeen: time.Now()}
 		return
 	}
