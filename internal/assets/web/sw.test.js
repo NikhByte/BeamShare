@@ -288,7 +288,7 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
   });
 
   test('INIT_PORT message handler posts READY message over message port', () => {
-    require('./sw.js');
+    const { streamMap } = require('./sw.js');
     const url = '/sw-download-pipe/test-ready';
     let readyPosted = false;
 
@@ -315,5 +315,11 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     });
 
     assert.equal(readyPosted, true);
+
+    if (streamMap.has(url)) {
+      const entry = streamMap.get(url);
+      if (entry && entry.ttlTimer) clearTimeout(entry.ttlTimer);
+      streamMap.delete(url);
+    }
   });
 });
