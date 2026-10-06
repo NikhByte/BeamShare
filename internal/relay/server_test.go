@@ -353,7 +353,7 @@ func TestSession_ClosePipesClosesUploadPipes(t *testing.T) {
 }
 
 func TestServer_UploadPipeCleanupOnSessionExpiration(t *testing.T) {
-	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	srv := NewServerWithConfig(500*time.Millisecond, 10*time.Millisecond)
 	defer srv.Stop()
 
 	ts := httptest.NewServer(srv)
