@@ -219,6 +219,7 @@ func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing
 	eofReceived := make(chan struct{})
 
 	var receivedBytesAfterMeta int
+	metaCount := 0
 	pcReceiver.OnDataChannel(func(dc *webrtc.DataChannel) {
 		receiverDC = dc
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
@@ -226,6 +227,7 @@ func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing
 				dataStr := string(msg.Data)
 				if strings.HasPrefix(dataStr, "META:") {
 					receivedChunksMu.Lock()
+					metaCount++
 					receivedBytesAfterMeta = 0
 					receivedChunksMu.Unlock()
 				} else if dataStr == "EOF" {
@@ -233,10 +235,12 @@ func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing
 				}
 			} else {
 				receivedChunksMu.Lock()
-				c := make([]byte, len(msg.Data))
-				copy(c, msg.Data)
-				receivedChunks = append(receivedChunks, c)
-				receivedBytesAfterMeta += len(msg.Data)
+				if metaCount >= 2 {
+					c := make([]byte, len(msg.Data))
+					copy(c, msg.Data)
+					receivedChunks = append(receivedChunks, c)
+					receivedBytesAfterMeta += len(msg.Data)
+				}
 				receivedChunksMu.Unlock()
 			}
 		})
