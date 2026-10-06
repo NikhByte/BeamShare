@@ -221,6 +221,9 @@ describe('Gaze Web Receiver Test Suite', () => {
       } catch (e) {}
     }
 
+    window.fetch = async () => ({ ok: true, json: async () => ({ name: 'test', size: 100 }) });
+    global.fetch = window.fetch;
+
     app.init();
 
     assert.equal(document.documentElement.getAttribute('data-sw-ready'), null);
