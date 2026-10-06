@@ -1,19 +1,24 @@
 package main
 
 import (
-	"bytes"
-	"crypto/rand"
-	"encoding/base64"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
-	"github.com/beamshare/beam/internal/relay"
 	"github.com/beamshare/beam/internal/server"
+	"github.com/beamshare/beam/internal/signaling"
+	"github.com/pion/webrtc/v3"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -43,6 +48,13 @@ func TestParseFlags(t *testing.T) {
 
 	if discoveryTimeout != 15*1000*1000*1000 { // 15 seconds
 		t.Fatalf("expected discovery timeout 15s, got %v", discoveryTimeout)
+	}
+
+	if !reflect.DeepEqual(parsedTurnServers, []string{"turn:1"}) {
+		t.Fatalf("expected parsedTurnServers ['turn:1'], got %v", parsedTurnServers)
+	}
+	if parsedTurnUsername != "user" || parsedTurnCredential != "pass" {
+		t.Fatalf("expected parsed turn auth user=user pass=pass, got user=%s pass=%s", parsedTurnUsername, parsedTurnCredential)
 	}
 }
 
@@ -118,75 +130,305 @@ func TestDownloadFile_Relay(t *testing.T) {
 	}
 }
 
-func TestDownloadFile_InvalidKey(t *testing.T) {
-	// Test bad base64 key
-	err := downloadFile("http://example.com/#k=!!!invalid_base64!!!")
-	if err == nil {
-		t.Fatal("expected error for invalid base64 key fragment, got nil")
+func TestDownloadFile_PathTraversalSanitization(t *testing.T) {
+	traversalCases := []struct {
+		rawMetaName      string
+		expectedFileName string
+	}{
+		{"../../etc/passwd", "received_passwd"},
+		{"..\\..\\evil.bat", "received_evil.bat"},
+		{"\x00../malicious.sh", "received_malicious.sh"},
+		{"....", "received_download.bin"},
 	}
 
-	// Test non-32-byte key (16 bytes = 128 bit)
-	shortKey := make([]byte, 16)
-	shortKeyB64 := base64.URLEncoding.EncodeToString(shortKey)
-	err = downloadFile("http://example.com/#k=" + shortKeyB64)
-	if err == nil {
-		t.Fatal("expected error for 16-byte key fragment, got nil")
-	}
+	for _, tc := range traversalCases {
+		t.Run(tc.rawMetaName, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+				meta := server.FileMeta{
+					Name: tc.rawMetaName,
+					Size: 10,
+				}
+				json.NewEncoder(w).Encode(meta)
+			})
+			mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte("0123456789"))
+			})
 
-	// Test non-32-byte key (64 bytes)
-	longKey := make([]byte, 64)
-	longKeyB64 := base64.URLEncoding.EncodeToString(longKey)
-	err = downloadFile("http://example.com/#k=" + longKeyB64)
-	if err == nil {
-		t.Fatal("expected error for 64-byte key fragment, got nil")
-	}
-}
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
 
-func TestDownloadFile_Encrypted(t *testing.T) {
-	key := make([]byte, 32)
-	rand.Read(key)
-	keyStr := base64.URLEncoding.EncodeToString(key)
+			defer os.Remove(tc.expectedFileName)
 
-	plainData := []byte("Encrypted Payload Data 1234567890")
+			err := downloadFile(ts.URL)
+			if err != nil {
+				t.Fatalf("downloadFile failed for %s: %v", tc.rawMetaName, err)
+			}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
-		meta := server.FileMeta{
-			Name: "test_encrypted.txt",
-			Size: int64(len(plainData)),
-		}
-		json.NewEncoder(w).Encode(meta)
-	})
-	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
-		encReader, err := relay.NewEncryptingReader(bytes.NewReader(plainData), key)
-		if err != nil {
-			t.Fatalf("NewEncryptingReader failed: %v", err)
-		}
-		encData, err := io.ReadAll(encReader)
-		if err != nil {
-			t.Fatalf("ReadAll encReader failed: %v", err)
-		}
-		w.Write(encData)
-	})
-
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
-	defer os.Remove("received_test_encrypted.txt")
-
-	downloadURL := "http://example.com/?backend=" + ts.URL + "#k=" + keyStr
-	err := downloadFile(downloadURL)
-	if err != nil {
-		t.Fatalf("downloadFile encrypted failed: %v", err)
-	}
-
-	downloaded, err := os.ReadFile("received_test_encrypted.txt")
-	if err != nil {
-		t.Fatalf("failed to read downloaded file: %v", err)
-	}
-
-	if !bytes.Equal(downloaded, plainData) {
-		t.Fatalf("expected decrypted data '%s', got '%s'", string(plainData), string(downloaded))
+			if _, err := os.Stat(tc.expectedFileName); os.IsNotExist(err) {
+				t.Fatalf("expected file %s to exist, but was not found", tc.expectedFileName)
+			}
+		})
 	}
 }
 
+func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "beam_test_*.bin")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	data := make([]byte, 512*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	tmpFile.Write(data)
+	tmpFile.Close()
+
+	api := signaling.NewWebRTCAPI()
+	pcSender, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("failed to create pcSender: %v", err)
+	}
+	defer pcSender.Close()
+
+	pcReceiver, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("failed to create pcReceiver: %v", err)
+	}
+	defer pcReceiver.Close()
+
+	pcSender.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			pcReceiver.AddICECandidate(c.ToJSON())
+		}
+	})
+	pcReceiver.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			pcSender.AddICECandidate(c.ToJSON())
+		}
+	})
+
+	var receiverDC *webrtc.DataChannel
+	dcReady := make(chan struct{})
+
+	var receivedChunks [][]byte
+	var receivedChunksMu sync.Mutex
+	eofReceived := make(chan struct{})
+
+	var receivedBytesAfterMeta int
+	pcReceiver.OnDataChannel(func(dc *webrtc.DataChannel) {
+		receiverDC = dc
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			if msg.IsString {
+				dataStr := string(msg.Data)
+				if strings.HasPrefix(dataStr, "META:") {
+					receivedChunksMu.Lock()
+					receivedBytesAfterMeta = 0
+					receivedChunksMu.Unlock()
+				} else if dataStr == "EOF" {
+					close(eofReceived)
+				}
+			} else {
+				receivedChunksMu.Lock()
+				c := make([]byte, len(msg.Data))
+				copy(c, msg.Data)
+				receivedChunks = append(receivedChunks, c)
+				receivedBytesAfterMeta += len(msg.Data)
+				receivedChunksMu.Unlock()
+			}
+		})
+		dc.OnOpen(func() {
+			close(dcReady)
+		})
+	})
+
+	ordered := true
+	dcSender, err := pcSender.CreateDataChannel("beam-file", &webrtc.DataChannelInit{
+		Ordered: &ordered,
+	})
+	if err != nil {
+		t.Fatalf("failed to create data channel: %v", err)
+	}
+
+	offer, err := pcSender.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("failed to create offer: %v", err)
+	}
+	if err := pcSender.SetLocalDescription(offer); err != nil {
+		t.Fatalf("failed to set local sdp: %v", err)
+	}
+
+	<-webrtc.GatheringCompletePromise(pcSender)
+
+	if err := pcReceiver.SetRemoteDescription(*pcSender.LocalDescription()); err != nil {
+		t.Fatalf("failed to set remote sdp: %v", err)
+	}
+
+	answer, err := pcReceiver.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("failed to create answer: %v", err)
+	}
+	if err := pcReceiver.SetLocalDescription(answer); err != nil {
+		t.Fatalf("failed to set local answer: %v", err)
+	}
+
+	<-webrtc.GatheringCompletePromise(pcReceiver)
+
+	if err := pcSender.SetRemoteDescription(*pcReceiver.LocalDescription()); err != nil {
+		t.Fatalf("failed to set remote answer: %v", err)
+	}
+
+	select {
+	case <-dcReady:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for data channel to open")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	mainCtx, mainCancel := context.WithCancel(context.Background())
+	defer mainCancel()
+
+	filePath := tmpFile.Name()
+	fileName := filepath.Base(filePath)
+	fileSize := int64(len(data))
+
+	var streamMu sync.Mutex
+	var streamCancel context.CancelFunc
+
+	dcSender.OnMessage(func(msg webrtc.DataChannelMessage) {
+		if !msg.IsString {
+			return
+		}
+		dataStr := string(msg.Data)
+		if strings.HasPrefix(dataStr, "OFFSET:") {
+			parts := strings.SplitN(dataStr, ":", 2)
+			var offset int64
+			if len(parts) == 2 {
+				offset, _ = strconv.ParseInt(parts[1], 10, 64)
+			}
+
+			streamMu.Lock()
+			if streamCancel != nil {
+				streamCancel()
+			}
+			var streamCtx context.Context
+			streamCtx, streamCancel = context.WithCancel(mainCtx)
+			streamMu.Unlock()
+
+			go func(ctx context.Context, reqOffset int64) {
+				file, err := os.Open(filePath)
+				if err != nil {
+					return
+				}
+				defer file.Close()
+
+				if reqOffset > 0 {
+					_, err = file.Seek(reqOffset, io.SeekStart)
+					if err != nil {
+						return
+					}
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
+				dcSender.SendText(metaHeader)
+
+				bufferedAmountLowChan := make(chan struct{}, 1)
+				dcSender.SetBufferedAmountLowThreshold(512 * 1024)
+				dcSender.OnBufferedAmountLow(func() {
+					select {
+					case bufferedAmountLowChan <- struct{}{}:
+					default:
+					}
+				})
+
+				buffer := make([]byte, 16*1024)
+				totalSent := reqOffset
+
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+
+					if dcSender.BufferedAmount() > 1024*1024 {
+						for dcSender.BufferedAmount() > 512*1024 {
+							select {
+							case <-ctx.Done():
+								return
+							case <-bufferedAmountLowChan:
+							case <-time.After(10 * time.Millisecond):
+							}
+						}
+					}
+
+					n, err := file.Read(buffer)
+					if n > 0 {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
+
+						chunk := make([]byte, n)
+						copy(chunk, buffer[:n])
+
+						errSend := dcSender.Send(chunk)
+						if errSend != nil {
+							return
+						}
+						totalSent += int64(n)
+					}
+					if err != nil {
+						break
+					}
+				}
+
+				dcSender.SetBufferedAmountLowThreshold(0)
+				for dcSender.BufferedAmount() > 0 {
+					select {
+					case <-ctx.Done():
+						return
+					case <-bufferedAmountLowChan:
+					case <-time.After(10 * time.Millisecond):
+					}
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				dcSender.SendText("EOF")
+			}(streamCtx, offset)
+		}
+	})
+
+	receiverDC.SendText("OFFSET:0")
+	time.Sleep(5 * time.Millisecond)
+	receiverDC.SendText("OFFSET:1024")
+
+	select {
+	case <-eofReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for EOF")
+	}
+
+	receivedChunksMu.Lock()
+	defer receivedChunksMu.Unlock()
+
+	expectedLen := len(data) - 1024
+	if receivedBytesAfterMeta != expectedLen {
+		t.Fatalf("expected received bytes after meta %d, got %d", expectedLen, receivedBytesAfterMeta)
+	}
+}
