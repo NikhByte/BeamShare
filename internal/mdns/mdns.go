@@ -10,6 +10,7 @@ package mdns
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strings"
@@ -31,13 +32,20 @@ type Registrar interface {
 // RegisterFunc abstracts the zeroconf registration function.
 type RegisterFunc func(instance, service, domain string, port int, text []string, ifaces []net.Interface) (Registrar, error)
 
+// InterfacesProvider abstracts fetching network interfaces.
+type InterfacesProvider func() ([]net.Interface, error)
+
+// AddrsProvider abstracts fetching IP addresses for an interface.
+type AddrsProvider func(*net.Interface) ([]net.Addr, error)
+
 // Broadcaster advertises a Beam session over mDNS / Bonjour.
 type Broadcaster struct {
 	hostname       string
 	port           int
 	server         Registrar
 	registerFunc   RegisterFunc
-	interfacesFunc func() ([]net.Interface, error)
+	ifacesProvider InterfacesProvider
+	addrsProvider  AddrsProvider
 }
 
 // ActiveInterfaces returns network interfaces that are UP, non-loopback,
@@ -96,11 +104,16 @@ func filterInterfaces(ifaces []net.Interface, getAddrs func(net.Interface) ([]ne
 // New creates a Broadcaster. The hostname will become "<hostname>.local"
 // on the network. If hostname is empty, the machine's OS hostname is used.
 func New(hostname string, port int) *Broadcaster {
-	return NewWithRegister(hostname, port, defaultRegister)
+	return NewWithInterfaces(hostname, port, net.Interfaces, defaultRegister)
 }
 
 // NewWithRegister creates a Broadcaster with a custom RegisterFunc (for mocking/testing).
 func NewWithRegister(hostname string, port int, registerFunc RegisterFunc) *Broadcaster {
+	return NewWithInterfaces(hostname, port, net.Interfaces, registerFunc)
+}
+
+// NewWithInterfaces creates a Broadcaster with custom interface provider and RegisterFunc (for mocking/testing).
+func NewWithInterfaces(hostname string, port int, ifacesProvider InterfacesProvider, registerFunc RegisterFunc) *Broadcaster {
 	if hostname == "" {
 		h, err := os.Hostname()
 		if err != nil {
@@ -115,7 +128,16 @@ func NewWithRegister(hostname string, port int, registerFunc RegisterFunc) *Broa
 	if registerFunc == nil {
 		registerFunc = defaultRegister
 	}
-	return &Broadcaster{hostname: hostname, port: port, registerFunc: registerFunc}
+	if ifacesProvider == nil {
+		ifacesProvider = net.Interfaces
+	}
+	return &Broadcaster{
+		hostname:       hostname,
+		port:           port,
+		registerFunc:   registerFunc,
+		ifacesProvider: ifacesProvider,
+		addrsProvider:  (*net.Interface).Addrs,
+	}
 }
 
 func defaultRegister(instance, service, domain string, port int, text []string, ifaces []net.Interface) (Registrar, error) {
@@ -135,14 +157,56 @@ func (b *Broadcaster) LocalName() string { return b.hostname + ".local" }
 // Start begins advertising the Beam service via mDNS.
 // It is non-blocking; call Stop() to deregister.
 func (b *Broadcaster) Start() error {
-	getIfaces := b.interfacesFunc
-	if getIfaces == nil {
-		getIfaces = ActiveInterfaces
+	ifacesFunc := b.ifacesProvider
+	if ifacesFunc == nil {
+		ifacesFunc = net.Interfaces
 	}
 
-	activeIfaces, err := getIfaces()
+	addrsFunc := b.addrsProvider
+	if addrsFunc == nil {
+		addrsFunc = (*net.Interface).Addrs
+	}
+
+	ifaces, err := ifacesFunc()
 	if err != nil {
-		return fmt.Errorf("mdns active interfaces: %w", err)
+		return fmt.Errorf("mdns register: failed to get network interfaces: %w", err)
+	}
+
+	var activeIfaces []net.Interface
+	var ips []net.IP
+
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			log.Printf("[debug] skipping interface %s: missing FlagUp", iface.Name)
+			continue
+		}
+		if iface.Flags&net.FlagMulticast == 0 {
+			log.Printf("[debug] skipping interface %s: missing FlagMulticast", iface.Name)
+			continue
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			log.Printf("[debug] skipping interface %s: loopback interface", iface.Name)
+			continue
+		}
+
+		addrs, _ := addrsFunc(&iface)
+		hasIP := false
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok {
+				if v4 := ipnet.IP.To4(); v4 != nil && !v4.IsUnspecified() {
+					ips = append(ips, v4)
+					hasIP = true
+				}
+			}
+		}
+
+		if len(addrs) > 0 && hasIP {
+			activeIfaces = append(activeIfaces, iface)
+		}
+	}
+
+	if len(activeIfaces) == 0 {
+		return fmt.Errorf("mdns register: no active multicast network interfaces found")
 	}
 
 	// TXT record: clients can read the Beam version from it.
@@ -165,6 +229,7 @@ func (b *Broadcaster) Start() error {
 		return fmt.Errorf("mdns register: %w", err)
 	}
 	b.server = srv
+	_ = ips
 	return nil
 }
 

@@ -3,6 +3,7 @@ package mdns
 import (
 	"errors"
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -53,11 +54,15 @@ func TestBroadcaster_MockStartStop(t *testing.T) {
 		return mockReg, nil
 	}
 
-	b := NewWithRegister("testbeam", 9090, mockRegisterFunc)
-	b.interfacesFunc = func() ([]net.Interface, error) {
+	mockIfacesProvider := func() ([]net.Interface, error) {
 		return []net.Interface{
-			{Index: 1, Name: "eth0", Flags: net.FlagUp | net.FlagMulticast},
+			{Name: "eth0", Flags: net.FlagUp | net.FlagMulticast},
 		}, nil
+	}
+
+	b := NewWithInterfaces("testbeam", 9090, mockIfacesProvider, mockRegisterFunc)
+	b.addrsProvider = func(iface *net.Interface) ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.50")}}, nil
 	}
 	err := b.Start()
 	if err != nil {
@@ -77,7 +82,7 @@ func TestBroadcaster_NoActiveInterfaces(t *testing.T) {
 	b := NewWithRegister("testbeam", 9090, func(instance, service, domain string, port int, text []string, ifaces []net.Interface) (Registrar, error) {
 		return &mockRegistrar{}, nil
 	})
-	b.interfacesFunc = func() ([]net.Interface, error) {
+	b.ifacesProvider = func() ([]net.Interface, error) {
 		return nil, errors.New("no active multicast network interfaces found")
 	}
 
@@ -143,14 +148,97 @@ func TestBroadcaster_MockRegisterError(t *testing.T) {
 		return nil, expectedErr
 	}
 
-	b := NewWithRegister("failbeam", 8080, mockRegisterFunc)
-	b.interfacesFunc = func() ([]net.Interface, error) {
+	mockIfacesProvider := func() ([]net.Interface, error) {
 		return []net.Interface{
-			{Index: 1, Name: "eth0", Flags: net.FlagUp | net.FlagMulticast},
+			{Name: "eth0", Flags: net.FlagUp | net.FlagMulticast},
 		}, nil
+	}
+
+	b := NewWithInterfaces("failbeam", 8080, mockIfacesProvider, mockRegisterFunc)
+	b.addrsProvider = func(iface *net.Interface) ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.50")}}, nil
 	}
 	err := b.Start()
 	if err == nil {
 		t.Fatalf("expected error on start, got nil")
+	}
+}
+
+func TestBroadcaster_FilterInterfaces(t *testing.T) {
+	mockReg := &mockRegistrar{}
+	var passedIfaces []net.Interface
+
+	mockRegisterFunc := func(instance, service, domain string, port int, text []string, ifaces []net.Interface) (Registrar, error) {
+		passedIfaces = ifaces
+		return mockReg, nil
+	}
+
+	mockIfacesProvider := func() ([]net.Interface, error) {
+		return []net.Interface{
+			{Name: "eth0", Flags: net.FlagUp | net.FlagMulticast},                              // Valid -> include
+			{Name: "eth1", Flags: net.FlagMulticast},                                          // Down -> skip
+			{Name: "eth2", Flags: net.FlagUp},                                                 // No Multicast -> skip
+			{Name: "lo", Flags: net.FlagUp | net.FlagMulticast | net.FlagLoopback},              // Loopback -> skip
+			{Name: "wlan0", Flags: net.FlagUp | net.FlagMulticast | net.FlagBroadcast | net.FlagPointToPoint}, // Valid -> include
+		}, nil
+	}
+
+	b := NewWithInterfaces("filtertest", 8080, mockIfacesProvider, mockRegisterFunc)
+	b.addrsProvider = func(iface *net.Interface) ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.50")}}, nil
+	}
+	err := b.Start()
+	if err != nil {
+		t.Fatalf("unexpected error on start: %v", err)
+	}
+
+	if len(passedIfaces) != 2 {
+		t.Fatalf("expected 2 active interfaces, got %d", len(passedIfaces))
+	}
+	if passedIfaces[0].Name != "eth0" || passedIfaces[1].Name != "wlan0" {
+		t.Fatalf("expected interfaces ['eth0', 'wlan0'], got ['%s', '%s']", passedIfaces[0].Name, passedIfaces[1].Name)
+	}
+}
+
+func TestBroadcaster_NoActiveMulticastInterfaces(t *testing.T) {
+	registerCalled := false
+	mockRegisterFunc := func(instance, service, domain string, port int, text []string, ifaces []net.Interface) (Registrar, error) {
+		registerCalled = true
+		return &mockRegistrar{}, nil
+	}
+
+	mockIfacesProvider := func() ([]net.Interface, error) {
+		return []net.Interface{
+			{Name: "eth0", Flags: net.FlagUp},                                    // Missing FlagMulticast
+			{Name: "eth1", Flags: net.FlagMulticast},                             // Missing FlagUp
+			{Name: "lo", Flags: net.FlagUp | net.FlagMulticast | net.FlagLoopback}, // Loopback
+		}, nil
+	}
+
+	b := NewWithInterfaces("nomanifest", 8080, mockIfacesProvider, mockRegisterFunc)
+	err := b.Start()
+	if err == nil {
+		t.Fatalf("expected error when no active multicast interfaces found, got nil")
+	}
+	if registerCalled {
+		t.Fatalf("registerFunc should not be called when no active multicast interfaces are found")
+	}
+	if !strings.Contains(err.Error(), "no active multicast network interfaces found") {
+		t.Fatalf("expected 'no active multicast network interfaces found' in error, got: %v", err)
+	}
+}
+
+func TestBroadcaster_GetInterfacesError(t *testing.T) {
+	mockIfacesProvider := func() ([]net.Interface, error) {
+		return nil, errors.New("network uninitialized")
+	}
+
+	b := NewWithInterfaces("errbeam", 8080, mockIfacesProvider, nil)
+	err := b.Start()
+	if err == nil {
+		t.Fatalf("expected error on interface enumeration failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to get network interfaces") {
+		t.Fatalf("expected 'failed to get network interfaces' in error, got: %v", err)
 	}
 }
