@@ -77,6 +77,7 @@ describe('Gaze Web Receiver Test Suite', () => {
       removeItem: () => {}
     };
     global.localStorage = window.localStorage;
+    global.navigator = window.navigator;
 
     global.HTMLCanvasElement = window.HTMLCanvasElement;
     global.HTMLImageElement = window.HTMLImageElement;
@@ -160,6 +161,17 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.pako = pako;
     window.__BEAM_TEST_ENV__ = true;
 
+    // Default mock fetch for tests
+    const mockFetch = async (url) => {
+      const urlStr = url ? url.toString() : '';
+      if (urlStr.includes('/poll')) {
+        return { ok: true, status: 200, json: async () => ({ offers: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+    window.fetch = mockFetch;
+    global.fetch = mockFetch;
+
     // Load qrcode.min.js and app.js
     delete require.cache[require.resolve('./qrcode.min.js')];
     const qrcodeLib1 = require('./qrcode.min.js');
@@ -211,15 +223,13 @@ describe('Gaze Web Receiver Test Suite', () => {
       configurable: true,
       writable: true
     });
-    if (typeof global.navigator !== 'undefined') {
-      try {
-        Object.defineProperty(global.navigator, 'serviceWorker', {
-          value: mockSW,
-          configurable: true,
-          writable: true
-        });
-      } catch (e) {}
-    }
+    try {
+      Object.defineProperty(global.navigator, 'serviceWorker', {
+        value: mockSW,
+        configurable: true,
+        writable: true
+      });
+    } catch (e) {}
 
     app.init();
 
@@ -861,9 +871,14 @@ describe('Gaze Web Sender Test Suite', () => {
     // Intercept fetch / network calls to verify no external requests are made
     let externalRequests = [];
     window.fetch = async (url) => {
-      externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      const urlStr = url.toString();
+      externalRequests.push(urlStr);
+      if (urlStr.includes('/poll')) {
+        return { ok: false, status: 404 };
+      }
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
+    global.fetch = window.fetch;
 
     await app.startSenderSharing();
 
