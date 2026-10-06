@@ -2836,6 +2836,12 @@ async function startHTTPDownload() {
           while (encBuffer.length >= 4) {
             const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
             const frameLen = dv.getUint32(0, false);
+            const maxFrameSize = 65536 + 12 + 16; // 64KB chunk + 12B nonce + 16B tag
+            if (frameLen < 12 || frameLen > maxFrameSize) {
+              console.error("Invalid encrypted frame size:", frameLen);
+              encBuffer = new Uint8Array(0);
+              throw new Error("Invalid encrypted frame size: " + frameLen);
+            }
             if (encBuffer.length >= 4 + frameLen) {
               const frame = encBuffer.slice(4, 4 + frameLen);
               encBuffer = encBuffer.slice(4 + frameLen);
@@ -2988,6 +2994,15 @@ async function decompressOffer(base64Str) {
 async function startWebRTC() {
   setState('webrtc');
   setMode('webrtc', 'WebRTC P2P (optical handshake)');
+
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.error("Failed to import decryption key", err);
+    showError("Decryption key error: " + err.message);
+    return;
+  }
 
   // 1. Fetch the full SDP offer from the server.
   let offer;
@@ -3241,7 +3256,7 @@ async function startWebRTC() {
           } else {
             showError(`Transfer failed: ${err.message}`);
           }
-          dc.close();
+          try { dc.close(); } catch (e) {}
           reject(err);
         },
         writeHandler: async (chunk) => {
@@ -3463,6 +3478,58 @@ async function startWebRTC() {
             reject(err);
           }
         }
+
+        const chunk = new Uint8Array(e.data);
+        msgChain = msgChain.then(async () => {
+          if (isTerminated) return;
+
+          if (decryptionKey) {
+            let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
+            newBuffer.set(encBuffer, 0);
+            newBuffer.set(chunk, encBuffer.length);
+            encBuffer = newBuffer;
+
+            while (encBuffer.length >= 4) {
+              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+              const frameLen = dv.getUint32(0, false);
+              if (encBuffer.length >= 4 + frameLen) {
+                const frame = encBuffer.slice(4, 4 + frameLen);
+                encBuffer = encBuffer.slice(4 + frameLen);
+
+                if (frameLen < 12) {
+                  throw new Error("Invalid frame length: header smaller than nonce size");
+                }
+
+                const nonce = new Uint8Array(frame.subarray(0, 12));
+                const ciphertext = new Uint8Array(frame.subarray(12));
+
+                let decrypted;
+                try {
+                  decrypted = await crypto.subtle.decrypt(
+                    { name: "AES-GCM", iv: nonce },
+                    decryptionKey,
+                    ciphertext
+                  );
+                } catch (decryptErr) {
+                  throw new Error("Decryption failed: corrupted frame or invalid key");
+                }
+
+                const decValue = new Uint8Array(decrypted);
+                chunkQueue.enqueue(decValue);
+              } else {
+                break;
+              }
+            }
+          } else {
+            chunkQueue.enqueue(chunk);
+          }
+        }).catch((err) => {
+          if (isTerminated) return;
+          isTerminated = true;
+          showError(`Transfer failed: ${err.message}`);
+          try { dc.close(); } catch (closeErr) {}
+          reject(err);
+        });
       };
 
       dc.onerror = (e) => reject(new Error('data channel error: ' + e));
@@ -4264,6 +4331,33 @@ if (typeof window !== 'undefined') {
       }
     }
   });
+}
+
+// ── Local Client-Side QR Generation ───────────────────────────────────────────
+function generateQRCodeDataURL(text, options) {
+  if (typeof QRCode !== 'undefined' && QRCode.generateQRCodeDataURL) {
+    return QRCode.generateQRCodeDataURL(text, options);
+  }
+  if (typeof require === 'function') {
+    try {
+      const qrcodeLib = require('./qrcode.min.js');
+      if (qrcodeLib && qrcodeLib.generateQRCodeDataURL) {
+        return qrcodeLib.generateQRCodeDataURL(text, options);
+      }
+    } catch (e) {}
+  }
+  throw new Error("Client-side QR generator unavailable");
+}
+
+function renderQRCode(elementOrId, url) {
+  const img = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
+  if (!img) return;
+  try {
+    const dataUrl = generateQRCodeDataURL(url);
+    img.src = dataUrl;
+  } catch (err) {
+    console.error("Failed to generate QR code client-side");
+  }
 }
 
 if (typeof module !== 'undefined' && module.exports) {
