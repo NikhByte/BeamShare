@@ -821,6 +821,7 @@ describe('Gaze Web Sender Test Suite', () => {
       });
     }
 
+    let fetchedURLs = [];
     global.fetch = async (url) => {
       fetchedURLs.push(url.toString());
       if (url.includes('/poll')) {
