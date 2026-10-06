@@ -1,5 +1,5 @@
 // ── Client-side QR Code Generator Engine (Zero Network Dependencies) ──────
-const qrcodegen = (function() {
+var qrcodegen = (function() {
 	function QrCode(version, errorCorrectionLevel, dataCodewords, msk) {
 		if (version < QrCode.MIN_VERSION || version > QrCode.MAX_VERSION)
 			throw new RangeError("Version value out of range");
@@ -394,7 +394,16 @@ const qrcodegen = (function() {
 	return { QrCode };
 })();
 
-function renderQRCode(text, targetElement, options = {}) {
+function renderQRCode(arg1, arg2, options = {}) {
+  let text = arg1;
+  let targetElement = arg2;
+  if (arg1 && (arg1.tagName || (typeof arg1 === 'string' && typeof document !== 'undefined' && document.getElementById(arg1) && !arg1.startsWith('http://') && !arg1.startsWith('https://')))) {
+    targetElement = typeof arg1 === 'string' ? document.getElementById(arg1) : arg1;
+    text = arg2;
+  } else if (typeof targetElement === 'string' && typeof document !== 'undefined') {
+    const el = document.getElementById(targetElement);
+    if (el) targetElement = el;
+  }
   if (!text || !targetElement) return;
   const cellSize = options.cellSize || 4;
   const margin = options.margin !== undefined ? options.margin : 4;
@@ -1146,7 +1155,7 @@ function qrToSvgDataUrl(qr, border = 4) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
-function renderQRCode(element, text, options = {}) {
+function renderQRCodeDetailed(element, text, options = {}) {
   if (!element) return;
   try {
     if (!text) {
@@ -3226,16 +3235,6 @@ async function startWebRTC() {
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
 
-    let decryptionKey = null;
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch (e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      pc.close();
-      return;
-    }
-
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
       if (dc.readyState === 'open') {
@@ -3964,7 +3963,8 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    renderQRCode('send-qr-img', shareURL.href);
+    renderQRCode('send-qr-canvas', shareURL.href);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -4370,16 +4370,7 @@ function generateQRCodeDataURL(text, options) {
   throw new Error("Client-side QR generator unavailable");
 }
 
-function renderQRCode(elementOrId, url) {
-  const img = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
-  if (!img) return;
-  try {
-    const dataUrl = generateQRCodeDataURL(url);
-    img.src = dataUrl;
-  } catch (err) {
-    console.error("Failed to generate QR code client-side");
-  }
-}
+// renderQRCode defined at top of file
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {

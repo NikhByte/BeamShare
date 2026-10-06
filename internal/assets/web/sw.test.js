@@ -48,7 +48,7 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     });
 
     assert.equal(streamMap.has(url), true);
-    assert.deepEqual(postedMessage, { type: 'PORT_READY' });
+    assert.deepEqual(postedMessage, { type: 'READY' });
   });
 
   test('formatContentDisposition formats RFC 6266 dual parameters correctly', () => {
