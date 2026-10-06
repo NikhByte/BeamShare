@@ -2411,6 +2411,20 @@ function init() {
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(err => {
       console.warn('Service Worker registration failed:', err);
     });
+
+    const markSwReady = () => {
+      document.documentElement.setAttribute('data-sw-ready', 'true');
+    };
+
+    if (navigator.serviceWorker.controller) {
+      markSwReady();
+    } else if (typeof navigator.serviceWorker.addEventListener === 'function') {
+      navigator.serviceWorker.addEventListener('controllerchange', markSwReady, { once: true });
+    }
+
+    navigator.serviceWorker.ready.then(() => {
+      markSwReady();
+    }).catch(() => {});
   }
 
   setState('loading');

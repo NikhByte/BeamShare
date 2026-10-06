@@ -197,6 +197,46 @@ describe('Gaze Web Receiver Test Suite', () => {
     assert.equal(document.getElementById('state-done').classList.contains('hidden'), false);
   });
 
+  test('Service Worker Registration & data-sw-ready attribute', async () => {
+    let readyResolver;
+    const readyPromise = new Promise(resolve => { readyResolver = resolve; });
+    const mockSW = {
+      register: async () => ({ active: {} }),
+      ready: readyPromise,
+      addEventListener: () => {}
+    };
+
+    Object.defineProperty(window.navigator, 'serviceWorker', {
+      value: mockSW,
+      configurable: true,
+      writable: true
+    });
+    if (typeof global.navigator !== 'undefined') {
+      try {
+        Object.defineProperty(global.navigator, 'serviceWorker', {
+          value: mockSW,
+          configurable: true,
+          writable: true
+        });
+      } catch (e) {}
+    }
+
+    app.init();
+
+    assert.equal(document.documentElement.getAttribute('data-sw-ready'), null);
+
+    readyResolver({ active: {} });
+    await readyPromise;
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    assert.equal(document.documentElement.getAttribute('data-sw-ready'), 'true');
+
+    delete window.navigator.serviceWorker;
+    if (typeof global.navigator !== 'undefined') {
+      delete global.navigator.serviceWorker;
+    }
+  });
+
   test('Render File Metadata Card', () => {
     const fileMeta = {
       name: 'document.pdf',

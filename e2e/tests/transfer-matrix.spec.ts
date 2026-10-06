@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, Page } from '@playwright/test';
 import * as path from 'path';
 import * as fs from 'fs';
 import {
@@ -13,6 +13,28 @@ import {
   computeHash,
   cleanupTempDir,
 } from '../harness/test-helpers';
+
+async function waitForServiceWorkerReady(page: Page) {
+  const hasSW = await page.evaluate(() => 'serviceWorker' in navigator);
+  if (hasSW) {
+    try {
+      await page.evaluate(async () => {
+        if ('serviceWorker' in navigator) {
+          if (!navigator.serviceWorker.controller) {
+            await new Promise((resolve) => {
+              navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true });
+              setTimeout(resolve, 1000);
+            });
+          }
+          await navigator.serviceWorker.ready;
+        }
+      });
+      await expect(page.locator('html')).toHaveAttribute('data-sw-ready', 'true', { timeout: 5000 });
+    } catch (e) {
+      // Service worker disabled or restricted on non-secure test origin
+    }
+  }
+}
 
 test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
   let testFilePath: string;
