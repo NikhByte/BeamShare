@@ -244,22 +244,22 @@ describe('Gaze Web Receiver Test Suite', () => {
       }
     });
 
-    // Enqueue 4 chunks of 40 bytes each while writeHandler is pending on chunk 1
-    const c1 = new Uint8Array(40).fill(1);
-    const c2 = new Uint8Array(40).fill(2);
-    const c3 = new Uint8Array(40).fill(3);
-    const c4 = new Uint8Array(40).fill(4);
+    // Enqueue 4 chunks of 30 bytes each while writeHandler is pending on chunk 1
+    const c1 = new Uint8Array(30).fill(1);
+    const c2 = new Uint8Array(30).fill(2);
+    const c3 = new Uint8Array(30).fill(3);
+    const c4 = new Uint8Array(30).fill(4);
 
-    queue.enqueue(c1); // Dequeued immediately for writing (queue totalBytes = 0)
+    queue.enqueue(c1); // Total bytes = 30
     assert.equal(queue.isPaused, false);
 
-    queue.enqueue(c2); // Queue totalBytes = 40
+    queue.enqueue(c2); // Total bytes = 60
     assert.equal(queue.isPaused, false);
 
-    queue.enqueue(c3); // Queue totalBytes = 80
+    queue.enqueue(c3); // Total bytes = 90
     assert.equal(queue.isPaused, false);
 
-    queue.enqueue(c4); // Queue totalBytes = 120 -> exceeds HWM (100)!
+    queue.enqueue(c4); // Total bytes = 120 -> exceeds HWM (100)!
     assert.equal(queue.isPaused, true);
     assert.deepEqual(sentMessages, ['PAUSE']);
 
@@ -297,6 +297,88 @@ describe('Gaze Web Receiver Test Suite', () => {
       async () => await queue.drain(),
       { message: 'Disk write failed' }
     );
+  });
+
+  test('SequentialChunkQueue — Default Watermarks (16 MB / 4 MB) and In-Flight Write Memory Tracking', async () => {
+    const sentMessages = [];
+    const mockDataChannel = {
+      readyState: 'open',
+      send: (msg) => sentMessages.push(msg)
+    };
+
+    let finishWrite;
+    const writePromise = new Promise(r => { finishWrite = r; });
+
+    const queue = new app.SequentialChunkQueue({
+      dataChannel: mockDataChannel,
+      writeHandler: async () => {
+        await writePromise;
+      }
+    });
+
+    assert.equal(queue.highWatermark, 16 * 1024 * 1024);
+    assert.equal(queue.lowWatermark, 4 * 1024 * 1024);
+
+    const chunkSize = 5 * 1024 * 1024; // 5 MB
+    const c1 = new Uint8Array(chunkSize);
+    const c2 = new Uint8Array(chunkSize);
+    const c3 = new Uint8Array(chunkSize);
+    const c4 = new Uint8Array(chunkSize);
+
+    queue.enqueue(c1); // 5MB enqueued, processLoop starts writeHandler(c1)
+    queue.enqueue(c2); // 10MB total
+    queue.enqueue(c3); // 15MB total
+    assert.equal(queue.isPaused, false);
+
+    queue.enqueue(c4); // 20MB total >= 16MB HWM -> PAUSE
+    assert.equal(queue.isPaused, true);
+    assert.deepEqual(sentMessages, ['PAUSE']);
+
+    // Total bytes should reflect in-flight chunk + queued chunks (20MB)
+    assert.equal(queue.totalBytes, 20 * 1024 * 1024);
+
+    queue.enqueueEOF();
+
+    // Release writeHandler
+    finishWrite();
+    await queue.drain();
+
+    assert.equal(queue.totalBytes, 0);
+    assert.deepEqual(sentMessages, ['PAUSE', 'RESUME']);
+  });
+
+  test('SequentialChunkQueue — QuotaExceededError and DataChannel Closure', async () => {
+    let capturedError = null;
+    let channelClosed = false;
+    const mockDC = {
+      readyState: 'open',
+      close: () => { channelClosed = true; }
+    };
+
+    const quotaError = new Error('Storage quota exceeded');
+    quotaError.name = 'QuotaExceededError';
+
+    const queue = new app.SequentialChunkQueue({
+      dataChannel: mockDC,
+      writeHandler: async () => {
+        throw quotaError;
+      },
+      onError: (err) => {
+        capturedError = err;
+        mockDC.close();
+      }
+    });
+
+    queue.enqueue(new Uint8Array([1, 2, 3]));
+    queue.enqueueEOF();
+
+    await assert.rejects(
+      async () => await queue.drain(),
+      { name: 'QuotaExceededError' }
+    );
+
+    assert.equal(capturedError.name, 'QuotaExceededError');
+    assert.equal(channelClosed, true, 'DataChannel must be closed on storage write error');
   });
 
   test('WebRTC Receiver DataChannel Chunk Queueing', async () => {
