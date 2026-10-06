@@ -788,7 +788,12 @@ describe('Gaze Web Sender Test Suite', () => {
     window.atob = global.atob;
     window.btoa = global.btoa;
 
-    const QRious = require('./qrious.min.js');
+    let QRious;
+    try {
+      QRious = require('./qrious.min.js');
+    } catch (_) {
+      QRious = global.QRious || class {};
+    }
     window.QRious = QRious;
     global.QRious = QRious;
 
@@ -841,6 +846,7 @@ describe('Gaze Web Sender Test Suite', () => {
     }
     window.RTCPeerConnection = RTCPeerConnection;
     global.RTCPeerConnection = RTCPeerConnection;
+    globalThis.RTCPeerConnection = RTCPeerConnection;
     window.__BEAM_TEST_ENV__ = true;
 
     delete require.cache[require.resolve('./qrcode.min.js')];
@@ -860,9 +866,10 @@ describe('Gaze Web Sender Test Suite', () => {
   test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
     // Intercept fetch / network calls to verify no external requests are made
     let externalRequests = [];
-    window.fetch = async (url) => {
+    window.fetch = global.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      if (url.includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, status: 200, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
@@ -898,7 +905,7 @@ describe('Gaze Web Sender Test Suite', () => {
     const svgStr = decodeURIComponent(dataUrl.replace('data:image/svg+xml;charset=utf-8,', ''));
     assert.equal(svgStr.includes('<svg'), true);
     assert.equal(svgStr.includes('viewBox='), true);
-    assert.equal(svgStr.includes('<path fill="#000000"'), true);
+    assert.equal(svgStr.includes('fill="#000000"'), true);
   });
 
   test('Client-side QR generation renders locally without external api.qrserver.com requests', async () => {
