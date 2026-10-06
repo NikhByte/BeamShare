@@ -21,14 +21,14 @@ import (
 
 // Server holds the state for one Beam session.
 type Server struct {
-	filePath     string
-	fileName     string
-	fileSize     int64
-	port         int
-	srv          *http.Server
-	mux          *http.ServeMux
-	mu           sync.RWMutex
-	downloads    int
+	filePath  string
+	fileName  string
+	fileSize  int64
+	port      int
+	srv       *http.Server
+	mux       *http.ServeMux
+	mu        sync.RWMutex
+	downloads int
 
 	// Phase 5: Live Pipe
 	isLivePipe   bool
