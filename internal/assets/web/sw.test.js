@@ -324,7 +324,7 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
       onmessageerror: null,
       close: () => {},
       postMessage: (msg) => {
-        if (msg && msg.type === 'READY') {
+        if (msg && (msg.type === 'PORT_READY' || msg.type === 'READY')) {
           readyPosted = true;
         }
       }
