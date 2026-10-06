@@ -657,10 +657,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 										}
 									}
 								}
-											}
-										}
-									}
-								}
 
 								buffer := make([]byte, 64*1024) // 64KB chunk size
 								totalSent := reqOffset
@@ -671,7 +667,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									case <-ctx.Done():
 										return
 									default:
-									}
 									}
 
 									if !pauseCtrl.WaitIfPaused() {
@@ -726,12 +721,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								}
 								if dc.BufferedAmount() > 0 {
 									if errWait := waitForBufferLow(0); errWait != nil {
-										fmt.Printf("
-  Error waiting for buffer drain: %v
-", errWait)
+										fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
 										return
 									}
-								}
 								}
 
 								select {

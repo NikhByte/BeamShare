@@ -430,6 +430,8 @@ func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing
 	expectedLen := len(data) - 1024
 	if receivedBytesAfterMeta != expectedLen {
 		t.Fatalf("expected received bytes after meta %d, got %d", expectedLen, receivedBytesAfterMeta)
+	}
+}
 
 func TestWaitForBufferLowSafeguard(t *testing.T) {
 	bufferedAmountLowChan := make(chan struct{}, 1)

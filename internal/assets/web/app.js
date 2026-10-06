@@ -817,54 +817,85 @@ let currentFile      = null;
  * @param {number} timeoutMs - Timeout fallback in milliseconds (default: 250)
  * @returns {Promise<void>}
  */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 250) {
-  if (!dc) return Promise.resolve();
-  try {
-    dc.bufferedAmountLowThreshold = targetThreshold;
-  } catch (e) {}
+async function waitForBufferLow(dataChannel, targetThreshold = (dataChannel?.bufferedAmountLowThreshold ?? 0), timeoutMs = 2000) {
+  if (!dataChannel) return;
+  if (dataChannel.readyState !== 'open') return;
+  if (dataChannel.bufferedAmount <= targetThreshold) return;
 
-  if (dc.bufferedAmount <= targetThreshold) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let timer = null;
-    let resolved = false;
+    let pollInterval = null;
+    let doneCalled = false;
 
-    const cleanupAndResolve = () => {
-      if (resolved) return;
-      resolved = true;
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
+    const cleanup = () => {
+      if (doneCalled) return;
+      doneCalled = true;
+      if (timer) clearTimeout(timer);
+      if (pollInterval) clearInterval(pollInterval);
       try {
-        dc.removeEventListener('bufferedamountlow', listener);
+        dataChannel.removeEventListener('bufferedamountlow', onBufferLow);
+        dataChannel.removeEventListener('close', onCloseOrError);
+        dataChannel.removeEventListener('error', onCloseOrError);
       } catch (e) {}
+    };
+
+    const doneResolve = () => {
+      cleanup();
       resolve();
     };
 
-    const listener = () => {
-      cleanupAndResolve();
+    const doneReject = (err) => {
+      cleanup();
+      reject(err);
     };
 
-    try {
-      dc.addEventListener('bufferedamountlow', listener);
-    } catch (e) {
-      cleanupAndResolve();
+    const onCloseOrError = () => {
+      doneReject(new Error("Data channel is no longer open"));
+    };
+
+    const onBufferLow = () => {
+      if (dataChannel.bufferedAmount <= targetThreshold) {
+        doneResolve();
+      }
+    };
+
+    // 1. Attach listeners
+    dataChannel.addEventListener('bufferedamountlow', onBufferLow);
+    dataChannel.addEventListener('close', onCloseOrError);
+    dataChannel.addEventListener('error', onCloseOrError);
+
+    // 2. Post-registration state-guarded re-check
+    if (dataChannel.bufferedAmount <= targetThreshold) {
+      doneResolve();
+      return;
+    }
+    if (dataChannel.readyState !== 'open') {
+      onCloseOrError();
       return;
     }
 
-    // Immediate post-registration check in case threshold was crossed during callback setup
-    if (dc.bufferedAmount <= targetThreshold) {
-      cleanupAndResolve();
-      return;
-    }
+    // 3. Periodic 50ms polling check
+    pollInterval = setInterval(() => {
+      if (dataChannel.readyState !== 'open') {
+        onCloseOrError();
+        return;
+      }
+      if (dataChannel.bufferedAmount <= targetThreshold) {
+        doneResolve();
+      }
+    }, 50);
 
-    timer = setTimeout(() => {
-      cleanupAndResolve();
-    }, timeoutMs);
+    // 4. Fallback timeout to unblock execution
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        doneResolve();
+      }, timeoutMs);
+    }
   });
+}
+
+function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 2000) {
+  return waitForBufferLow(dc, targetThreshold, timeoutMs);
 }
 let transferMode     = 'http';   // 'webrtc' | 'http'
 let startTime        = 0;
@@ -1844,6 +1875,10 @@ function generateClientQRCodeDataURL(text) {
     return window.qrcode.generateQRCodeSVGDataURL(text);
   }
   return '';
+}
+
+function renderQRCode(text) {
+  return generateClientQRCodeDataURL(text);
 }
 
 // ── QR Scanning ───────────────────────────────────────────────────────────────
@@ -2845,7 +2880,6 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -2854,43 +2888,8 @@ async function startWebRTC() {
             if (typeof e.data === 'string') {
               if (e.data === "EOF") {
                 chunkQueue.enqueueEOF();
-                await chunkQueue.drain();
-                if (diskWritableStream) {
-                  await diskWritableStream.close();
-                  if (useOPFS) {
-                    const file = await diskFileHandle.getFile();
-                    triggerSave(file, currentFile.name);
-                  }
-                  chunkQueue.enqueueEOF();
-                  try {
-                    await chunkQueue.drain();
-                    if (diskWritableStream) {
-                      await diskWritableStream.close();
-                      if (useOPFS) {
-                        const file = await diskFileHandle.getFile();
-                        triggerSave(file, currentFile.name);
-                      }
-                    } else if (swPipePort) {
-                      swPipePort.postMessage("EOF");
-                    } else {
-                      let finalBlob;
-                      if (useIndexedDB) {
-                        finalBlob = await getAllChunksIDB(currentFile.mime);
-                        await clearIDB();
-                      } else {
-                        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                      }
-                      triggerSave(finalBlob, currentFile.name);
-                    }
-                    resolve();
-                  } catch (err) {
-                    hasError = true;
-                    // Handled in chunkQueue onError callback
-                  }
-                });
-              } else {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
+                try {
+                  await chunkQueue.drain();
                   if (diskWritableStream) {
                     await diskWritableStream.close();
                     if (useOPFS) {
@@ -2909,9 +2908,11 @@ async function startWebRTC() {
                     }
                     triggerSave(finalBlob, currentFile.name);
                   }
-                  triggerSave(finalBlob, currentFile.name);
+                  resolve();
+                } catch (err) {
+                  hasError = true;
+                  // Handled in chunkQueue onError callback
                 }
-                resolve();
               }
               return;
             }
@@ -3001,90 +3002,11 @@ async function startWebRTC() {
   }
 }
 
-// ── State-Guarded WebRTC Buffer Low Helper ────────────────────────────────────
-async function waitForBufferLow(dataChannel, targetThreshold = (dataChannel?.bufferedAmountLowThreshold ?? 0), timeoutMs = 2000) {
-  if (!dataChannel) return;
-  if (dataChannel.readyState !== 'open') return;
-  if (dataChannel.bufferedAmount <= targetThreshold) return;
-
-  return new Promise((resolve, reject) => {
-    let timer = null;
-    let pollInterval = null;
-    let doneCalled = false;
-
-    const cleanup = () => {
-      if (doneCalled) return;
-      doneCalled = true;
-      if (timer) clearTimeout(timer);
-      if (pollInterval) clearInterval(pollInterval);
-      try {
-        dataChannel.removeEventListener('bufferedamountlow', onBufferLow);
-        dataChannel.removeEventListener('close', onCloseOrError);
-        dataChannel.removeEventListener('error', onCloseOrError);
-      } catch (e) {}
-    };
-
-    const doneResolve = () => {
-      cleanup();
-      resolve();
-    };
-
-    const doneReject = (err) => {
-      cleanup();
-      reject(err);
-    };
-
-    const onCloseOrError = () => {
-      doneReject(new Error("Data channel is no longer open"));
-    };
-
-    const onBufferLow = () => {
-      if (dataChannel.bufferedAmount <= targetThreshold) {
-        doneResolve();
-      }
-    };
-
-    // 1. Attach listeners
-    dataChannel.addEventListener('bufferedamountlow', onBufferLow);
-    dataChannel.addEventListener('close', onCloseOrError);
-    dataChannel.addEventListener('error', onCloseOrError);
-
-    // 2. Post-registration state-guarded re-check
-    if (dataChannel.bufferedAmount <= targetThreshold) {
-      doneResolve();
-      return;
-    }
-    if (dataChannel.readyState !== 'open') {
-      onCloseOrError();
-      return;
-    }
-
-    // 3. Periodic 50ms polling check
-    pollInterval = setInterval(() => {
-      if (dataChannel.readyState !== 'open') {
-        onCloseOrError();
-        return;
-      }
-      if (dataChannel.bufferedAmount <= targetThreshold) {
-        doneResolve();
-      }
-    }, 50);
-
-    // 4. Fallback timeout to unblock execution
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => {
-        doneResolve();
-      }, timeoutMs);
-    }
-  });
-}
-
-const waitForBufferedAmountLow = waitForBufferLow;
-
 async function waitForDataChannelBuffer(dataChannel, highWatermark, lowWatermark) {
   if (!dataChannel || dataChannel.readyState !== 'open') {
     throw new Error("Data channel is closed or closing");
   }
+  dataChannel.bufferedAmountLowThreshold = lowWatermark;
   if (dataChannel.bufferedAmount <= lowWatermark) return;
   return waitForBufferLow(dataChannel, lowWatermark);
 }
@@ -3823,6 +3745,8 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     waitForBufferLow,
     waitForBufferedAmountLow,
+    waitForDataChannelBuffer,
+    uploadFileP2P,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
