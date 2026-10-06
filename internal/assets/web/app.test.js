@@ -17,7 +17,10 @@ describe('Gaze Web Receiver Test Suite', () => {
 
   beforeEach(() => {
     dom = new JSDOM(htmlContent, {
-      url: 'http://localhost:8080/?b=http://localhost:8080'
+      url: 'http://localhost:8080/?b=http://localhost:8080',
+      beforeParse(win) {
+        win.__BEAM_TEST_ENV__ = true;
+      }
     });
 
     window = dom.window;
@@ -747,10 +750,15 @@ describe('Gaze Web Sender Test Suite', () => {
   let window;
   let document;
   let app;
+  let fetchedURLs = [];
 
   beforeEach(() => {
+    fetchedURLs = [];
     dom = new JSDOM(htmlContent, {
-      url: 'http://localhost:8080/'
+      url: 'http://localhost:8080/',
+      beforeParse(win) {
+        win.__BEAM_TEST_ENV__ = true;
+      }
     });
 
     window = dom.window;
@@ -862,7 +870,7 @@ describe('Gaze Web Sender Test Suite', () => {
     let externalRequests = [];
     window.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
