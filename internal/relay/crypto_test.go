@@ -324,7 +324,7 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 	}
 }
 
-func TestMaxFrameSizeExceeded(t *testing.T) {
+func TestDecryptingReaderMaxFrameLengthExceeded(t *testing.T) {
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		t.Fatalf("failed to generate key: %v", err)
@@ -338,13 +338,17 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 		{name: "One Byte Over MaxFrameSize", claimLength: MaxFrameSize + 1, wantErr: ErrFrameTooLarge},
 		{name: "10MB Oversized Frame", claimLength: 10 * 1024 * 1024, wantErr: ErrFrameTooLarge},
 		{name: "Max Uint32 Oversized Frame", claimLength: 0xFFFFFFFF, wantErr: ErrFrameTooLarge},
+		{name: "1GB header value", claimLength: 1024 * 1024 * 1024, wantErr: ErrFrameTooLarge},
 		{name: "Frame Size Exactly MaxFrameSize", claimLength: MaxFrameSize, wantErr: nil},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			buf := new(bytes.Buffer)
-			binary.Write(buf, binary.BigEndian, tc.claimLength)
+			if err := binary.Write(buf, binary.BigEndian, tc.claimLength); err != nil {
+				t.Fatalf("failed to write frame length header: %v", err)
+			}
+			// Do not write actual payload data to ensure no large memory allocation/reads take place
 
 			decReader, err := NewDecryptingReader(buf, key)
 			if err != nil {
@@ -452,7 +456,7 @@ func TestFrameHeader_LessThanNonceSize_UnexpectedEOF(t *testing.T) {
 		t.Fatalf("failed to generate key: %v", err)
 	}
 
-	// Frame length = 11 bytes (GCM nonce is 12 bytes)
+	// Frame length = 11 bytes (less than MinFrameLength)
 	buf := make([]byte, 4+11)
 	binary.BigEndian.PutUint32(buf[0:4], 11)
 
@@ -463,8 +467,8 @@ func TestFrameHeader_LessThanNonceSize_UnexpectedEOF(t *testing.T) {
 
 	out := make([]byte, 64)
 	_, err = decReader.Read(out)
-	if err != io.ErrUnexpectedEOF {
-		t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+	if !errors.Is(err, ErrInvalidFrameLength) {
+		t.Fatalf("expected ErrInvalidFrameLength, got %v", err)
 	}
 }
 
