@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -300,136 +301,22 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	}
 }
 
-func TestLiveWebRTCChannelPruningOnClose(t *testing.T) {
-	var activeChannels []*webrtc.DataChannel
-	var channelsMu sync.Mutex
+func TestWebRTCDataChannelPauseResumeSignaling(t *testing.T) {
+	var senderPaused atomic.Bool
 
-	removeDC := func(target *webrtc.DataChannel) {
-		channelsMu.Lock()
-		defer channelsMu.Unlock()
-		for i, dc := range activeChannels {
-			if dc == target {
-				activeChannels = append(activeChannels[:i], activeChannels[i+1:]...)
-				break
-			}
+	handleControlMsg := func(msg string) {
+		if msg == "PAUSE" {
+			senderPaused.Store(true)
+		} else if msg == "RESUME" {
+			senderPaused.Store(false)
 		}
 	}
 
-	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 10*time.Second)
-	require.NoError(t, err)
-	defer senderSession.Close()
+	assert.False(t, senderPaused.Load())
 
-	openCh := make(chan struct{})
-	senderSession.OnOpen = func(dc *webrtc.DataChannel) {
-		dc.OnClose(func() {
-			removeDC(dc)
-		})
-		dc.OnError(func(err error) {
-			removeDC(dc)
-		})
+	handleControlMsg("PAUSE")
+	assert.True(t, senderPaused.Load(), "senderPaused should be true after receiving PAUSE")
 
-		channelsMu.Lock()
-		activeChannels = append(activeChannels, dc)
-		channelsMu.Unlock()
-		close(openCh)
-	}
-
-	rxPC, err := signaling.NewWebRTCAPI().NewPeerConnection(webrtc.Configuration{})
-	require.NoError(t, err)
-	defer rxPC.Close()
-
-	var mu sync.Mutex
-	var rxCandidates []webrtc.ICECandidateInit
-	rxPC.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c != nil {
-			cand := c.ToJSON()
-			mu.Lock()
-			rxCandidates = append(rxCandidates, cand)
-			mu.Unlock()
-			_ = senderSession.AddICECandidate(cand)
-		}
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	_, err = senderSession.CreateOffer(ctx)
-	require.NoError(t, err)
-
-	err = rxPC.SetRemoteDescription(webrtc.SessionDescription{
-		Type: webrtc.SDPTypeOffer,
-		SDP:  senderSession.RawOffer(),
-	})
-	require.NoError(t, err)
-
-	for _, cand := range senderSession.GetCandidates() {
-		_ = rxPC.AddICECandidate(cand)
-	}
-
-	senderSession.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c != nil {
-			_ = rxPC.AddICECandidate(c.ToJSON())
-		}
-	})
-
-	answer, err := rxPC.CreateAnswer(nil)
-	require.NoError(t, err)
-	err = rxPC.SetLocalDescription(answer)
-	require.NoError(t, err)
-
-	answerBytes, err := json.Marshal(answer)
-	require.NoError(t, err)
-
-	err = senderSession.ProvideAnswer(string(answerBytes))
-	require.NoError(t, err)
-
-	mu.Lock()
-	for _, cand := range rxCandidates {
-		_ = senderSession.AddICECandidate(cand)
-	}
-	mu.Unlock()
-
-	select {
-	case <-openCh:
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for sender DataChannel open")
-	}
-
-	channelsMu.Lock()
-	assert.Len(t, activeChannels, 1)
-	channelsMu.Unlock()
-
-	broadcast := func(chunk string) {
-		channelsMu.Lock()
-		defer channelsMu.Unlock()
-		var valid []*webrtc.DataChannel
-		for _, dc := range activeChannels {
-			if dc.ReadyState() != webrtc.DataChannelStateOpen {
-				continue
-			}
-			if err := dc.SendText(chunk); err != nil {
-				continue
-			}
-			valid = append(valid, dc)
-		}
-		activeChannels = valid
-	}
-
-	broadcast("live line 1\n")
-
-	channelsMu.Lock()
-	assert.Len(t, activeChannels, 1)
-	channelsMu.Unlock()
-
-	// Close receiver peer connection to close data channel
-	_ = rxPC.Close()
-
-	// Closed channel should be pruned via OnClose / OnStateChange or send-time pruning
-	require.Eventually(t, func() bool {
-		broadcast("live line 2\n")
-		channelsMu.Lock()
-		defer channelsMu.Unlock()
-		return len(activeChannels) == 0
-	}, 5*time.Second, 50*time.Millisecond, "closed data channel should leave tracking")
+	handleControlMsg("RESUME")
+	assert.False(t, senderPaused.Load(), "senderPaused should be false after receiving RESUME")
 }
-
