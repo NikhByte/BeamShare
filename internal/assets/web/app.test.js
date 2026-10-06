@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
 const pako = require('pako');
+const { webcrypto } = require('node:crypto');
 
 // Read index.html for DOM fixture
 const htmlPath = path.join(__dirname, 'index.html');
@@ -79,7 +80,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     global.localStorage = window.localStorage;
 
     // Set up global environment for app.js
-    const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
     global.crypto = webcrypto;
     global.window = window;
@@ -109,7 +109,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
     global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
@@ -465,7 +464,6 @@ describe('Gaze Web Receiver Test Suite', () => {
   });
 
   test('WebRTC Receiver AES-GCM Decryption and Chunk Queueing', async () => {
-    const { webcrypto } = require('node:crypto');
     const key = await webcrypto.subtle.generateKey(
       { name: 'AES-GCM', length: 256 },
       true,
@@ -567,7 +565,6 @@ describe('Gaze Web Receiver Test Suite', () => {
   });
 
   test('WebRTC Receiver AES-GCM Decryption with Chunk Fragmentation', async () => {
-    const { webcrypto } = require('node:crypto');
     const key = await webcrypto.subtle.generateKey(
       { name: 'AES-GCM', length: 256 },
       true,
@@ -685,7 +682,6 @@ describe('Gaze Web Sender Test Suite', () => {
     };
 
     // Node's WebCrypto
-    const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
 
     global.window = window;
@@ -1076,7 +1072,6 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     window = dom.window;
     document = window.document;
 
-    const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
 
     global.window = window;
@@ -1085,6 +1080,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     global.navigator = window.navigator;
     global.location = window.location;
     global.URLSearchParams = window.URLSearchParams;
+    global.localStorage = window.localStorage || { getItem: () => null, setItem: () => {}, removeItem: () => {} };
     global.TextDecoder = require('util').TextDecoder;
     global.FileReader = window.FileReader;
 
