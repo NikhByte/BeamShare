@@ -3473,6 +3473,57 @@ async function startWebRTC() {
 }
 
 // ── WebRTC Buffer Backpressure Helper ─────────────────────────────────────────
+function waitForDataChannelBuffer(dc, maxBufferedAmount = 1024 * 1024, targetThreshold = 512 * 1024, pollMs = 250) {
+  return new Promise((resolve, reject) => {
+    if (!dc || dc.readyState !== 'open') {
+      return reject(new Error("Data channel is closed or closing"));
+    }
+
+    if (dc.bufferedAmount <= targetThreshold) {
+      dc.bufferedAmountLowThreshold = targetThreshold;
+      return resolve();
+    }
+
+    dc.bufferedAmountLowThreshold = targetThreshold;
+
+    let intervalId = null;
+
+    const cleanup = () => {
+      if (dc && typeof dc.removeEventListener === 'function') {
+        dc.removeEventListener('bufferedamountlow', onBufferedAmountLow);
+      }
+      if (intervalId !== null) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+
+    const onBufferedAmountLow = () => {
+      cleanup();
+      resolve();
+    };
+
+    dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
+
+    if (dc.bufferedAmount <= targetThreshold) {
+      cleanup();
+      return resolve();
+    }
+
+    intervalId = setInterval(() => {
+      if (!dc || dc.readyState !== 'open') {
+        cleanup();
+        reject(new Error("Data channel is closed or closing"));
+        return;
+      }
+      if (dc.bufferedAmount <= targetThreshold) {
+        cleanup();
+        resolve();
+      }
+    }, pollMs);
+  });
+}
+
 /**
  * Helper function to wait for WebRTC DataChannel bufferedAmount to drop <= targetThreshold.
  * Attaches the 'bufferedamountlow' listener and immediately re-evaluates bufferedAmount before awaiting,
@@ -4226,7 +4277,8 @@ async function startSenderSharing() {
     });
     if (!stateRes.ok) throw new Error(`Publish state failed: HTTP ${stateRes.status}`);
 
-    const shareURL = new URL(window.location.origin);
+    const origin = (window.location && window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://localhost';
+    const shareURL = new URL(origin);
     shareURL.searchParams.set('s', senderSessionID);
     shareURL.searchParams.set('backend', backend);
     shareURL.searchParams.set('mode', 'webrtc');
@@ -4383,7 +4435,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
     while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
       if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
       if (dc.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(dc, 512 * 1024);
+        await waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -4424,7 +4476,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
   if (senderAborted) return;
 
   if (dc.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(dc, 0);
+    await waitForDataChannelBuffer(dc, 0, 0);
   }
   dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
@@ -4637,25 +4689,6 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Client-side QR Code Generator ─────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
-(function initGF256() {
-  let x = 1;
-  for (let i = 0; i < 255; i++) {
-    GF256_EXP[i] = x;
-    GF256_LOG[x] = i;
-    x <<= 1;
-    if (x & 0x100) x ^= 0x11d;
-  }
-  for (let i = 255; i < 512; i++) {
-    GF256_EXP[i] = GF256_EXP[i - 255];
-  }
-})();
-
-function gfMul(x, y) {
-  if (x === 0 || y === 0) return 0;
-  return GF256_EXP[GF256_LOG[x] + GF256_LOG[y]];
-}
 
 function rsGeneratorPoly(degree) {
   let poly = [1];
@@ -5065,6 +5098,7 @@ if (typeof module !== 'undefined' && module.exports) {
     extractKeyFragment,
     parseDecryptionKeyFromHash,
     parseSessionInput,
-    getIceServers
+    getIceServers,
+    init
   };
 }
