@@ -337,28 +337,41 @@ func TestServer_SeekingReaderCheckSessionContextCancellation(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
-func TestSession_ClosePipesClosesUploadPipes(t *testing.T) {
-	pr, pw := io.Pipe()
+func TestSession_ClosePipesClosesUploadAndDataPipes(t *testing.T) {
+	prUpload, pwUpload := io.Pipe()
+	prData, pwData := io.Pipe()
+
 	sess := &Session{
-		ID:          "test-pipe-close",
-		UploadPipeR: pr,
-		UploadPipeW: pw,
+		ID:          "test-pipes-sess",
+		UploadPipeR: prUpload,
+		UploadPipeW: pwUpload,
+		DataPipeR:   prData,
+		DataPipeW:   pwData,
 	}
 
-	testErr := fmt.Errorf("session expired")
-	sess.ClosePipes(testErr)
+	expErr := fmt.Errorf("session expired")
+	sess.ClosePipes(expErr)
 
 	sess.mu.Lock()
-	assert.Nil(t, sess.UploadPipeR, "UploadPipeR should be reset to nil")
-	assert.Nil(t, sess.UploadPipeW, "UploadPipeW should be reset to nil")
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	assert.Nil(t, sess.DataPipeR)
+	assert.Nil(t, sess.DataPipeW)
 	sess.mu.Unlock()
 
+	// Verify reader and writer operations return expected error states
 	buf := make([]byte, 10)
-	_, errRead := pr.Read(buf)
-	assert.Error(t, errRead, "Reading from closed UploadPipeR should return error")
+	_, errRead := prUpload.Read(buf)
+	assert.Error(t, errRead)
 
-	_, errWrite := pw.Write([]byte("test"))
-	assert.Error(t, errWrite, "Writing to closed UploadPipeW should return error")
+	_, errWrite := pwUpload.Write([]byte("data"))
+	assert.Error(t, errWrite)
+
+	_, errReadData := prData.Read(buf)
+	assert.Error(t, errReadData)
+
+	_, errWriteData := pwData.Write([]byte("data"))
+	assert.Error(t, errWriteData)
 }
 
 func TestServer_SessionExpirationUnblocksBlockedUpload(t *testing.T) {
@@ -428,11 +441,71 @@ func TestServer_SessionExpirationUnblocksBlockedUpload(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("Test timed out waiting for upload request to be unblocked by session expiration")
 	}
+}
+
+func TestServer_UploadPipeCleanupOnSessionExpiration(t *testing.T) {
+	// Relay server with short TTL (50ms) and fast cleanup interval (10ms)
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+	sessID := sess.ID
+
+	bodyPr, bodyPw := io.Pipe()
+
+	respStatusCh := make(chan int, 1)
+
+	// Start uploading in goroutine
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyPr)
+		if err != nil {
+			respStatusCh <- -1
+			return
+		}
+
+		writer := multipart.NewWriter(bodyPw)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+
+		go func() {
+			defer bodyPw.Close()
+			part, err := writer.CreateFormFile("file", "test.txt")
+			if err != nil {
+				return
+			}
+			// Write chunk, keep pipe writer open so handler blocks on io.Copy
+			part.Write([]byte("initial chunk data"))
+		}()
+
+		httpClient := &http.Client{}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			respStatusCh <- -1
+			return
+		}
+		resp.Body.Close()
+		respStatusCh <- resp.StatusCode
+	}()
+
+	// Wait for session to expire and sweeper to sweep it
+	assert.Eventually(t, func() bool {
+		return srv.GetSession(sessID) == nil
+	}, 2*time.Second, 10*time.Millisecond, "Session should expire and be swept")
 
 	sess.mu.Lock()
 	assert.Nil(t, sess.UploadPipeR)
 	assert.Nil(t, sess.UploadPipeW)
 	sess.mu.Unlock()
+
+	// Upload writer should unblock with HTTP 500 error due to session expiration
+	select {
+	case status := <-respStatusCh:
+		assert.Equal(t, http.StatusInternalServerError, status, "Blocked upload request should unblock with HTTP 500 InternalServerError on session expiration")
+	case <-time.After(3 * time.Second):
+		t.Fatal("Upload writer goroutine blocked indefinitely and leaked!")
+	}
 }
 
 func TestServer_ReassignUploadPipesClosesPreviousPipes(t *testing.T) {
