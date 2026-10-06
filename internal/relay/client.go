@@ -181,7 +181,10 @@ func (c *Client) Poll(ctx context.Context) (*PollCommand, error) {
 	return &cmd, nil
 }
 
-func (c *Client) validateKey() error {
+// ValidateKey checks the encryption key configuration on the Client.
+// If Key is set (len(Key) > 0), it must be exactly 32 bytes for AES-256 encryption.
+// Returns nil if no key is set (len(Key) == 0) or if the key length is 32 bytes.
+func (c *Client) ValidateKey() error {
 	if len(c.Key) > 0 && len(c.Key) != 32 {
 		return fmt.Errorf("%w: expected 32 bytes, got %d", ErrInvalidKeyLength, len(c.Key))
 	}
@@ -195,7 +198,7 @@ func (c *Client) UploadData(ctx context.Context, filePath string) error {
 
 // UploadDataAtOffset streams file data starting at a specified byte offset (for resumable transfers).
 func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset int64) error {
-	if err := c.validateKey(); err != nil {
+	if err := c.ValidateKey(); err != nil {
 		return err
 	}
 
@@ -216,7 +219,7 @@ func (c *Client) UploadDataAtOffset(ctx context.Context, filePath string, offset
 
 // UploadReaderAtOffset streams data from an io.Reader starting at a specified byte offset.
 func (c *Client) UploadReaderAtOffset(ctx context.Context, reader io.Reader, offset int64) error {
-	if err := c.validateKey(); err != nil {
+	if err := c.ValidateKey(); err != nil {
 		return err
 	}
 
