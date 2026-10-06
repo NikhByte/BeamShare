@@ -284,6 +284,11 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 
 						n, err := file.Read(buffer)
 						if n > 0 {
+							select {
+							case <-ctx.Done():
+								return
+							default:
+							}
 							chunk := make([]byte, n)
 							copy(chunk, buffer[:n])
 							errSend := dc.Send(chunk)
