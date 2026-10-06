@@ -426,4 +426,3 @@ func TestClient_InvalidKeyLength_NoHTTPRequestDispatched(t *testing.T) {
 		}
 	}
 }
-
