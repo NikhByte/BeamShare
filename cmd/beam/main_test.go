@@ -250,7 +250,14 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 					}
 
 					metaHeader := fmt.Sprintf("META:%s:%d", filepath.Base(filePath), fileSize)
-					if errSend := dc.SendText(metaHeader); errSend != nil {
+					senderMu.Lock()
+					if ctx.Err() != nil {
+						senderMu.Unlock()
+						return
+					}
+					errSend := dc.SendText(metaHeader)
+					senderMu.Unlock()
+					if errSend != nil {
 						return
 					}
 
@@ -284,9 +291,23 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 
 						n, err := file.Read(buffer)
 						if n > 0 {
+							select {
+							case <-ctx.Done():
+								return
+							default:
+							}
+
 							chunk := make([]byte, n)
 							copy(chunk, buffer[:n])
+
+							senderMu.Lock()
+							if ctx.Err() != nil {
+								senderMu.Unlock()
+								return
+							}
 							errSend := dc.Send(chunk)
+							senderMu.Unlock()
+
 							if errSend != nil {
 								return
 							}
@@ -307,11 +328,11 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 						}
 					}
 
-					if ctx.Err() != nil {
-						return
+					senderMu.Lock()
+					if ctx.Err() == nil {
+						dc.SendText("EOF")
 					}
-
-					dc.SendText("EOF")
+					senderMu.Unlock()
 				}(ctx)
 			}
 		})
