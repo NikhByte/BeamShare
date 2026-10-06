@@ -2711,6 +2711,13 @@ async function parseDecryptionKeyFromHash(hash) {
 async function startHTTPDownload() {
   if (!currentFile) return;
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.error("Failed to import decryption key", err);
+  }
+
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {
     return;
@@ -2799,7 +2806,6 @@ async function startHTTPDownload() {
 
     while (true) {
       const { done, value } = await reader.read();
-
       if (value && value.length > 0) {
         if (decryptionKey) {
           let newBuffer = new Uint8Array(encBuffer.length + value.length);
@@ -2898,6 +2904,7 @@ async function startHTTPDownload() {
     showDone(currentFile.name, currentFile.size, modeDesc);
 
   } catch (err) {
+    console.error("HTTP Download failed error:", err);
     if (err.name === 'QuotaExceededError' || err.message.includes('Quota') || (err.message && err.message.includes('disk is full'))) {
       showError("Transfer failed: Device disk is full.");
     } else {
