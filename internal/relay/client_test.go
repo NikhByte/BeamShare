@@ -355,4 +355,3 @@ func TestRelayClient_InvalidKeyLength(t *testing.T) {
 		}
 	}
 }
-
