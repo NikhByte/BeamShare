@@ -6,6 +6,7 @@
     { "source": "/static/style.css", "destination": "/style.css" },
     { "source": "/static/app.js", "destination": "/app.js" },
     { "source": "/static/pako.min.js", "destination": "/pako.min.js" },
+    { "source": "/static/qrcode.min.js", "destination": "/qrcode.min.js" },
     { "source": "/sw.js", "destination": "/sw.js" },
     { "source": "/robots.txt", "destination": "/robots.txt" },
     { "source": "/sitemap.xml", "destination": "/sitemap.xml" },
