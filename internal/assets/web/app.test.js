@@ -1177,7 +1177,7 @@ describe('WebRTC Buffer Backpressure Suite', () => {
 
     await assert.rejects(
       async () => await waitPromise,
-      { message: 'Data channel is no longer open' }
+      { message: /closed|no longer open/i }
     );
 
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);

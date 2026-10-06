@@ -3481,7 +3481,7 @@ async function startWebRTC() {
 function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
   return new Promise((resolve, reject) => {
     if (!dc || dc.readyState !== 'open') {
-      return reject(new Error("Data channel is no longer open"));
+      return reject(new Error("Data channel is closed or closing"));
     }
 
     dc.bufferedAmountLowThreshold = targetThreshold;
@@ -3520,7 +3520,7 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
     intervalId = setInterval(() => {
       if (dc.readyState !== 'open') {
         cleanup();
-        reject(new Error("Data channel is no longer open"));
+        reject(new Error("Data channel is closed or closing"));
         return;
       }
       if (dc.bufferedAmount <= targetThreshold) {
@@ -3529,6 +3529,10 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
       }
     }, pollMs);
   });
+}
+
+function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark = 512 * 1024, pollMs = 250) {
+  return waitForBufferedAmountLow(dc, lowWatermark, pollMs);
 }
 
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
@@ -3678,7 +3682,7 @@ function appendTerminalText(text) {
 }
 
 function showDone(name, size, mode) {
-  localStorage.removeItem('beam_resume');
+  try { if (typeof localStorage !== 'undefined') localStorage.removeItem('beam_resume'); } catch (_) {}
   document.getElementById('done-sub').textContent = `${name} · ${formatBytes(size)}`;
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   const speed   = formatBytes(size / (elapsed || 1)) + '/s';
@@ -4380,7 +4384,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
+    while (dc && (dc.bufferedAmount > 1024 * 1024 || senderPaused)) {
       if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
       if (dc.bufferedAmount > 1024 * 1024) {
         await waitForBufferedAmountLow(dc, 512 * 1024);
@@ -4423,7 +4427,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (dc.bufferedAmount > 0) {
+  if (dc && dc.bufferedAmount > 0) {
     await waitForBufferedAmountLow(dc, 0);
   }
   dc.send("EOF");
