@@ -1232,7 +1232,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 			sess.mu.Lock()
 			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
-				sess.closePipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new upload request"))
+				sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
 			}
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
