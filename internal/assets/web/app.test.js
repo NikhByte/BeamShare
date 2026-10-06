@@ -747,8 +747,10 @@ describe('Gaze Web Sender Test Suite', () => {
   let window;
   let document;
   let app;
+  let fetchedURLs;
 
   beforeEach(() => {
+    fetchedURLs = [];
     dom = new JSDOM(htmlContent, {
       url: 'http://localhost:8080/'
     });
@@ -792,7 +794,7 @@ describe('Gaze Web Sender Test Suite', () => {
     window.QRious = QRious;
     global.QRious = QRious;
 
-    if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
+    if (window.HTMLCanvasElement) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
         fillRect: () => {},
         clearRect: () => {},
@@ -862,7 +864,10 @@ describe('Gaze Web Sender Test Suite', () => {
     let externalRequests = [];
     window.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      if (url.includes('/poll')) {
+        return { ok: false, status: 404 };
+      }
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
