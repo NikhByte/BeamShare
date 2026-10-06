@@ -965,6 +965,22 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(key.algorithm.name, 'AES-GCM');
   });
 
+  test('parseDecryptionKeyFromHash rejects non-32-byte key length', async () => {
+    // 16-byte key in base64
+    const raw16 = new Uint8Array(16).fill(1);
+    const b64 = Buffer.from(raw16).toString('base64');
+    const encodedHash = `#k=${b64}`;
+
+    await assert.rejects(
+      async () => {
+        await app.parseDecryptionKeyFromHash(encodedHash);
+      },
+      {
+        message: /Invalid decryption key length: expected 32 bytes, got 16/
+      }
+    );
+  });
+
   test('parseSessionInput handles full URLs, relative paths, and raw session IDs/passphrases', () => {
     const origin = (typeof window !== 'undefined' && window.location && window.location.origin) 
       ? window.location.origin 

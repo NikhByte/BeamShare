@@ -1524,6 +1524,9 @@ async function parseDecryptionKeyFromHash(hash) {
   const b64 = extractKeyFragment(hash);
   if (!b64) return null;
   const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  if (raw.length !== 32) {
+    throw new Error(`Invalid decryption key length: expected 32 bytes, got ${raw.length}`);
+  }
   return await crypto.subtle.importKey(
     "raw", raw, { name: "AES-GCM" }, false, ["decrypt"]
   );
