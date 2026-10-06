@@ -94,6 +94,65 @@ const CIRCUMFERENCE   = 2 * Math.PI * 42; // SVG progress ring
 
 // ── State ──────────────────────────────────────────────────────────────────────
 let currentFile      = null;
+
+/**
+ * Waits for a WebRTC DataChannel's bufferedAmount to drop to or below targetThreshold.
+ * Combines bufferedamountlow listener, post-registration level check, and 250ms timeout fallback.
+ *
+ * @param {RTCDataChannel} dc
+ * @param {number} targetThreshold - Target bufferedAmount in bytes
+ * @param {number} timeoutMs - Timeout fallback in milliseconds (default: 250)
+ * @returns {Promise<void>}
+ */
+function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 250) {
+  if (!dc) return Promise.resolve();
+  try {
+    dc.bufferedAmountLowThreshold = targetThreshold;
+  } catch (e) {}
+
+  if (dc.bufferedAmount <= targetThreshold) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let timer = null;
+    let resolved = false;
+
+    const cleanupAndResolve = () => {
+      if (resolved) return;
+      resolved = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      try {
+        dc.removeEventListener('bufferedamountlow', listener);
+      } catch (e) {}
+      resolve();
+    };
+
+    const listener = () => {
+      cleanupAndResolve();
+    };
+
+    try {
+      dc.addEventListener('bufferedamountlow', listener);
+    } catch (e) {
+      cleanupAndResolve();
+      return;
+    }
+
+    // Immediate post-registration check in case threshold was crossed during callback setup
+    if (dc.bufferedAmount <= targetThreshold) {
+      cleanupAndResolve();
+      return;
+    }
+
+    timer = setTimeout(() => {
+      cleanupAndResolve();
+    }, timeoutMs);
+  });
+}
 let transferMode     = 'http';   // 'webrtc' | 'http'
 let startTime        = 0;
 let receivedBytes    = 0;
@@ -2189,7 +2248,7 @@ function renderFileCard(meta) {
 
 function triggerSave(blob, name) {
   const url = URL.createObjectURL(blob);
-  const a   = Object.assign(document.createElement('a'), { href: url, download: name });
+  const a   = Object.assign(document.createElement('a'), { href: url, download: name, target: '_blank', rel: 'noopener' });
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
