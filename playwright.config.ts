@@ -28,6 +28,8 @@ export default defineConfig({
             '--use-fake-device-for-media-stream',
             '--allow-insecure-localhost',
             '--disable-web-security',
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
           ],
         },
       },
