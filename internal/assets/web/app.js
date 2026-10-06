@@ -3761,8 +3761,8 @@ function initSpotlight() {
 }
 
 // ── Local QR Code Generator ───────────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
+var GF256_EXP = new Uint8Array(512);
+var GF256_LOG = new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -4637,8 +4637,8 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Client-side QR Code Generator ─────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
+var GF256_EXP = GF256_EXP || new Uint8Array(512);
+var GF256_LOG = GF256_LOG || new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -4768,8 +4768,15 @@ function getVersionBits(version) {
 }
 
 function generateQRCodeSVG(text) {
-  const utf8Encoder = new (typeof TextEncoder !== 'undefined' ? TextEncoder : require('util').TextEncoder)();
-  const textBytes = utf8Encoder.encode(text);
+  let textBytes;
+  if (typeof TextEncoder !== 'undefined') {
+    textBytes = new TextEncoder().encode(text);
+  } else if (typeof require === 'function') {
+    textBytes = new (require('util').TextEncoder)().encode(text);
+  } else {
+    textBytes = new Uint8Array(text.length);
+    for (let i = 0; i < text.length; i++) textBytes[i] = text.charCodeAt(i) & 0xff;
+  }
   
   let ver = 1;
   while (ver <= 40) {
@@ -5033,6 +5040,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     uploadFileP2P,
