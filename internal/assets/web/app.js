@@ -3333,116 +3333,40 @@ async function startWebRTC() {
       });
 
       encBuffer = new Uint8Array(0);
-      let decryptChain = Promise.resolve();
+      let msgChain = Promise.resolve();
 
       dc.onmessage = (e) => {
-        if (decryptionKey) {
-          decryptChain = decryptChain.then(async () => {
-            if (typeof e.data === 'string') {
-              if (e.data === "EOF") {
-                chunkQueue.enqueueEOF();
-                try {
-                  await chunkQueue.drain();
-                  if (diskWritableStream) {
-                    await diskWritableStream.close();
-                    if (useOPFS) {
-                      const file = await diskFileHandle.getFile();
-                      const buffer = await file.arrayBuffer();
-                      const blob = new Blob([buffer], { type: currentFile ? currentFile.mime : file.type });
-                      try { const root = await navigator.storage.getDirectory(); await root.removeEntry(diskFileHandle.name); } catch(e){}
-                      triggerSave(blob, currentFile.name);
-                    }
-                  } else if (swPipePort) {
-                    swPipePort.postMessage("EOF");
-                  } else {
-                    let finalBlob;
-                    if (useIndexedDB) {
-                      finalBlob = await getAllChunksIDB(currentFile.mime);
-                      await clearIDB();
-                    } else {
-                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                    }
-                    triggerSave(finalBlob, currentFile.name);
-                  }
-                  resolve();
-                } catch (err) {
-                  hasError = true;
-                  // Handled in chunkQueue onError callback
+        if (typeof e.data === 'string') {
+          if (e.data === "EOF") {
+            chunkQueue.enqueueEOF();
+            chunkQueue.drain().then(async () => {
+              if (diskWritableStream) {
+                await diskWritableStream.close();
+                if (useOPFS) {
+                  const file = await diskFileHandle.getFile();
+                  const buffer = await file.arrayBuffer();
+                  const blob = new Blob([buffer], { type: currentFile ? currentFile.mime : file.type });
+                  try { const root = await navigator.storage.getDirectory(); await root.removeEntry(diskFileHandle.name); } catch(e){}
+                  triggerSave(blob, currentFile.name);
                 }
-              }
-              return;
-            }
-
-            const value = new Uint8Array(e.data);
-            let newBuffer = new Uint8Array(encBuffer.length + value.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(value, encBuffer.length);
-            encBuffer = newBuffer;
-
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-              const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
-
-                const nonce = new Uint8Array(frame.subarray(0, 12));
-                const ciphertext = new Uint8Array(frame.subarray(12));
-                const decrypted = await crypto.subtle.decrypt(
-                  { name: "AES-GCM", iv: nonce },
-                  decryptionKey,
-                  ciphertext
-                );
-                const decValue = new Uint8Array(decrypted);
-                chunkQueue.enqueue(decValue);
+              } else if (swPipePort) {
+                swPipePort.postMessage("EOF");
               } else {
-                break;
+                let finalBlob;
+                if (useIndexedDB) {
+                  finalBlob = await getAllChunksIDB(currentFile.mime);
+                  await clearIDB();
+                } else {
+                  finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
+                }
+                triggerSave(finalBlob, currentFile.name);
               }
-            }
-          }).catch((err) => {
-            showError(`Transfer failed: ${err.message}`);
-            dc.close();
-            reject(err);
-          });
-        } else {
-          try {
-            if (typeof e.data === 'string') {
-              if (e.data === "EOF") {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
-                  if (diskWritableStream) {
-                    await diskWritableStream.close();
-                    if (useOPFS) {
-                      const file = await diskFileHandle.getFile();
-                      triggerSave(file, currentFile.name);
-                    }
-                  } else if (swPipePort) {
-                    swPipePort.postMessage("EOF");
-                  } else {
-                    let finalBlob;
-                    if (useIndexedDB) {
-                      finalBlob = await getAllChunksIDB(currentFile.mime);
-                      await clearIDB();
-                    } else {
-                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                    }
-                    triggerSave(finalBlob, currentFile.name);
-                  }
-                  resolve();
-                }).catch((err) => {
-                  // Handled in chunkQueue onError callback
-                });
-              }
-              return;
-            }
-
-            const chunk = new Uint8Array(e.data);
-            chunkQueue.enqueue(chunk);
-          } catch (err) {
-            showError(`Transfer failed: ${err.message}`);
-            dc.close();
-            reject(err);
+              resolve();
+            }).catch((err) => {
+              // Handled in chunkQueue onError callback
+            });
           }
+          return;
         }
 
         const chunk = new Uint8Array(e.data);
@@ -3516,10 +3440,10 @@ async function startWebRTC() {
  * Attaches the 'bufferedamountlow' listener and immediately re-evaluates bufferedAmount before awaiting,
  * supplemented by a polling fallback to prevent race conditions during buffer drains.
  */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
+function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 250) {
   return new Promise((resolve, reject) => {
     if (!dc || dc.readyState !== 'open') {
-      return reject(new Error("Data channel is no longer open"));
+      return reject(new Error("Data channel is closed or closing"));
     }
 
     dc.bufferedAmountLowThreshold = targetThreshold;
@@ -3558,7 +3482,7 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
     intervalId = setInterval(() => {
       if (dc.readyState !== 'open') {
         cleanup();
-        reject(new Error("Data channel is no longer open"));
+        reject(new Error("Data channel is closed or closing"));
         return;
       }
       if (dc.bufferedAmount <= targetThreshold) {
@@ -3567,6 +3491,10 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
       }
     }, pollMs);
   });
+}
+
+function waitForDataChannelBuffer(dc, maxAmount = 1024 * 1024, targetThreshold = 512 * 1024) {
+  return waitForBufferedAmountLow(dc, targetThreshold);
 }
 
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
@@ -4418,8 +4346,8 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+    while ((dc && dc.bufferedAmount > 1024 * 1024) || senderPaused) {
+      if (!dc || dc.readyState !== 'open') throw new Error("Data channel is no longer open");
       if (dc.bufferedAmount > 1024 * 1024) {
         await waitForBufferedAmountLow(dc, 512 * 1024);
       } else if (senderPaused) {
@@ -4461,10 +4389,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (dc.bufferedAmount > 0) {
+  if (dc && dc.bufferedAmount > 0) {
     await waitForBufferedAmountLow(dc, 0);
   }
-  dc.send("EOF");
+  if (dc) dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
@@ -5068,7 +4996,6 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
   const targetThreshold = (typeof lowWatermark === 'number') ? lowWatermark : highWatermark;
   return waitForBufferedAmountLow(dc, targetThreshold, pollMs);
 }
-
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     waitForBufferedAmountLow,
@@ -5093,7 +5020,6 @@ if (typeof module !== 'undefined' && module.exports) {
     resetState,
     stripAnsi,
     parseAnsiToHtml,
-    renderQRCode,
     handleSenderFileSelect,
     startSenderSharing,
     get_senderEncryptionKey: () => senderEncryptionKey,

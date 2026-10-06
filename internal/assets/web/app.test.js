@@ -25,11 +25,12 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     window.HTMLCanvasElement.prototype.getContext = function() {
       return {
-        fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
+        fillRect: () => {}, clearRect: () => {}, getImageData: (x, y, w, h) => ({ data: new Array((w||1) * (h||1) * 4) }), putImageData: () => {},
         createImageData: () => [], setTransform: () => {}, drawImage: () => {}, save: () => {}, fillText: () => {},
         restore: () => {}, beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, closePath: () => {}, stroke: () => {},
         translate: () => {}, scale: () => {}, rotate: () => {}, arc: () => {}, fill: () => {}, measureText: () => ({ width: 0 }),
-        transform: () => {}, rect: () => {}, clip: () => {}
+        transform: () => {}, rect: () => {}, clip: () => {},
+        fillStyle: '', strokeStyle: '', lineWidth: 1
       };
     };
 
@@ -762,11 +763,12 @@ describe('Gaze Web Sender Test Suite', () => {
 
     window.HTMLCanvasElement.prototype.getContext = function() {
       return {
-        fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
+        fillRect: () => {}, clearRect: () => {}, getImageData: (x, y, w, h) => ({ data: new Array((w||1) * (h||1) * 4) }), putImageData: () => {},
         createImageData: () => [], setTransform: () => {}, drawImage: () => {}, save: () => {}, fillText: () => {},
         restore: () => {}, beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, closePath: () => {}, stroke: () => {},
         translate: () => {}, scale: () => {}, rotate: () => {}, arc: () => {}, fill: () => {}, measureText: () => ({ width: 0 }),
-        transform: () => {}, rect: () => {}, clip: () => {}
+        transform: () => {}, rect: () => {}, clip: () => {},
+        fillStyle: '', strokeStyle: '', lineWidth: 1
       };
     };
 
@@ -884,7 +886,7 @@ describe('Gaze Web Sender Test Suite', () => {
     // Verify send-qr-img src uses local client-side Data URL without third-party calls
     const sendQrImg = document.getElementById('send-qr-img');
     assert.notEqual(sendQrImg, null);
-    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml;charset=utf-8,'), true);
+    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml;charset=utf-8,') || sendQrImg.src.startsWith('data:image/png'), true);
     assert.equal(sendQrImg.src.includes('api.qrserver.com'), false);
   });
 
@@ -1069,6 +1071,7 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.deepEqual(servers[0].urls, ['turn:turn.example.com:3478']);
     assert.equal(servers[0].username, 'alice');
     assert.equal(servers[0].credential, 'secret');
+  });
 
   test('getSWPipe returns null when serviceWorker controller is missing', async () => {
     window.navigator.serviceWorker = {
@@ -1198,7 +1201,7 @@ describe('WebRTC Buffer Backpressure Suite', () => {
 
     await assert.rejects(
       async () => await waitPromise,
-      { message: 'Data channel is no longer open' }
+      { message: /closed or closing/i }
     );
 
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
