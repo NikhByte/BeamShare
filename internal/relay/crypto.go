@@ -6,12 +6,19 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 )
 
-const MaxFrameSize = 65564
+// MaxFrameSize is the maximum allowable payload size for an encrypted frame (1MB).
+const MaxFrameSize = 1 * 1024 * 1024
 
-var ErrFrameTooLarge = errors.New("frame payload size exceeds maximum threshold")
+var (
+	// ErrFrameTooLarge is returned when a frame length header exceeds MaxFrameSize.
+	ErrFrameTooLarge = errors.New("frame size exceeds maximum limit")
+	// ErrMaxFrameSizeExceeded is an alias for ErrFrameTooLarge.
+	ErrMaxFrameSizeExceeded = ErrFrameTooLarge
+)
 
 type EncryptingReader struct {
 	r     io.Reader
@@ -21,6 +28,9 @@ type EncryptingReader struct {
 }
 
 func NewEncryptingReader(r io.Reader, key []byte) (*EncryptingReader, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d bytes", len(key))
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -71,15 +81,18 @@ func (er *EncryptingReader) Read(p []byte) (int, error) {
 }
 
 type DecryptingReader struct {
-	r        io.Reader
-	gcm      cipher.AEAD
-	buf      []byte
-	rawBuf   []byte
-	plainBuf []byte
-	header   [4]byte
+	r            io.Reader
+	gcm          cipher.AEAD
+	buf          []byte
+	frameBuf     []byte
+	plaintextBuf []byte
+	headerBuf    [4]byte
 }
 
 func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d bytes", len(key))
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -89,10 +102,10 @@ func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
 		return nil, err
 	}
 	return &DecryptingReader{
-		r:        r,
-		gcm:      gcm,
-		rawBuf:   make([]byte, MaxFrameSize),
-		plainBuf: make([]byte, MaxFrameSize),
+		r:            r,
+		gcm:          gcm,
+		frameBuf:     make([]byte, MaxFrameSize),
+		plaintextBuf: make([]byte, MaxFrameSize),
 	}, nil
 }
 
@@ -106,10 +119,10 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 		return n, nil
 	}
 
-	if _, err := io.ReadFull(dr.r, dr.header[:]); err != nil {
+	if _, err := io.ReadFull(dr.r, dr.headerBuf[:]); err != nil {
 		return 0, err
 	}
-	length := binary.BigEndian.Uint32(dr.header[:])
+	length := binary.BigEndian.Uint32(dr.headerBuf[:])
 
 	if length > MaxFrameSize {
 		return 0, ErrFrameTooLarge
@@ -120,7 +133,7 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 		return 0, io.ErrUnexpectedEOF
 	}
 
-	frameData := dr.rawBuf[:length]
+	frameData := dr.frameBuf[:length]
 	if _, err := io.ReadFull(dr.r, frameData); err != nil {
 		return 0, err
 	}
@@ -128,7 +141,7 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 	nonce := frameData[:nonceSize]
 	ciphertext := frameData[nonceSize:]
 
-	plaintext, err := dr.gcm.Open(dr.plainBuf[:0], nonce, ciphertext, nil)
+	plaintext, err := dr.gcm.Open(dr.plaintextBuf[:0], nonce, ciphertext, nil)
 	if err != nil {
 		return 0, err
 	}
