@@ -1,5 +1,5 @@
 // ── Client-side QR Code Generator Engine (Zero Network Dependencies) ──────
-const qrcodegen = (function() {
+var qrcodegen = (function() {
 	function QrCode(version, errorCorrectionLevel, dataCodewords, msk) {
 		if (version < QrCode.MIN_VERSION || version > QrCode.MAX_VERSION)
 			throw new RangeError("Version value out of range");
@@ -394,74 +394,7 @@ const qrcodegen = (function() {
 	return { QrCode };
 })();
 
-function renderQRCode(text, targetElement, options = {}) {
-  if (!text || !targetElement) return;
-  const cellSize = options.cellSize || 4;
-  const margin = options.margin !== undefined ? options.margin : 4;
-  const qr = qrcodegen.QrCode.encodeText(text, qrcodegen.QrCode.Ecc.MEDIUM);
-  const count = qr.size;
-  const size = (count + margin * 2) * cellSize;
 
-  const tag = targetElement.tagName ? targetElement.tagName.toLowerCase() : '';
-
-  if (tag === 'canvas') {
-    targetElement.width = size;
-    targetElement.height = size;
-    const ctx = targetElement.getContext ? targetElement.getContext('2d') : null;
-    if (ctx) {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, size, size);
-      ctx.fillStyle = '#000000';
-      for (let y = 0; y < count; y++) {
-        for (let x = 0; x < count; x++) {
-          if (qr.getModule(x, y)) {
-            ctx.fillRect((x + margin) * cellSize, (y + margin) * cellSize, cellSize, cellSize);
-          }
-        }
-      }
-    }
-  } else if (tag === 'svg') {
-    targetElement.setAttribute('viewBox', `0 0 ${size} ${size}`);
-    targetElement.setAttribute('width', size);
-    targetElement.setAttribute('height', size);
-    const pathParts = [];
-    for (let y = 0; y < count; y++) {
-      for (let x = 0; x < count; x++) {
-        if (qr.getModule(x, y)) {
-          const px = (x + margin) * cellSize;
-          const py = (y + margin) * cellSize;
-          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
-        }
-      }
-    }
-    targetElement.innerHTML = `<rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/>`;
-  } else if (tag === 'img') {
-    const pathParts = [];
-    for (let y = 0; y < count; y++) {
-      for (let x = 0; x < count; x++) {
-        if (qr.getModule(x, y)) {
-          const px = (x + margin) * cellSize;
-          const py = (y + margin) * cellSize;
-          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
-        }
-      }
-    }
-    const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/></svg>`;
-    targetElement.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
-  } else {
-    const pathParts = [];
-    for (let y = 0; y < count; y++) {
-      for (let x = 0; x < count; x++) {
-        if (qr.getModule(x, y)) {
-          const px = (x + margin) * cellSize;
-          const py = (y + margin) * cellSize;
-          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
-        }
-      }
-    }
-    targetElement.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/></svg>`;
-  }
-}
 
 function renderQRElements(url, canvasId, imgId) {
   const canvasEl = document.getElementById(canvasId);
@@ -1146,7 +1079,21 @@ function qrToSvgDataUrl(qr, border = 4) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
-function renderQRCode(element, text, options = {}) {
+function renderQRCode(arg1, arg2, options = {}) {
+  let element, text;
+  if (typeof arg1 === 'string' && typeof arg2 === 'object' && arg2 !== null) {
+    text = arg1;
+    element = arg2;
+  } else if (typeof arg2 === 'string' && typeof arg1 === 'object' && arg1 !== null) {
+    text = arg2;
+    element = arg1;
+  } else if (typeof arg1 === 'string' && typeof arg2 === 'string') {
+    element = document.getElementById(arg1) || document.getElementById(arg2);
+    text = (element && element.id === arg1) ? arg2 : arg1;
+  } else {
+    element = arg1;
+    text = arg2;
+  }
   if (!element) return;
   try {
     if (!text) {
@@ -1166,6 +1113,7 @@ function renderQRCode(element, text, options = {}) {
       try {
         const dataUrl = qrToSvgDataUrl(qr, options.border !== undefined ? options.border : 4);
         element.src = dataUrl;
+        element.setAttribute('src', dataUrl);
         element.alt = options.alt || "QR Code for share URL";
       } catch (renderErr) {
         showQRError(element, "Failed to render QR image");
@@ -1175,6 +1123,26 @@ function renderQRCode(element, text, options = {}) {
         renderQRToCanvas(qr, element, options.border !== undefined ? options.border : 4);
       } catch (canvasErr) {
         showQRError(element, "Canvas QR rendering failed");
+      }
+    } else if (tagName === 'svg') {
+      try {
+        const border = options.border !== undefined ? options.border : 4;
+        const totalSize = qr.size + border * 2;
+        element.setAttribute('viewBox', '0 0 ' + totalSize + ' ' + totalSize);
+        element.setAttribute('width', '100%');
+        element.setAttribute('height', '100%');
+        element.setAttribute('shape-rendering', 'crispEdges');
+        let pathStr = '';
+        for (let y = 0; y < qr.size; y++) {
+          for (let x = 0; x < qr.size; x++) {
+            if (qr.getModule(x, y)) {
+              pathStr += 'M' + (x + border) + ',' + (y + border) + 'h1v1h-1z ';
+            }
+          }
+        }
+        element.innerHTML = '<rect width="' + totalSize + '" height="' + totalSize + '" fill="#ffffff"/><path d="' + pathStr + '" fill="#000000"/>';
+      } catch (err) {
+        showQRError(element, "Failed to render QR SVG");
       }
     } else {
       try {
@@ -3226,16 +3194,6 @@ async function startWebRTC() {
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
 
-    let decryptionKey = null;
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch (e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      pc.close();
-      return;
-    }
-
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
       if (dc.readyState === 'open') {
@@ -3345,43 +3303,8 @@ async function startWebRTC() {
             if (typeof e.data === 'string') {
               if (e.data === "EOF") {
                 chunkQueue.enqueueEOF();
-                await chunkQueue.drain();
-                if (diskWritableStream) {
-                  await diskWritableStream.close();
-                  if (useOPFS) {
-                    const file = await diskFileHandle.getFile();
-                    triggerSave(file, currentFile.name);
-                  }
-                  chunkQueue.enqueueEOF();
-                  try {
-                    await chunkQueue.drain();
-                    if (diskWritableStream) {
-                      await diskWritableStream.close();
-                      if (useOPFS) {
-                        const file = await diskFileHandle.getFile();
-                        triggerSave(file, currentFile.name);
-                      }
-                    } else if (swPipePort) {
-                      swPipePort.postMessage("EOF");
-                    } else {
-                      let finalBlob;
-                      if (useIndexedDB) {
-                        finalBlob = await getAllChunksIDB(currentFile.mime);
-                        await clearIDB();
-                      } else {
-                        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                      }
-                      triggerSave(finalBlob, currentFile.name);
-                    }
-                    resolve();
-                  } catch (err) {
-                    hasError = true;
-                    // Handled in chunkQueue onError callback
-                  }
-                });
-              } else {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
+                try {
+                  await chunkQueue.drain();
                   if (diskWritableStream) {
                     await diskWritableStream.close();
                     if (useOPFS) {
@@ -3400,9 +3323,11 @@ async function startWebRTC() {
                     }
                     triggerSave(finalBlob, currentFile.name);
                   }
-                  triggerSave(finalBlob, currentFile.name);
+                  resolve();
+                } catch (err) {
+                  hasError = true;
+                  // Handled in chunkQueue onError callback
                 }
-                resolve();
               }
               return;
             }
@@ -4013,7 +3938,7 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    renderQRElements(shareURL.href, 'send-qr-canvas', 'send-qr-img');
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -4406,30 +4331,32 @@ if (typeof window !== 'undefined') {
 
 // ── Local Client-Side QR Generation ───────────────────────────────────────────
 function generateQRCodeDataURL(text, options) {
+  if (typeof window !== 'undefined' && typeof window.generateQRCodeSVGDataURL === 'function') {
+    return window.generateQRCodeSVGDataURL(text, options);
+  }
+  if (typeof globalThis !== 'undefined' && typeof globalThis.generateQRCodeSVGDataURL === 'function') {
+    return globalThis.generateQRCodeSVGDataURL(text, options);
+  }
   if (typeof QRCode !== 'undefined' && QRCode.generateQRCodeDataURL) {
     return QRCode.generateQRCodeDataURL(text, options);
   }
   if (typeof require === 'function') {
     try {
       const qrcodeLib = require('./qrcode.min.js');
-      if (qrcodeLib && qrcodeLib.generateQRCodeDataURL) {
-        return qrcodeLib.generateQRCodeDataURL(text, options);
+      if (qrcodeLib) {
+        if (typeof qrcodeLib.generateQRCodeSVGDataURL === 'function') {
+          return qrcodeLib.generateQRCodeSVGDataURL(text, options);
+        }
+        if (typeof qrcodeLib.generateQRCodeDataURL === 'function') {
+          return qrcodeLib.generateQRCodeDataURL(text, options);
+        }
       }
     } catch (e) {}
   }
   throw new Error("Client-side QR generator unavailable");
 }
 
-function renderQRCode(elementOrId, url) {
-  const img = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
-  if (!img) return;
-  try {
-    const dataUrl = generateQRCodeDataURL(url);
-    img.src = dataUrl;
-  } catch (err) {
-    console.error("Failed to generate QR code client-side");
-  }
-}
+
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
