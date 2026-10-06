@@ -715,6 +715,103 @@ func TestConcurrentMetaDownloadUpdateSharedFile(t *testing.T) {
 	wg.Wait()
 }
 
+func TestConcurrentMetaDownloadUpdateSharedFile_Race(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	file1Path := filepath.Join(tmpDir, "file1.txt")
+	file2Path := filepath.Join(tmpDir, "file2.pdf")
+	file1Content := []byte("Hello World File 1 Data")
+	file2Content := []byte("Hello World File 2 Data PDF format")
+
+	require.NoError(t, os.WriteFile(file1Path, file1Content, 0644))
+	require.NoError(t, os.WriteFile(file2Path, file2Content, 0644))
+
+	srv, err := New(file1Path, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	stopCh := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Concurrently query /api/meta
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client := ts.Client()
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					resp, err := client.Get(ts.URL + "/api/meta")
+					if err == nil {
+						assert.Equal(t, http.StatusOK, resp.StatusCode)
+						assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+						var meta FileMeta
+						assert.NoError(t, json.NewDecoder(resp.Body).Decode(&meta))
+						resp.Body.Close()
+					}
+				}
+			}
+		}()
+	}
+
+	// Concurrently query /api/download
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client := ts.Client()
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					resp, err := client.Get(ts.URL + "/api/download")
+					if err == nil {
+						assert.Equal(t, http.StatusOK, resp.StatusCode)
+						body, err := io.ReadAll(resp.Body)
+						resp.Body.Close()
+						assert.NoError(t, err)
+						assert.NotEmpty(t, body)
+					}
+				}
+			}
+		}()
+	}
+
+	// Concurrently mutate state via UpdateSharedFile
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			toggle := false
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					if toggle {
+						srv.UpdateSharedFile(file1Path, "file1.txt", int64(len(file1Content)))
+					} else {
+						srv.UpdateSharedFile(file2Path, "file2.pdf", int64(len(file2Content)))
+					}
+					toggle = !toggle
+					time.Sleep(2 * time.Millisecond)
+				}
+			}
+		}(i)
+	}
+
+	// Run stress test for 500 milliseconds
+	time.Sleep(500 * time.Millisecond)
+	close(stopCh)
+	wg.Wait()
+}
+
 func TestConcurrentMetaAndDownloadDuringUpload(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "test.bin")
