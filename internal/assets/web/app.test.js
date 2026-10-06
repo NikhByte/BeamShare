@@ -138,6 +138,9 @@ describe('Gaze Web Receiver Test Suite', () => {
     global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
     window.atob = global.atob;
     window.btoa = global.btoa;
+    if (typeof global.MessageChannel !== 'undefined') {
+      window.MessageChannel = global.MessageChannel;
+    }
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
     const QRious = require('./qrious.min.js');
     window.QRious = QRious;

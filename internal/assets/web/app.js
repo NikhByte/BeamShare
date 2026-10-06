@@ -1717,6 +1717,7 @@ async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
 
   try {
+    let cancelTimeout;
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 10000));
     const reg = await Promise.race([swReady, timeout]);
