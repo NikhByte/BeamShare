@@ -320,4 +320,3 @@ func TestWebRTCDataChannelPauseResumeSignaling(t *testing.T) {
 	handleControlMsg("RESUME")
 	assert.False(t, senderPaused.Load(), "senderPaused should be false after receiving RESUME")
 }
-

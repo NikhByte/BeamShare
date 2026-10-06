@@ -60,14 +60,14 @@ type Signaler interface {
 
 // Session holds the state of one WebRTC sender session.
 type Session struct {
-	pc          *webrtc.PeerConnection
-	dc          *webrtc.DataChannel
-	offerSDP    string // compressed+b64 for QR encoding
-	rawOffer    string // full SDP text
-	answerReady chan struct{}
-	candidates  []webrtc.ICECandidateInit
-	mu          sync.Mutex
-	iceServers  []webrtc.ICEServer
+	pc               *webrtc.PeerConnection
+	dc               *webrtc.DataChannel
+	offerSDP         string // compressed+b64 for QR encoding
+	rawOffer         string // full SDP text
+	answerReady      chan struct{}
+	candidates       []webrtc.ICECandidateInit
+	mu               sync.Mutex
+	iceServers       []webrtc.ICEServer
 	discoveryTimeout time.Duration
 
 	// OnOpen is called when the data channel is open and ready to send.
@@ -87,9 +87,9 @@ func NewSession(iceServers []webrtc.ICEServer, discoveryTimeout time.Duration) (
 	}
 
 	s := &Session{
-		pc:          pc,
-		answerReady: make(chan struct{}, 1),
-		iceServers:  iceServers,
+		pc:               pc,
+		answerReady:      make(chan struct{}, 1),
+		iceServers:       iceServers,
 		discoveryTimeout: discoveryTimeout,
 	}
 

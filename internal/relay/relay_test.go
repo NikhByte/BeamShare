@@ -1040,6 +1040,3 @@ func TestRelayServer_HandleQR(t *testing.T) {
 	require.True(t, len(pngData) >= 8)
 	assert.Equal(t, []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, pngData[:8])
 }
-
-
-

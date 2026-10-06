@@ -90,7 +90,7 @@ func TestBroadcaster_NoActiveInterfaces(t *testing.T) {
 func TestFilterInterfaces(t *testing.T) {
 	lo := net.Interface{Name: "lo", Flags: net.FlagUp | net.FlagLoopback | net.FlagMulticast}
 	downIface := net.Interface{Name: "eth0", Flags: net.FlagMulticast} // not UP
-	noMulticast := net.Interface{Name: "eth1", Flags: net.FlagUp}        // no multicast
+	noMulticast := net.Interface{Name: "eth1", Flags: net.FlagUp}      // no multicast
 	noAddrs := net.Interface{Name: "eth2", Flags: net.FlagUp | net.FlagMulticast}
 	validIface := net.Interface{Name: "eth3", Flags: net.FlagUp | net.FlagMulticast}
 
