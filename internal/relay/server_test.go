@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -324,4 +325,92 @@ func TestServer_SeekingReaderCheckSessionContextCancellation(t *testing.T) {
 	n, err := sr.Read(buf)
 	assert.Equal(t, 0, n)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestServer_UploadPipeTransferTimeout(t *testing.T) {
+	srv := NewServer()
+	srv.UploadTimeout = 50 * time.Millisecond
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sessID, err := client.Register(ctx)
+	require.NoError(t, err)
+
+	bodyPr, bodyPw := io.Pipe()
+	writer := multipart.NewWriter(bodyPw)
+
+	go func() {
+		defer bodyPw.Close()
+		part, err := writer.CreateFormFile("file", "timeout.txt")
+		if err != nil {
+			return
+		}
+		// Write initial chunk
+		_, _ = part.Write([]byte("initial chunk"))
+		// Do not close writer or send more data - simulate network stall / receiver no-read
+		select {
+		case <-ctx.Done():
+		case <-time.After(500 * time.Millisecond):
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/api/upload?s="+sessID, bodyPr)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	start := time.Now()
+	resp, errDo := http.DefaultClient.Do(req)
+	elapsed := time.Since(start)
+
+	require.NoError(t, errDo)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assert.Less(t, elapsed, 1*time.Second, "Upload write timeout should occur promptly")
+}
+
+func TestServer_RateLimiterBackgroundSweeper(t *testing.T) {
+	srv := NewServerWithConfig(1*time.Hour, 20*time.Millisecond)
+	defer srv.Stop()
+
+	// Record failed attempts for two IPs
+	srv.recordFailedAttempt("192.0.2.1")
+	srv.recordFailedAttempt("192.0.2.2")
+
+	srv.failedAttemptsMu.Lock()
+	// Manually age 192.0.2.1 past 1 minute
+	if fa, ok := srv.failedAttempts["192.0.2.1"]; ok {
+		fa.firstSeen = time.Now().Add(-2 * time.Minute)
+	}
+	srv.failedAttemptsMu.Unlock()
+
+	// Direct call test
+	srv.SweepExpiredIPs()
+
+	srv.failedAttemptsMu.Lock()
+	_, existsStale := srv.failedAttempts["192.0.2.1"]
+	_, existsFresh := srv.failedAttempts["192.0.2.2"]
+	srv.failedAttemptsMu.Unlock()
+
+	assert.False(t, existsStale, "Stale IP should be evicted by SweepExpiredIPs")
+	assert.True(t, existsFresh, "Fresh IP should remain in rate limiter map")
+
+	// Test automatic sweeper tick
+	srv.failedAttemptsMu.Lock()
+	if fa, ok := srv.failedAttempts["192.0.2.2"]; ok {
+		fa.firstSeen = time.Now().Add(-2 * time.Minute)
+	}
+	srv.failedAttemptsMu.Unlock()
+
+	assert.Eventually(t, func() bool {
+		srv.failedAttemptsMu.Lock()
+		defer srv.failedAttemptsMu.Unlock()
+		return len(srv.failedAttempts) == 0
+	}, 2*time.Second, 10*time.Millisecond, "Background ticker sweeper should purge stale rate limit records")
 }
