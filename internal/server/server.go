@@ -91,6 +91,7 @@ func New(filePath string, bufferSize int) (*Server, error) {
 	mux.HandleFunc("/sitemap.xml", assets.SitemapXMLHandler)
 	mux.HandleFunc("/api/meta", s.handleMeta)
 	mux.HandleFunc("/api/download", s.handleDownload)
+	mux.HandleFunc("/sw-download-pipe/", s.handleDownload)
 	mux.HandleFunc("/api/upload", s.handleUpload)
 	mux.HandleFunc("/api/qr", s.handleQR)
 

@@ -2194,6 +2194,13 @@ function setMode(mode, label) {
 async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
 
+  // WebKit (Safari / Mobile Safari) does not reliably route iframe navigations through SW fetch handlers
+  const isWebKit = typeof navigator !== 'undefined' && (/AppleWebKit/i.test(navigator.userAgent) && !/Chrome|Chromium|Edg|Firefox/i.test(navigator.userAgent));
+  if (isWebKit) {
+    console.warn("Service Worker iframe pipe not supported in WebKit; bypassing SW pipe.");
+    return null;
+  }
+
   try {
     let cancelTimeout;
     const swReady = navigator.serviceWorker.ready;
@@ -2259,8 +2266,8 @@ async function getSWPipe(fileMeta) {
 
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
-    iframe.src = swUrl;
     document.body.appendChild(iframe);
+    iframe.src = swUrl;
 
     setTimeout(() => {
       try { iframe.remove(); } catch (_) {}
@@ -2815,15 +2822,7 @@ async function startHTTPDownload() {
 
     const reader = res.body.getReader();
     let received = initialOffset;
-    let decryptionKey = null;
     let encBuffer = new Uint8Array(0);
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch(e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      return;
-    }
 
     while (true) {
       const { done, value } = await reader.read();
