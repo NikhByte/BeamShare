@@ -1,15 +1,10 @@
 package relay
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
