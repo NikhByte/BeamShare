@@ -221,6 +221,9 @@ describe('Gaze Web Receiver Test Suite', () => {
       } catch (e) {}
     }
 
+    window.fetch = async () => ({ ok: true, json: async () => ({ name: 'test', size: 100 }) });
+    global.fetch = window.fetch;
+
     app.init();
 
     assert.equal(document.documentElement.getAttribute('data-sw-ready'), null);
@@ -862,8 +865,12 @@ describe('Gaze Web Sender Test Suite', () => {
     let externalRequests = [];
     window.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      if (url.toString().includes('/poll')) {
+        return { ok: false, status: 404 };
+      }
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
+    global.fetch = window.fetch;
 
     await app.startSenderSharing();
 
