@@ -2714,6 +2714,11 @@ async function startHTTPDownload() {
   receivedBytes = 0;
   totalBytes    = currentFile.size;
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (e) {}
+
   // Try to use FileSystem API for streaming to disk if supported
   const useDiskStream = typeof window.showSaveFilePicker === 'function';
   const opfsSupported = !!(navigator.storage && navigator.storage.getDirectory);
