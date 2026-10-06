@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/beamshare/beam/internal/fileutil"
 	"github.com/beamshare/beam/internal/mdns"
 	"github.com/beamshare/beam/internal/p2p"
 	"github.com/beamshare/beam/internal/relay"
@@ -452,15 +453,14 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								fmt.Println("  ✅ Relay Transfer Complete!")
 							}
 						} else if cmd.Action == "upload" {
-							sanitizedFilename := sanitizeFilename(cmd.Filename)
-							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", sanitizedFilename)
+							cleanBase := fileutil.SanitizeReceivedFilename(cmd.Filename, "upload.bin")
+							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", cleanBase)
 							rc, err := relClient.DownloadData()
 							if err != nil {
 								fmt.Printf("  Error downloading from relay: %v\n", err)
 								continue
 							}
 
-							cleanBase := server.SanitizeFilename(cmd.Filename, "upload.bin")
 							outName := "received_" + cleanBase
 							outFile, err := os.Create(outName)
 							if err != nil {
@@ -553,7 +553,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								name := parts[1]
 								size, _ := strconv.ParseInt(parts[2], 10, 64)
 
-								cleanBase := server.SanitizeFilename(name, "upload.bin")
+								cleanBase := fileutil.SanitizeReceivedFilename(name, "upload.bin")
 								uploadName = "received_" + cleanBase
 								uploadSize = size
 								uploaded = 0
@@ -1160,7 +1160,7 @@ func downloadFile(code string) error {
 		fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
 	}
 
-	cleanBase := server.SanitizeFilename(meta.Name, "download.bin")
+	cleanBase := fileutil.SanitizeReceivedFilename(meta.Name, "download.bin")
 	outName := "received_" + cleanBase
 	outFile, err := os.Create(outName)
 	if err != nil {
