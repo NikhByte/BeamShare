@@ -1,10 +1,12 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -324,4 +326,113 @@ func TestServer_SeekingReaderCheckSessionContextCancellation(t *testing.T) {
 	n, err := sr.Read(buf)
 	assert.Equal(t, 0, n)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestServer_UploadWriteTimeout(t *testing.T) {
+	srv := NewServerWithConfig(1*time.Hour, 100*time.Millisecond)
+	srv.uploadTimeout = 100 * time.Millisecond // Short timeout for testing
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+
+	// Perform multipart file upload without any sender reading from /relay/pull
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", "test.txt")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("hello world data that will stall because no reader"))
+	require.NoError(t, err)
+	writer.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	duration := time.Since(start)
+
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusGatewayTimeout, resp.StatusCode)
+	assert.GreaterOrEqual(t, duration, 100*time.Millisecond)
+	assert.Less(t, duration, 2*time.Second)
+}
+
+func TestServer_UploadWriteSuccess(t *testing.T) {
+	srv := NewServerWithConfig(1*time.Hour, 100*time.Millisecond)
+	srv.uploadTimeout = 2 * time.Second
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	sess := srv.createSession()
+
+	uploadData := []byte("upload data content to be read by pull endpoint")
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", "upload.txt")
+	require.NoError(t, err)
+	_, err = part.Write(uploadData)
+	require.NoError(t, err)
+	writer.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload?s="+sess.ID, body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	// Concurrently pull data from /relay/pull
+	pullDone := make(chan []byte, 1)
+	go func() {
+		// Small sleep to ensure pipe is set up by /api/upload
+		time.Sleep(50 * time.Millisecond)
+		pullResp, errPull := http.Get(ts.URL + "/relay/pull?session=" + sess.ID)
+		if errPull != nil {
+			pullDone <- nil
+			return
+		}
+		defer pullResp.Body.Close()
+		data, _ := io.ReadAll(pullResp.Body)
+		pullDone <- data
+	}()
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	select {
+	case pulled := <-pullDone:
+		assert.Equal(t, uploadData, pulled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pull")
+	}
+}
+
+func TestServer_RateLimiterBackgroundSweeper(t *testing.T) {
+	srv := NewServerWithConfig(1*time.Hour, 20*time.Millisecond)
+	srv.SetRateLimitWindow(50 * time.Millisecond)
+	defer srv.Stop()
+
+	// Record failed attempts from multiple IPs
+	srv.recordFailedAttempt("192.0.2.1")
+	srv.recordFailedAttempt("192.0.2.2")
+
+	srv.failedAttemptsMu.Lock()
+	assert.Len(t, srv.failedAttempts, 2)
+	srv.failedAttemptsMu.Unlock()
+
+	// Wait for rate limiter background sweeper worker to evict entries older than rateLimitWindow
+	assert.Eventually(t, func() bool {
+		srv.failedAttemptsMu.Lock()
+		defer srv.failedAttemptsMu.Unlock()
+		return len(srv.failedAttempts) == 0
+	}, 2*time.Second, 10*time.Millisecond, "Rate limiter sweeper should evict stale IP entries")
 }
