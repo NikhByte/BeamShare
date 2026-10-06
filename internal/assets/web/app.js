@@ -1,5 +1,5 @@
 // ── Client-side QR Code Generator Engine (Zero Network Dependencies) ──────
-const qrcodegen = (function() {
+var qrcodegen = (function() {
 	function QrCode(version, errorCorrectionLevel, dataCodewords, msk) {
 		if (version < QrCode.MIN_VERSION || version > QrCode.MAX_VERSION)
 			throw new RangeError("Version value out of range");
@@ -394,11 +394,25 @@ const qrcodegen = (function() {
 	return { QrCode };
 })();
 
-function renderQRCode(text, targetElement, options = {}) {
+function renderQRCode(arg1, arg2, options = {}) {
+  let text, targetElement;
+  if (typeof arg1 === 'string' && (typeof arg2 === 'object' || typeof arg2 === 'string')) {
+    text = arg1;
+    targetElement = typeof arg2 === 'string' ? document.getElementById(arg2) : arg2;
+  } else if ((typeof arg1 === 'object' || typeof arg1 === 'string') && typeof arg2 === 'string') {
+    targetElement = typeof arg1 === 'string' ? document.getElementById(arg1) : arg1;
+    text = arg2;
+  } else {
+    return;
+  }
   if (!text || !targetElement) return;
+
   const cellSize = options.cellSize || 4;
-  const margin = options.margin !== undefined ? options.margin : 4;
-  const qr = qrcodegen.QrCode.encodeText(text, qrcodegen.QrCode.Ecc.MEDIUM);
+  const margin = options.margin !== undefined ? options.margin : (options.border !== undefined ? options.border : 4);
+  const qrc = (typeof window !== 'undefined' && window.qrcodegen) ? window.qrcodegen : (typeof globalThis !== 'undefined' && globalThis.qrcodegen ? globalThis.qrcodegen : (typeof qrcodegen !== 'undefined' ? qrcodegen : null));
+  if (!qrc || !qrc.QrCode) return;
+  const eccLevel = (options.ecc && qrc.QrCode.Ecc[options.ecc]) || qrc.QrCode.Ecc.MEDIUM;
+  const qr = qrc.QrCode.encodeText(text, eccLevel);
   const count = qr.size;
   const size = (count + margin * 2) * cellSize;
 
@@ -1146,61 +1160,7 @@ function qrToSvgDataUrl(qr, border = 4) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
-function renderQRCode(element, text, options = {}) {
-  if (!element) return;
-  try {
-    if (!text) {
-      showQRError(element, "No URL provided for QR code");
-      return;
-    }
-    const qrc = (typeof window !== 'undefined' && window.qrcodegen) ? window.qrcodegen : (typeof globalThis !== 'undefined' && globalThis.qrcodegen ? globalThis.qrcodegen : (typeof qrcodegen !== 'undefined' ? qrcodegen : null));
-    if (!qrc || !qrc.QrCode) {
-      showQRError(element, "QR generator library missing");
-      return;
-    }
-    const eccLevel = (options.ecc && qrc.QrCode.Ecc[options.ecc]) || qrc.QrCode.Ecc.MEDIUM;
-    const qr = qrc.QrCode.encodeText(text, eccLevel);
-    
-    const tagName = element.tagName ? element.tagName.toLowerCase() : '';
-    if (tagName === 'img') {
-      try {
-        const dataUrl = qrToSvgDataUrl(qr, options.border !== undefined ? options.border : 4);
-        element.src = dataUrl;
-        element.alt = options.alt || "QR Code for share URL";
-      } catch (renderErr) {
-        showQRError(element, "Failed to render QR image");
-      }
-    } else if (tagName === 'canvas') {
-      try {
-        renderQRToCanvas(qr, element, options.border !== undefined ? options.border : 4);
-      } catch (canvasErr) {
-        showQRError(element, "Canvas QR rendering failed");
-      }
-    } else {
-      try {
-        const border = options.border !== undefined ? options.border : 4;
-        const totalSize = qr.size + border * 2;
-        let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + totalSize + ' ' + totalSize + '" width="100%" height="100%" shape-rendering="crispEdges">';
-        svg += '<rect width="' + totalSize + '" height="' + totalSize + '" fill="#ffffff"/>';
-        svg += '<path d="';
-        for (let y = 0; y < qr.size; y++) {
-          for (let x = 0; x < qr.size; x++) {
-            if (qr.getModule(x, y)) {
-              svg += 'M' + (x + border) + ',' + (y + border) + 'h1v1h-1z ';
-            }
-          }
-        }
-        svg += '" fill="#000000"/></svg>';
-        element.innerHTML = svg;
-      } catch (err) {
-        showQRError(element, "Failed to render QR SVG");
-      }
-    }
-  } catch (err) {
-    console.error("QR Code generation error:", err);
-    showQRError(element, "Unable to generate QR code");
-  }
-}
+// renderQRCode defined above
 
 function renderQRToCanvas(qr, canvas, border = 4) {
   const ctx = canvas.getContext('2d');
@@ -3849,7 +3809,7 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    renderQRElements(shareURL.href, 'send-qr-canvas', 'send-qr-img');
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -4254,16 +4214,7 @@ function generateQRCodeDataURL(text, options) {
   throw new Error("Client-side QR generator unavailable");
 }
 
-function renderQRCode(elementOrId, url) {
-  const img = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
-  if (!img) return;
-  try {
-    const dataUrl = generateQRCodeDataURL(url);
-    img.src = dataUrl;
-  } catch (err) {
-    console.error("Failed to generate QR code client-side");
-  }
-}
+// renderQRCode defined above
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
