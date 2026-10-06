@@ -2157,6 +2157,8 @@ async function getSWPipe(fileMeta) {
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 10000));
     const reg = await Promise.race([swReady, timeout]);
 
+    if (!reg || !reg.active) return null;
+
     if (!navigator.serviceWorker.controller) {
       await new Promise((resolve) => {
         if (navigator.serviceWorker.controller) {
@@ -2168,11 +2170,14 @@ async function getSWPipe(fileMeta) {
           resolve();
         };
         navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
-        setTimeout(resolve, 500);
+        setTimeout(() => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          resolve();
+        }, 500);
       });
     }
 
-    const sw = navigator.serviceWorker.controller;
+    const sw = navigator.serviceWorker.controller || reg.active;
     if (!sw) {
       console.warn("Page is not controlled by a Service Worker, falling back to storage/RAM");
       return null;
@@ -2909,7 +2914,11 @@ async function startHTTPSSE() {
   const useDiskStream = typeof window.showSaveFilePicker === 'function';
   useIndexedDB = !useDiskStream;
   if (useIndexedDB) {
-    await clearIDB();
+    try {
+      await clearIDB();
+    } catch (e) {
+      console.warn('clearIDB failed:', e);
+    }
   }
 
   source.onmessage = (event) => {
@@ -3761,8 +3770,8 @@ function initSpotlight() {
 }
 
 // ── Local QR Code Generator ───────────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
+var GF256_EXP = new Uint8Array(512);
+var GF256_LOG = new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -4218,9 +4227,9 @@ async function startSenderSharing() {
         offer: senderPeerConnection.localDescription.sdp,
         candidates: localCandidates,
         meta: {
-          name: senderFile.name,
-          size: senderFile.size,
-          mime: senderFile.type || 'application/octet-stream'
+          name: senderFile ? senderFile.name : 'upload.bin',
+          size: senderFile ? senderFile.size : 0,
+          mime: (senderFile && senderFile.type) ? senderFile.type : 'application/octet-stream'
         }
       })
     });
@@ -4637,8 +4646,8 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Client-side QR Code Generator ─────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
+var GF256_EXP = new Uint8Array(512);
+var GF256_LOG = new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -5033,6 +5042,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     uploadFileP2P,

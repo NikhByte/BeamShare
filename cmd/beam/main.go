@@ -595,9 +595,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if isLive {
 								return
 							}
-							if !isStreaming.CompareAndSwap(false, true) {
-								return
-							}
 							parts := strings.SplitN(dataStr, ":", 2)
 							var offset int64
 							if len(parts) == 2 {
@@ -639,7 +636,14 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 								// Send META header
 								metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
-								if errSend := dc.SendText(metaHeader); errSend != nil {
+								streamMu.Lock()
+								if ctx.Err() != nil {
+									streamMu.Unlock()
+									return
+								}
+								errSend := dc.SendText(metaHeader)
+								streamMu.Unlock()
+								if errSend != nil {
 									fmt.Printf("  Error sending meta header: %v\n", errSend)
 									return
 								}
@@ -710,16 +714,17 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 									n, errRead := file.Read(buffer)
 									if n > 0 {
-										select {
-										case <-ctx.Done():
+										streamMu.Lock()
+										if ctx.Err() != nil {
+											streamMu.Unlock()
 											return
-										default:
 										}
 
 										// Isolated heap slice allocation per chunk send
 										chunk := make([]byte, n)
 										copy(chunk, buffer[:n])
 										errSend := dc.Send(chunk)
+										streamMu.Unlock()
 										if errSend != nil {
 											fmt.Printf("\n  Error sending chunk: %v\n", errSend)
 											return
