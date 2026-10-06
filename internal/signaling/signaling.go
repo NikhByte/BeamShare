@@ -504,6 +504,8 @@ func compressSDP(sdp string) (string, error) {
 	return CompressSDP(sdp)
 }
 
+const maxDecompressedSDPSize = 1024 * 1024 // 1 MB limit on decompressed SDP payloads
+
 // DecompressSDP reverses compressSDP — used by the browser (via JS atob +
 // pako) and optionally by Go unit tests.
 func DecompressSDP(compressed string) (string, error) {
@@ -522,9 +524,12 @@ func DecompressSDP(compressed string) (string, error) {
 		return "", fmt.Errorf("zlib open: %w", err)
 	}
 	defer r.Close()
-	out, err := io.ReadAll(r)
+	out, err := io.ReadAll(io.LimitReader(r, maxDecompressedSDPSize+1))
 	if err != nil {
 		return "", fmt.Errorf("zlib read: %w", err)
+	}
+	if len(out) > maxDecompressedSDPSize {
+		return "", fmt.Errorf("decompressed SDP exceeds maximum limit of 1MB")
 	}
 	return string(out), nil
 }

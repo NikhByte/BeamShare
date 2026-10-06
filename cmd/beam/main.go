@@ -411,22 +411,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								continue
 							}
 
-							outName := "received_" + sanitizedFilename
-							outputDir, err := filepath.Abs(".")
-							if err != nil {
-								fmt.Printf("  Error resolving output directory: %v\n", err)
-								rc.Close()
-								continue
-							}
-
-							targetPath := filepath.Clean(filepath.Join(outputDir, outName))
-							if !verifyPathInOutputDir(targetPath, outputDir) {
-								fmt.Printf("  Error: target path %s escapes output directory %s\n", targetPath, outputDir)
-								rc.Close()
-								continue
-							}
-
-							outFile, err := os.Create(targetPath)
+							cleanBase := server.SanitizeFilename(cmd.Filename, "upload.bin")
+							outName := "received_" + cleanBase
+							outFile, err := os.Create(outName)
 							if err != nil {
 								fmt.Printf("  Error creating file: %v\n", err)
 								rc.Close()
@@ -448,7 +435,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									elapsed.Seconds(),
 									ui.FormatBytes(int64(speed)),
 								)
-								srv.UpdateSharedFile(outName, sanitizedFilename, copied)
+								srv.UpdateSharedFile(outName, cleanBase, copied)
 							}
 						}
 					}
@@ -484,11 +471,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								name := parts[1]
 								size, _ := strconv.ParseInt(parts[2], 10, 64)
 
-								cleanBase := filepath.Base(filepath.Clean(name))
-								cleanBase = strings.Trim(cleanBase, "\x00./\\")
-								if cleanBase == "" {
-									cleanBase = "upload.bin"
-								}
+								cleanBase := server.SanitizeFilename(name, "upload.bin")
 								uploadName = "received_" + cleanBase
 								uploadSize = size
 								uploaded = 0
@@ -916,11 +899,7 @@ func downloadFile(code string) error {
 		}
 	}
 
-	cleanBase := filepath.Base(filepath.Clean(meta.Name))
-	cleanBase = strings.Trim(cleanBase, "\x00./\\")
-	if cleanBase == "" {
-		cleanBase = "download.bin"
-	}
+	cleanBase := server.SanitizeFilename(meta.Name, "download.bin")
 	outName := "received_" + cleanBase
 	outFile, err := os.Create(outName)
 	if err != nil {

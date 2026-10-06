@@ -113,51 +113,44 @@ func TestDownloadFile_Relay(t *testing.T) {
 	}
 }
 
-func TestSanitizeFilename(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
+func TestDownloadFile_PathTraversalSanitization(t *testing.T) {
+	traversalCases := []struct {
+		rawMetaName      string
+		expectedFileName string
 	}{
-		{"../../etc/passwd", "passwd"},
-		{"..\\..\\Windows\\System32\\drivers\\etc\\hosts", "hosts"},
-		{"/var/log/syslog", "syslog"},
-		{"C:\\Users\\Admin\\Documents\\secret.doc", "secret.doc"},
-		{"../../", "upload.bin"},
-		{".", "upload.bin"},
-		{"..", "upload.bin"},
-		{"", "upload.bin"},
-		{"report.pdf", "report.pdf"},
-		{"nested/path/to/file.png", "file.png"},
+		{"../../etc/passwd", "received_passwd"},
+		{"..\\..\\evil.bat", "received_evil.bat"},
+		{"\x00../malicious.sh", "received_malicious.sh"},
+		{"....", "received_download.bin"},
 	}
 
-	for _, tt := range tests {
-		got := sanitizeFilename(tt.input)
-		if got != tt.expected {
-			t.Errorf("sanitizeFilename(%q) = %q; want %q", tt.input, got, tt.expected)
-		}
-	}
-}
+	for _, tc := range traversalCases {
+		t.Run(tc.rawMetaName, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+				meta := server.FileMeta{
+					Name: tc.rawMetaName,
+					Size: 10,
+				}
+				json.NewEncoder(w).Encode(meta)
+			})
+			mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte("0123456789"))
+			})
 
-func TestVerifyPathInOutputDir(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "beam_test_*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
 
-	validTarget := tmpDir + "/received_passwd"
-	if !verifyPathInOutputDir(validTarget, tmpDir) {
-		t.Errorf("verifyPathInOutputDir(%q, %q) = false; want true", validTarget, tmpDir)
-	}
+			defer os.Remove(tc.expectedFileName)
 
-	invalidTarget := tmpDir + "/../passwd"
-	if verifyPathInOutputDir(invalidTarget, tmpDir) {
-		t.Errorf("verifyPathInOutputDir(%q, %q) = true; want false", invalidTarget, tmpDir)
-	}
+			err := downloadFile(ts.URL)
+			if err != nil {
+				t.Fatalf("downloadFile failed for %s: %v", tc.rawMetaName, err)
+			}
 
-	absoluteOutside := "/etc/passwd"
-	if verifyPathInOutputDir(absoluteOutside, tmpDir) {
-		t.Errorf("verifyPathInOutputDir(%q, %q) = true; want false", absoluteOutside, tmpDir)
+			if _, err := os.Stat(tc.expectedFileName); os.IsNotExist(err) {
+				t.Fatalf("expected file %s to exist, but was not found", tc.expectedFileName)
+			}
+		})
 	}
 }
-
