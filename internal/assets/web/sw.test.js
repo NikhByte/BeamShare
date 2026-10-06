@@ -342,6 +342,7 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     });
 
     assert.equal(readyPosted, true);
+  });
 
   test('Fetch interceptor responds to /sw-download-pipe/iframe-ping with postMessage script', async () => {
     require('./sw.js');
