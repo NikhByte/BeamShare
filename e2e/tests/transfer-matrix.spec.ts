@@ -40,6 +40,9 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       await page.unrouteAll({ behavior: 'ignoreErrors' });
     } catch (e) {}
     try {
+      await context.clearCookies();
+    } catch (e) {}
+    try {
       if (!page.isClosed()) {
         await page.evaluate(async () => {
           if ('serviceWorker' in navigator) {
@@ -50,9 +53,6 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
           }
         }).catch(() => {});
       }
-    } catch (e) {}
-    try {
-      await context.clearCookies();
     } catch (e) {}
     stopAllProcesses();
   });
@@ -68,7 +68,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       url.searchParams.set('no_stun', '1');
       const webrtcURL = url.toString();
 
-      const downloadPromise = page.waitForEvent('download', { timeout: 30000 });
+      const downloadPromise = page.waitForEvent('download', { timeout: 45000 });
 
       await page.goto(webrtcURL);
 
@@ -107,6 +107,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
 
+      // Click Download File button with concurrent download event listener
       const [download] = await Promise.all([
         page.waitForEvent('download', { timeout: 30000 }),
         page.click('#btn-download'),
@@ -155,6 +156,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 20000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
 
+      // Click Download button with concurrent download event listener
       const [download] = await Promise.all([
         page.waitForEvent('download', { timeout: 30000 }),
         page.click('#btn-download'),

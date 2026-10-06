@@ -15,9 +15,8 @@ import (
 	"time"
 
 	"github.com/beamshare/beam/internal/assets"
+	"github.com/skip2/go-qrcode"
 )
-
-const maxDownloadQueueSize = 100
 
 type DownloadRequest struct {
 	Offset int64  `json:"offset,omitempty"`
@@ -43,21 +42,19 @@ type Session struct {
 	SenderOffset    int64
 
 	expiresAt time.Time
+	ctx       context.Context
+	cancel    context.CancelCauseFunc
 	mu        sync.Mutex
 
-	downloadQueue  []DownloadRequest
-	downloadNotify chan struct{}
+	pendingDownload *DownloadRequest
+	downloadNotify  chan struct{}
 }
 
 func (s *Session) EnqueueDownload(req DownloadRequest) bool {
 	s.mu.Lock()
-	if len(s.downloadQueue) >= maxDownloadQueueSize {
-		s.mu.Unlock()
-		return false
-	}
-	s.downloadQueue = append(s.downloadQueue, req)
-	s.mu.Unlock()
-
+	defer s.mu.Unlock()
+	reqCopy := req
+	s.pendingDownload = &reqCopy
 	select {
 	case s.downloadNotify <- struct{}{}:
 	default:
@@ -68,32 +65,35 @@ func (s *Session) EnqueueDownload(req DownloadRequest) bool {
 func (s *Session) DequeueDownload() (DownloadRequest, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.downloadQueue) == 0 {
+	if s.pendingDownload == nil {
 		return DownloadRequest{}, false
 	}
-	req := s.downloadQueue[0]
-	s.downloadQueue = s.downloadQueue[1:]
+	req := *s.pendingDownload
+	s.pendingDownload = nil
+	select {
+	case <-s.downloadNotify:
+	default:
+	}
 	return req, true
 }
 
 func (s *Session) ClearDownloadQueue() {
 	s.mu.Lock()
-	s.downloadQueue = nil
-	s.mu.Unlock()
-
-	for {
-		select {
-		case <-s.downloadNotify:
-		default:
-			return
-		}
+	defer s.mu.Unlock()
+	s.pendingDownload = nil
+	select {
+	case <-s.downloadNotify:
+	default:
 	}
 }
 
 func (s *Session) DownloadQueueLen() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.downloadQueue)
+	if s.pendingDownload != nil {
+		return 1
+	}
+	return 0
 }
 
 func (s *Session) ClosePipes(err error) {
@@ -106,16 +106,38 @@ func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err er
 	s.closePipesIfMatchLocked(pr, pw, err)
 }
 
-func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
-	matched := false
+func (s *Session) closeUploadPipesLocked(err error) {
+	if s.UploadPipeR != nil {
+		if err != nil {
+			s.UploadPipeR.CloseWithError(err)
+		} else {
+			s.UploadPipeR.Close()
+		}
+		s.UploadPipeR = nil
+	}
+	if s.UploadPipeW != nil {
+		if err != nil {
+			s.UploadPipeW.CloseWithError(err)
+		} else {
+			s.UploadPipeW.Close()
+		}
+		s.UploadPipeW = nil
+	}
+}
 
-	if pr == nil || (s.DataPipeR != nil && s.DataPipeR == pr) {
-		matched = true
+func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
+	prClosed := false
+	pwClosed := false
+
+	if pr == nil || (pr != nil && s.DataPipeR == pr) || (pw != nil && s.DataPipeW == pw) {
 		if s.DataPipeW != nil {
 			if err != nil {
 				s.DataPipeW.CloseWithError(err)
 			} else {
 				s.DataPipeW.Close()
+			}
+			if pw != nil && s.DataPipeW == pw {
+				pwClosed = true
 			}
 			s.DataPipeW = nil
 		}
@@ -125,17 +147,22 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			} else {
 				s.DataPipeR.Close()
 			}
+			if pr != nil && s.DataPipeR == pr {
+				prClosed = true
+			}
 			s.DataPipeR = nil
 		}
 	}
 
-	if pr == nil || (s.UploadPipeR != nil && s.UploadPipeR == pr) {
-		matched = true
+	if pr == nil || (pr != nil && s.UploadPipeR == pr) || (pw != nil && s.UploadPipeW == pw) {
 		if s.UploadPipeW != nil {
 			if err != nil {
 				s.UploadPipeW.CloseWithError(err)
 			} else {
 				s.UploadPipeW.Close()
+			}
+			if pw != nil && s.UploadPipeW == pw {
+				pwClosed = true
 			}
 			s.UploadPipeW = nil
 		}
@@ -145,24 +172,25 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			} else {
 				s.UploadPipeR.Close()
 			}
+			if pr != nil && s.UploadPipeR == pr {
+				prClosed = true
+			}
 			s.UploadPipeR = nil
 		}
 	}
 
-	if !matched {
-		if pw != nil {
-			if err != nil {
-				pw.CloseWithError(err)
-			} else {
-				pw.Close()
-			}
+	if pw != nil && !pwClosed {
+		if err != nil {
+			pw.CloseWithError(err)
+		} else {
+			pw.Close()
 		}
-		if pr != nil {
-			if err != nil {
-				pr.CloseWithError(err)
-			} else {
-				pr.Close()
-			}
+	}
+	if pr != nil && !prClosed {
+		if err != nil {
+			pr.CloseWithError(err)
+		} else {
+			pr.Close()
 		}
 	}
 }
@@ -255,6 +283,19 @@ func (s *Server) Stop() {
 	s.wg.Wait()
 }
 
+const maxFailedAttemptsEntries = 10000
+
+func (s *Server) purgeFailedAttempts() {
+	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	now := time.Now()
+	for ip, fa := range s.failedAttempts {
+		if now.Sub(fa.firstSeen) > time.Minute {
+			delete(s.failedAttempts, ip)
+		}
+	}
+}
+
 func (s *Server) SweepExpiredSessions() {
 	s.mu.Lock()
 	now := time.Now()
@@ -271,9 +312,20 @@ func (s *Server) SweepExpiredSessions() {
 	s.mu.Unlock()
 
 	for _, sess := range expired {
+		if sess.cancel != nil {
+			sess.cancel(fmt.Errorf("session expired"))
+		}
 		sess.ClosePipes(fmt.Errorf("session expired"))
 		sess.ClearDownloadQueue()
 	}
+
+	s.failedAttemptsMu.Lock()
+	for ip, fa := range s.failedAttempts {
+		if now.Sub(fa.firstSeen) > time.Minute {
+			delete(s.failedAttempts, ip)
+		}
+	}
+	s.failedAttemptsMu.Unlock()
 }
 
 func (s *Server) GetSession(id string) *Session {
@@ -315,6 +367,9 @@ func (s *Server) recordFailedAttempt(ip string) {
 	}
 	fa, ok := s.failedAttempts[ip]
 	if !ok || time.Since(fa.firstSeen) > time.Minute {
+		if !ok && len(s.failedAttempts) >= maxFailedAttemptsEntries {
+			return
+		}
 		s.failedAttempts[ip] = &failedAttempt{count: 1, firstSeen: time.Now()}
 		return
 	}
@@ -376,12 +431,15 @@ func (s *Server) createSession() *Session {
 		}
 	}
 
+	ctx, cancel := context.WithCancelCause(context.Background())
 	sess := &Session{
 		ID:             id,
 		AnswerReady:    make(chan string, 1),
-		downloadNotify: make(chan struct{}, maxDownloadQueueSize),
+		downloadNotify: make(chan struct{}, 1),
 		UploadReq:      make(chan string, 1),
 		expiresAt:      time.Now().Add(s.sessionTTL),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 	s.sessions[id] = sess
 
@@ -519,12 +577,14 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if dlReq, ok := sess.DequeueDownload(); ok {
-		select {
-		case <-sess.downloadNotify:
-		default:
-		}
 		respondWithDownload(w, dlReq)
 		return
+	}
+
+	if sess.ctx == nil {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		sess.ctx = ctx
+		sess.cancel = cancel
 	}
 
 	for {
@@ -546,6 +606,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 				respondWithDownload(w, dlReq)
 				return
 			}
+		case <-sess.ctx.Done():
+			http.Error(w, "not found", http.StatusNotFound)
+			return
 		case <-r.Context().Done():
 			return
 		}
@@ -592,6 +655,10 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	defer close(done)
 
 	go func() {
+		var sessDone <-chan struct{}
+		if sess.ctx != nil {
+			sessDone = sess.ctx.Done()
+		}
 		select {
 		case <-done:
 			return
@@ -601,6 +668,13 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 				return
 			default:
 				sess.ClosePipes(fmt.Errorf("sender context cancelled: %w", r.Context().Err()))
+			}
+		case <-sessDone:
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipes(fmt.Errorf("session context cancelled"))
 			}
 		}
 	}()
@@ -887,6 +961,14 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		} else {
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-/*", rng.start))
 		}
+	}
+
+	if !sess.EnqueueDownload(DownloadRequest{Offset: offset, Range: rangeHdr}) {
+		http.Error(w, "Download queue full", http.StatusServiceUnavailable)
+		return
+	}
+
+	if hasRange {
 		w.WriteHeader(http.StatusPartialContent)
 	} else {
 		w.WriteHeader(http.StatusOK)
@@ -918,6 +1000,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	defer close(done)
 
 	go func() {
+		var sessDone <-chan struct{}
+		if sess.ctx != nil {
+			sessDone = sess.ctx.Done()
+		}
 		select {
 		case <-done:
 			return
@@ -928,11 +1014,15 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			default:
 				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("receiver context cancelled: %w", r.Context().Err()))
 			}
+		case <-sessDone:
+			select {
+			case <-done:
+				return
+			default:
+				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("session context cancelled"))
+			}
 		}
 	}()
-
-	// Notify sender with offset/range
-	sess.EnqueueDownload(DownloadRequest{Offset: offset, Range: rangeHdr})
 
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
@@ -986,17 +1076,35 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 	if sr.ctx != nil && sr.ctx.Err() != nil {
 		return 0, sr.ctx.Err()
 	}
+	if sr.sess != nil && sr.sess.ctx != nil && sr.sess.ctx.Err() != nil {
+		return 0, sr.sess.ctx.Err()
+	}
 
 	for {
 		if sr.ctx != nil && sr.ctx.Err() != nil {
 			return 0, sr.ctx.Err()
 		}
+		if sr.sess != nil && sr.sess.ctx != nil && sr.sess.ctx.Err() != nil {
+			return 0, sr.sess.ctx.Err()
+		}
 
 		if !sr.initDone {
-			n, err := sr.pr.Read(p)
 			sr.sess.mu.Lock()
 			reqOff := sr.sess.RequestedOffset
 			sendOff := sr.sess.SenderOffset
+			sr.sess.mu.Unlock()
+
+			sr.bytesToSkip = reqOff - sendOff
+			if sr.bytesToSkip < 0 {
+				sr.initDone = true
+				return 0, fmt.Errorf("relay stream offset mismatch: sender offset %d exceeds requested offset %d", sendOff, reqOff)
+			}
+
+			n, err := sr.pr.Read(p)
+
+			sr.sess.mu.Lock()
+			reqOff = sr.sess.RequestedOffset
+			sendOff = sr.sess.SenderOffset
 			sr.sess.mu.Unlock()
 
 			sr.bytesToSkip = reqOff - sendOff
@@ -1024,6 +1132,14 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 			return copied, err
 		}
 
+		if sr.bytesToSkip < 0 {
+			sr.sess.mu.Lock()
+			reqOff := sr.sess.RequestedOffset
+			sendOff := sr.sess.SenderOffset
+			sr.sess.mu.Unlock()
+			return 0, fmt.Errorf("relay stream offset mismatch: sender offset %d exceeds requested offset %d", sendOff, reqOff)
+		}
+
 		if sr.bytesToSkip > 0 {
 			n, err := sr.pr.Read(p)
 			if int64(n) <= sr.bytesToSkip {
@@ -1044,8 +1160,31 @@ func (sr *seekingReader) Read(p []byte) (int, error) {
 }
 
 func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
-	// A dummy QR API to prevent 404s
-	w.WriteHeader(200)
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Private-Network", "true")
+	urlParam := r.URL.Query().Get("url")
+	if urlParam == "" {
+		http.Error(w, "missing url parameter", http.StatusBadRequest)
+		return
+	}
+
+	pngBytes, err := qrcode.Encode(urlParam, qrcode.Medium, 256)
+	if err != nil {
+		http.Error(w, "failed to generate qr code: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(pngBytes)))
+	w.Write(pngBytes)
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -1088,16 +1227,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if part.FormName() == "file" {
+			pr, pw := io.Pipe()
+
 			sess.mu.Lock()
 			if sess.UploadPipeR != nil || sess.UploadPipeW != nil {
-				if sess.UploadPipeR != nil {
-					sess.closePipesIfMatchLocked(sess.UploadPipeR, sess.UploadPipeW, fmt.Errorf("replaced by new upload request"))
-				} else if sess.UploadPipeW != nil {
-					sess.UploadPipeW.CloseWithError(fmt.Errorf("replaced by new upload request"))
-					sess.UploadPipeW = nil
-				}
+				sess.closePipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new upload request"))
 			}
-			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
 			sess.mu.Unlock()
@@ -1107,33 +1242,74 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 				sess.ClosePipesIfMatch(pr, pw, uploadErr)
 			}()
 
-			done := make(chan struct{})
-			defer close(done)
-
-			go func() {
-				select {
-				case <-done:
-					return
-				case <-r.Context().Done():
-					select {
-					case <-done:
-						return
-					default:
-						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("uploader context cancelled: %w", r.Context().Err()))
-					}
-				}
-			}()
-
 			// Notify sender
 			select {
 			case sess.UploadReq <- part.FileName():
 			default:
 			}
 
-			// Stream data to pipe
-			_, uploadErr = io.Copy(pw, part)
-			pw.CloseWithError(uploadErr)
-			part.Close()
+			copyDone := make(chan error, 1)
+			go func() {
+				type chunk struct {
+					data []byte
+					err  error
+				}
+				chunks := make(chan chunk, 16)
+
+				go func() {
+					defer close(chunks)
+					for {
+						buf := make([]byte, 32*1024)
+						n, readErr := part.Read(buf)
+						if n > 0 {
+							cData := make([]byte, n)
+							copy(cData, buf[:n])
+							chunks <- chunk{data: cData}
+						}
+						if readErr != nil {
+							if readErr != io.EOF {
+								chunks <- chunk{err: readErr}
+							}
+							break
+						}
+					}
+				}()
+
+				var writeErr error
+				for c := range chunks {
+					if c.err != nil {
+						writeErr = c.err
+						break
+					}
+					if len(c.data) > 0 {
+						_, err := pw.Write(c.data)
+						if err != nil {
+							writeErr = err
+							break
+						}
+					}
+				}
+
+				if writeErr != nil {
+					pw.CloseWithError(writeErr)
+				} else {
+					pw.Close()
+				}
+				part.Close()
+				copyDone <- writeErr
+			}()
+
+			select {
+			case uploadErr = <-copyDone:
+			case <-r.Context().Done():
+				uploadErr = fmt.Errorf("upload context cancelled: %w", r.Context().Err())
+				sess.ClosePipesIfMatch(pr, pw, uploadErr)
+			}
+
+			if uploadErr != nil {
+				http.Error(w, uploadErr.Error(), http.StatusInternalServerError)
+				return
+			}
 
 			if uploadErr != nil {
 				http.Error(w, fmt.Sprintf("upload error: %v", uploadErr), http.StatusInternalServerError)
@@ -1168,28 +1344,21 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	var pullErr error
 	defer func() {
-		if pullErr != nil {
-			sess.ClosePipesIfMatch(pr, pw, pullErr)
-		}
-	}()
-
-	done := make(chan struct{})
-	defer close(done)
-
-	go func() {
-		select {
-		case <-done:
-			return
-		case <-r.Context().Done():
-			select {
-			case <-done:
-				return
-			default:
-				sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("puller context cancelled: %w", r.Context().Err()))
-			}
-		}
+		sess.ClosePipesIfMatch(pr, pw, pullErr)
 	}()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	_, pullErr = io.Copy(w, pr)
+
+	copyDone := make(chan error, 1)
+	go func() {
+		_, cErr := io.Copy(w, pr)
+		copyDone <- cErr
+	}()
+
+	select {
+	case pullErr = <-copyDone:
+	case <-r.Context().Done():
+		pullErr = fmt.Errorf("pull context cancelled: %w", r.Context().Err())
+		sess.ClosePipesIfMatch(pr, pw, pullErr)
+	}
 }
