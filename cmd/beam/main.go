@@ -528,6 +528,18 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 				)
 				var isStreaming atomic.Bool
 
+				var senderMu sync.Mutex
+				var activeCancel context.CancelFunc
+
+				dc.OnClose(func() {
+					senderMu.Lock()
+					if activeCancel != nil {
+						activeCancel()
+						activeCancel = nil
+					}
+					senderMu.Unlock()
+				})
+
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
 						dataStr := string(msg.Data)
