@@ -294,6 +294,7 @@ describe('Gaze Web Receiver Test Suite', () => {
   });
 
   test('EventSource Live Stream Parsing & Handlers', async () => {
+    global.fetch = window.fetch = async () => ({ ok: false, status: 404 });
     let mockSourceInstance = null;
 
     class MockEventSource {

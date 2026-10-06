@@ -156,7 +156,14 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				}
 
 				metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
-				if errSend := dc.SendText(metaHeader); errSend != nil {
+				senderMu.Lock()
+				if ctx.Err() != nil {
+					senderMu.Unlock()
+					return
+				}
+				errSend := dc.SendText(metaHeader)
+				senderMu.Unlock()
+				if errSend != nil {
 					return
 				}
 
@@ -198,14 +205,15 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 
 					n, errRead := file.Read(buffer)
 					if n > 0 {
-						select {
-						case <-ctx.Done():
+						senderMu.Lock()
+						if ctx.Err() != nil {
+							senderMu.Unlock()
 							return
-						default:
 						}
 						chunkCopy := make([]byte, n)
 						copy(chunkCopy, buffer[:n])
 						errSend := dc.Send(chunkCopy)
+						senderMu.Unlock()
 						if errSend != nil {
 							return
 						}
