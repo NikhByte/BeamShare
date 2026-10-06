@@ -1797,13 +1797,15 @@ class OPFSStreamWriter {
   async close() {
     if (!this.worker) return;
     return new Promise((resolve) => {
-      const handleMsg = () => {
-        if (this.worker) {
-          this.worker.removeEventListener('message', handleMsg);
-          this.worker.terminate();
-          this.worker = null;
+      const handleMsg = (e) => {
+        if (e.data && e.data.type === 'CLOSE_OK') {
+          if (this.worker) {
+            this.worker.removeEventListener('message', handleMsg);
+            this.worker.terminate();
+            this.worker = null;
+          }
+          resolve();
         }
-        resolve();
       };
       this.worker.addEventListener('message', handleMsg);
       this.worker.postMessage({ type: 'CLOSE' });
@@ -2763,21 +2765,17 @@ async function startHTTPDownload() {
     }
   }
 
-  if (!diskWritableStream && swSupported) {
-    swPipePort = await getSWPipe(currentFile);
-  }
-
-  if (!diskWritableStream && !swPipePort && opfsSupported) {
+  if (!diskWritableStream && opfsSupported) {
     try {
       const root = await navigator.storage.getDirectory();
-      try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
+      const opfsFileName = `beam_temp_${Date.now()}_${Math.random().toString(36).substring(2)}`;
       
       const estimate = await navigator.storage.estimate();
       if (estimate && estimate.quota && currentFile.size > (estimate.quota - estimate.usage)) {
          throw new Error("Device disk is full");
       }
       
-      diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
+      diskFileHandle = await root.getFileHandle(opfsFileName, { create: true });
       diskWritableStream = await createOPFSWriter(diskFileHandle, initialOffset);
       useOPFS = true;
       useIndexedDB = false;
@@ -2790,6 +2788,10 @@ async function startHTTPDownload() {
       diskWritableStream = null;
       useOPFS = false;
     }
+  }
+
+  if (!diskWritableStream && swSupported) {
+    swPipePort = await getSWPipe(currentFile);
   }
 
   if (!diskWritableStream && !swPipePort && !useOPFS) {
@@ -2902,7 +2904,10 @@ async function startHTTPDownload() {
       await diskWritableStream.close();
       if (useOPFS) {
         const file = await diskFileHandle.getFile();
-        triggerSave(file, currentFile.name);
+        const buffer = await file.arrayBuffer();
+        const blob = new Blob([buffer], { type: currentFile ? currentFile.mime : file.type });
+        try { const root = await navigator.storage.getDirectory(); await root.removeEntry(diskFileHandle.name); } catch(e){}
+        triggerSave(blob, currentFile.name);
       }
     } else if (swPipePort) {
       swPipePort.postMessage('EOF');
@@ -3173,21 +3178,17 @@ async function startWebRTC() {
       }
     }
 
-    if (!diskWritableStream && swSupported) {
-      swPipePort = await getSWPipe(currentFile);
-    }
-
-    if (!diskWritableStream && !swPipePort && opfsSupported) {
+    if (!diskWritableStream && opfsSupported) {
       try {
         const root = await navigator.storage.getDirectory();
-        try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
+        const opfsFileName = `beam_temp_${Date.now()}_${Math.random().toString(36).substring(2)}`;
         
         const estimate = await navigator.storage.estimate();
         if (estimate && estimate.quota && currentFile.size > (estimate.quota - estimate.usage)) {
            throw new Error("Device disk is full");
         }
         
-        diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
+        diskFileHandle = await root.getFileHandle(opfsFileName, { create: true });
         diskWritableStream = await createOPFSWriter(diskFileHandle, initialOffset);
         useOPFS = true;
         useIndexedDB = false;
@@ -3201,6 +3202,10 @@ async function startWebRTC() {
         diskWritableStream = null;
         useOPFS = false;
       }
+    }
+
+    if (!diskWritableStream && swSupported) {
+      swPipePort = await getSWPipe(currentFile);
     }
 
     if (!diskWritableStream && !swPipePort && !useOPFS) {
@@ -3688,8 +3693,12 @@ function triggerSave(blob, name) {
   const a   = Object.assign(document.createElement('a'), { href: url, download: name, target: '_blank', rel: 'noopener' });
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  setTimeout(() => {
+    if (a.parentNode) {
+      a.parentNode.removeChild(a);
+    }
+    URL.revokeObjectURL(url);
+  }, 5000);
 }
 
 function appendTerminalText(text) {
@@ -3970,12 +3979,7 @@ function setupSenderDataChannel() {
           await reverseStream.close();
         } else {
           const blob = new Blob(reverseChunks);
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = reverseName;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
+          triggerSave(blob, reverseName);
         }
         document.getElementById('send-status-label').textContent = "Reverse Transfer Complete!";
       }

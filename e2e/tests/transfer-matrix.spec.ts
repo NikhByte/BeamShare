@@ -30,6 +30,12 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
     expectedHash = computeHash(buffer);
   });
 
+  test.beforeEach(() => {
+    if (!fs.existsSync(testFilePath)) {
+      createTestFile('test-transfer-payload.bin', testFileContent);
+    }
+  });
+
   test.afterAll(() => {
     stopAllProcesses();
     cleanupTempDir();

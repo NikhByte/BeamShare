@@ -782,6 +782,7 @@ describe('Gaze Web Sender Test Suite', () => {
     }
 
     global.fetch = async (url) => {
+      fetchedURLs.push(url.toString());
       if (url.includes('/poll')) {
           return { ok: false, status: 404 };
       }
@@ -866,6 +867,25 @@ describe('Gaze Web Sender Test Suite', () => {
 
     const urlInput = document.getElementById('send-url-input');
     assert.ok(urlInput.value.includes('#k='));
+  });
+
+  test('Client-side QR generation renders locally without external api.qrserver.com requests', async () => {
+    const fetchRequests = [];
+    window.fetch = global.fetch = async (url) => {
+      fetchRequests.push(url.toString());
+      if (url.includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ session: 'mock-session-456' }) };
+    };
+
+    await app.startSenderSharing();
+
+    // Verify no requests were made to api.qrserver.com
+    const qrServerCalls = fetchRequests.filter(u => u.includes('api.qrserver.com'));
+    assert.equal(qrServerCalls.length, 0, 'No HTTP requests must be sent to api.qrserver.com');
+
+    // Verify QR code was rendered on send-qr-canvas
+    const canvas = document.getElementById('send-qr-canvas');
+    assert.notEqual(canvas, null);
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
