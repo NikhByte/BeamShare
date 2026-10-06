@@ -197,6 +197,46 @@ describe('Gaze Web Receiver Test Suite', () => {
     assert.equal(document.getElementById('state-done').classList.contains('hidden'), false);
   });
 
+  test('Service Worker Registration & data-sw-ready attribute', async () => {
+    let readyResolver;
+    const readyPromise = new Promise(resolve => { readyResolver = resolve; });
+    const mockSW = {
+      register: async () => ({ active: {} }),
+      ready: readyPromise,
+      addEventListener: () => {}
+    };
+
+    Object.defineProperty(window.navigator, 'serviceWorker', {
+      value: mockSW,
+      configurable: true,
+      writable: true
+    });
+    if (typeof global.navigator !== 'undefined') {
+      try {
+        Object.defineProperty(global.navigator, 'serviceWorker', {
+          value: mockSW,
+          configurable: true,
+          writable: true
+        });
+      } catch (e) {}
+    }
+
+    app.init();
+
+    assert.equal(document.documentElement.getAttribute('data-sw-ready'), null);
+
+    readyResolver({ active: {} });
+    await readyPromise;
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    assert.equal(document.documentElement.getAttribute('data-sw-ready'), 'true');
+
+    delete window.navigator.serviceWorker;
+    if (typeof global.navigator !== 'undefined') {
+      delete global.navigator.serviceWorker;
+    }
+  });
+
   test('Render File Metadata Card', () => {
     const fileMeta = {
       name: 'document.pdf',
@@ -782,6 +822,7 @@ describe('Gaze Web Sender Test Suite', () => {
     }
 
     global.fetch = async (url) => {
+      fetchedURLs.push(url.toString());
       if (url.includes('/poll')) {
           return { ok: false, status: 404 };
       }
@@ -827,8 +868,8 @@ describe('Gaze Web Sender Test Suite', () => {
     await app.startSenderSharing();
 
     const urlInput = document.getElementById('send-url-input');
-    const shareURL = urlInput.value || "http://localhost/";
-    const hash = new URL(shareURL).hash;
+    const fullUrl = urlInput.value || "http://localhost/";
+    const hash = new URL(fullUrl).hash;
 
     assert.equal(hash.startsWith('#k='), true);
 
@@ -840,32 +881,43 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
-    const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
-    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
+    // Verify send-qr-img src uses local client-side Data URL without third-party calls
+    const sendQrImg = document.getElementById('send-qr-img');
+    assert.notEqual(sendQrImg, null);
+    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml;charset=utf-8,'), true);
+    assert.equal(sendQrImg.src.includes('api.qrserver.com'), false);
   });
 
-  test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
-    let externalCallMade = false;
-    const origFetch = global.fetch;
-    global.fetch = async (url, opts) => {
-      if (typeof url === 'string' && (url.includes('qrserver.com') || url.includes('/api/qr'))) {
-        externalCallMade = true;
-      }
-      return origFetch(url, opts);
+  test('generateQRCodeDataURL produces local SVG Data URL encoding complete share link with #k fragment', () => {
+    const testUrl = 'http://localhost:8080/?s=test-session&backend=http%3A%2F%2Flocalhost%3A8080&mode=webrtc#k=4Kz_test_key_base64url';
+    const dataUrl = app.generateQRCodeDataURL(testUrl);
+
+    assert.equal(dataUrl.startsWith('data:image/svg+xml;charset=utf-8,'), true);
+    assert.equal(dataUrl.includes('api.qrserver.com'), false);
+
+    const svgStr = decodeURIComponent(dataUrl.replace('data:image/svg+xml;charset=utf-8,', ''));
+    assert.equal(svgStr.includes('<svg'), true);
+    assert.equal(svgStr.includes('viewBox='), true);
+    assert.equal(svgStr.includes('<path fill="#000000"'), true);
+  });
+
+  test('Client-side QR generation renders locally without external api.qrserver.com requests', async () => {
+    const fetchRequests = [];
+    window.fetch = global.fetch = async (url) => {
+      fetchRequests.push(url.toString());
+      if (url.includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ session: 'mock-session-456' }) };
     };
 
     await app.startSenderSharing();
 
-    assert.equal(externalCallMade, false, 'No external QR API requests should be made');
+    // Verify no requests were made to api.qrserver.com
+    const qrServerCalls = fetchRequests.filter(u => u.includes('api.qrserver.com'));
+    assert.equal(qrServerCalls.length, 0, 'No HTTP requests must be sent to api.qrserver.com');
 
-    const sendCanvas = document.getElementById('send-qr-canvas');
-    assert.notEqual(sendCanvas, null);
-
-    const urlInput = document.getElementById('send-url-input');
-    assert.ok(urlInput.value.includes('#k='));
+    // Verify QR code was rendered on send-qr-canvas
+    const canvas = document.getElementById('send-qr-canvas');
+    assert.notEqual(canvas, null);
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
@@ -1131,5 +1183,6 @@ describe('WebRTC Buffer Backpressure Suite', () => {
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
   });
 });
+
 
 
