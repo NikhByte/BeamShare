@@ -2272,6 +2272,7 @@ function checkRamWarning(size) {
 }
 
 function generateClientQRCodeDataURL(text) {
+  if (!text) return '';
   if (typeof generateQRCodeDataURL === 'function') {
     return generateQRCodeDataURL(text);
   }
@@ -2281,7 +2282,153 @@ function generateClientQRCodeDataURL(text) {
   if (typeof window !== 'undefined' && window.qrcode && typeof window.qrcode.generateQRCodeSVGDataURL === 'function') {
     return window.qrcode.generateQRCodeSVGDataURL(text);
   }
+  if (typeof globalThis !== 'undefined' && globalThis.qrcode && typeof globalThis.qrcode.generateQRCodeSVGDataURL === 'function') {
+    return globalThis.qrcode.generateQRCodeSVGDataURL(text);
+  }
+  const qrc = (typeof window !== 'undefined' && window.qrcodegen) ? window.qrcodegen : (typeof globalThis !== 'undefined' && globalThis.qrcodegen ? globalThis.qrcodegen : (typeof qrcodegen !== 'undefined' ? qrcodegen : null));
+  if (qrc && qrc.QrCode) {
+    const qr = qrc.QrCode.encodeText(text, qrc.QrCode.Ecc.MEDIUM);
+    const count = qr.size;
+    const cellSize = 4;
+    const margin = 4;
+    const size = (count + margin * 2) * cellSize;
+    const pathParts = [];
+    for (let y = 0; y < count; y++) {
+      for (let x = 0; x < count; x++) {
+        if (qr.getModule(x, y)) {
+          const px = (x + margin) * cellSize;
+          const py = (y + margin) * cellSize;
+          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
+        }
+      }
+    }
+    const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/></svg>`;
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
+  }
   return '';
+}
+
+/**
+ * Generate a QR code SVG string locally using browser client JavaScript.
+ * Prohibits external network requests to third-party QR generation services.
+ * @param {string} text - The URL or string to encode
+ * @returns {string} SVG tag string
+ */
+function generateQRCodeSVG(text) {
+  if (!text) return '';
+  const dataUrl = generateClientQRCodeDataURL(text);
+  if (!dataUrl) return '';
+  const prefix = 'data:image/svg+xml;charset=utf-8,';
+  if (dataUrl.startsWith(prefix)) {
+    return decodeURIComponent(dataUrl.slice(prefix.length));
+  }
+  return dataUrl;
+}
+
+/**
+ * Render a QR code locally into an image element using browser client JavaScript.
+ * Prohibits external network requests to third-party QR generation services.
+ * @param {string|HTMLElement} elementOrId - The target image element or element ID
+ * @param {string} text - The URL or string to encode
+ */
+function renderQRCode(arg1, arg2, options = {}) {
+  let element = arg1;
+  let text = arg2;
+
+  // Handle (text, element) parameter order
+  if (typeof arg1 === 'string' && (arg1.startsWith('http://') || arg1.startsWith('https://') || arg1.includes('?') || arg1.includes('#') || arg1.includes(':'))) {
+    if (arg2 && (typeof arg2 === 'object' || typeof arg2 === 'string')) {
+      const testEl = typeof arg2 === 'string' ? document.getElementById(arg2) : arg2;
+      if (testEl || typeof arg2 === 'object') {
+        text = arg1;
+        element = arg2;
+      }
+    }
+  }
+
+  const targetEl = typeof element === 'string' ? document.getElementById(element) : element;
+  if (!targetEl) return;
+
+  if (!text) {
+    if (targetEl.src !== undefined) targetEl.src = '';
+    return;
+  }
+
+  const tag = targetEl.tagName ? targetEl.tagName.toLowerCase() : '';
+
+  if (tag === 'img') {
+    try {
+      const dataUrl = generateClientQRCodeDataURL(text);
+      if (dataUrl) {
+        targetEl.src = dataUrl;
+      }
+    } catch (err) {
+      console.error("Local QR code generation failed:", err);
+    }
+  } else if (tag === 'canvas') {
+    try {
+      const qrc = (typeof window !== 'undefined' && window.qrcodegen) ? window.qrcodegen : (typeof globalThis !== 'undefined' && globalThis.qrcodegen ? globalThis.qrcodegen : (typeof qrcodegen !== 'undefined' ? qrcodegen : null));
+      if (qrc && qrc.QrCode) {
+        const eccLevel = (options.ecc && qrc.QrCode.Ecc[options.ecc]) || qrc.QrCode.Ecc.MEDIUM;
+        const qr = qrc.QrCode.encodeText(text, eccLevel);
+        const cellSize = options.cellSize || 4;
+        const margin = options.border !== undefined ? options.border : (options.margin !== undefined ? options.margin : 4);
+        const count = qr.size;
+        const size = (count + margin * 2) * cellSize;
+        targetEl.width = size;
+        targetEl.height = size;
+        const ctx = targetEl.getContext ? targetEl.getContext('2d') : null;
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, size, size);
+          ctx.fillStyle = '#000000';
+          for (let y = 0; y < count; y++) {
+            for (let x = 0; x < count; x++) {
+              if (qr.getModule(x, y)) {
+                ctx.fillRect((x + margin) * cellSize, (y + margin) * cellSize, cellSize, cellSize);
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Canvas QR code generation failed:", err);
+    }
+  } else if (tag === 'svg') {
+    try {
+      const svgStr = generateQRCodeSVG(text);
+      if (svgStr) {
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = svgStr;
+        const svgEl = tempDiv.querySelector('svg');
+        if (svgEl) {
+          if (svgEl.getAttribute('viewBox')) {
+            targetEl.setAttribute('viewBox', svgEl.getAttribute('viewBox'));
+          }
+          if (svgEl.getAttribute('width')) {
+            targetEl.setAttribute('width', svgEl.getAttribute('width'));
+          }
+          if (svgEl.getAttribute('height')) {
+            targetEl.setAttribute('height', svgEl.getAttribute('height'));
+          }
+          targetEl.innerHTML = svgEl.innerHTML;
+        } else {
+          targetEl.innerHTML = svgStr;
+        }
+      }
+    } catch (err) {
+      console.error("SVG QR code generation failed:", err);
+    }
+  } else {
+    try {
+      const svgStr = generateQRCodeSVG(text);
+      if (svgStr) {
+        targetEl.innerHTML = svgStr.startsWith('<svg') ? svgStr : `<svg xmlns="http://www.w3.org/2000/svg">${svgStr}</svg>`;
+      }
+    } catch (err) {
+      console.error("QR code generation failed:", err);
+    }
+  }
 }
 
 // ── QR Scanning ───────────────────────────────────────────────────────────────
@@ -2910,6 +3057,7 @@ async function startHTTPSSE() {
   useIndexedDB = !useDiskStream;
   if (useIndexedDB) {
     await clearIDB();
+    setState('livepipe');
   }
 
   source.onmessage = (event) => {
@@ -3531,6 +3679,71 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
   });
 }
 
+function waitForDataChannelBuffer(dc, targetThreshold = 64 * 1024, lowWatermark = 0) {
+  if (!dc || dc.readyState !== 'open') {
+    return Promise.reject(new Error("Data channel is closed or closing"));
+  }
+  if (dc.bufferedAmount <= targetThreshold) {
+    if (typeof lowWatermark === 'number' && lowWatermark >= 0) {
+      dc.bufferedAmountLowThreshold = lowWatermark;
+    }
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    let timer = null;
+
+    const cleanup = () => {
+      if (dc && typeof dc.removeEventListener === 'function') {
+        dc.removeEventListener('bufferedamountlow', onLow);
+        dc.removeEventListener('close', onClose);
+        dc.removeEventListener('error', onClose);
+      }
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+
+    const check = () => {
+      if (!dc || dc.readyState !== 'open') {
+        cleanup();
+        reject(new Error("Data channel is closed or closing"));
+        return true;
+      }
+      if (dc.bufferedAmount <= targetThreshold) {
+        cleanup();
+        resolve();
+        return true;
+      }
+      return false;
+    };
+
+    const onLow = () => {
+      check();
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error("Data channel is closed or closing"));
+    };
+
+    if (typeof lowWatermark === 'number' && lowWatermark >= 0) {
+      dc.bufferedAmountLowThreshold = lowWatermark;
+    }
+
+    dc.addEventListener('bufferedamountlow', onLow);
+    dc.addEventListener('close', onClose);
+    dc.addEventListener('error', onClose);
+
+    if (check()) return;
+
+    timer = setInterval(() => {
+      check();
+    }, 250);
+  });
+}
+
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
 async function uploadFileP2P(file, dc = webrtcDataChannel) {
   if (!dc || dc.readyState !== 'open') {
@@ -3761,8 +3974,8 @@ function initSpotlight() {
 }
 
 // ── Local QR Code Generator ───────────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
+var GF256_EXP = typeof GF256_EXP !== 'undefined' ? GF256_EXP : new Uint8Array(512);
+var GF256_LOG = typeof GF256_LOG !== 'undefined' ? GF256_LOG : new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -4637,8 +4850,8 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Client-side QR Code Generator ─────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
+var GF256_EXP = typeof GF256_EXP !== 'undefined' ? GF256_EXP : new Uint8Array(512);
+var GF256_LOG = typeof GF256_LOG !== 'undefined' ? GF256_LOG : new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -5033,6 +5246,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     uploadFileP2P,
@@ -5056,6 +5270,8 @@ if (typeof module !== 'undefined' && module.exports) {
     stripAnsi,
     parseAnsiToHtml,
     renderQRCode,
+    generateClientQRCodeDataURL,
+    generateQRCodeSVG,
     handleSenderFileSelect,
     startSenderSharing,
     get_senderEncryptionKey: () => senderEncryptionKey,

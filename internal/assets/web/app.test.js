@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
 const pako = require('pako');
+const qrcode = require('./qrcode.min.js');
 
 // Read index.html for DOM fixture
 const htmlPath = path.join(__dirname, 'index.html');
@@ -158,6 +159,8 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
+    global.qrcode = qrcode;
+    window.qrcode = qrcode;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -198,6 +201,8 @@ describe('Gaze Web Receiver Test Suite', () => {
   });
 
   test('Service Worker Registration & data-sw-ready attribute', async () => {
+    const origFetch = window.fetch;
+    window.fetch = global.fetch = async () => ({ ok: false, status: 404 });
     let readyResolver;
     const readyPromise = new Promise(resolve => { readyResolver = resolve; });
     const mockSW = {
@@ -234,6 +239,9 @@ describe('Gaze Web Receiver Test Suite', () => {
     delete window.navigator.serviceWorker;
     if (typeof global.navigator !== 'undefined') {
       delete global.navigator.serviceWorker;
+    }
+    if (origFetch) {
+      window.fetch = global.fetch = origFetch;
     }
   });
 
@@ -821,6 +829,7 @@ describe('Gaze Web Sender Test Suite', () => {
       });
     }
 
+    let fetchedURLs = [];
     global.fetch = async (url) => {
       fetchedURLs.push(url.toString());
       if (url.includes('/poll')) {
@@ -862,7 +871,7 @@ describe('Gaze Web Sender Test Suite', () => {
     let externalRequests = [];
     window.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
@@ -1069,6 +1078,27 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.deepEqual(servers[0].urls, ['turn:turn.example.com:3478']);
     assert.equal(servers[0].username, 'alice');
     assert.equal(servers[0].credential, 'secret');
+  });
+
+  test('Client-side QR code generation renders SVG locally without external network requests', async () => {
+    const testURL = "http://localhost:8080/?s=test-session#k=SecretKey1234567890";
+    
+    // Test generateQRCodeSVG helper
+    const svgStr = app.generateQRCodeSVG(testURL);
+    assert.ok(svgStr.includes('<svg'));
+    assert.ok(svgStr.includes('</svg>'));
+
+    // Test renderQRCode helper on DOM element
+    const imgEl = document.getElementById('send-qr-img');
+    app.renderQRCode(imgEl, testURL);
+
+    assert.ok(imgEl.src.startsWith('data:image/svg+xml;charset=utf-8,'));
+    assert.equal(imgEl.src.includes('api.qrserver.com'), false);
+    assert.equal(imgEl.src.includes('/api/qr'), false);
+
+    // Verify encoded content decodes back to the test URL
+    const decodedSVG = decodeURIComponent(imgEl.src.replace('data:image/svg+xml;charset=utf-8,', ''));
+    assert.ok(decodedSVG.includes('<svg'));
   });
 });
 
