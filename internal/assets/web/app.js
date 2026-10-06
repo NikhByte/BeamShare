@@ -2142,7 +2142,7 @@ function setMode(mode, label) {
 
 // ── Service Worker Pipe ───────────────────────────────────────────────────────
 async function getSWPipe(fileMeta) {
-  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
+  if (!('serviceWorker' in navigator)) return null;
 
   // WebKit (Safari / Mobile Safari) does not reliably route iframe navigations through SW fetch handlers
   const isWebKit = typeof navigator !== 'undefined' && (/AppleWebKit/i.test(navigator.userAgent) && !/Chrome|Chromium|Edg|Firefox/i.test(navigator.userAgent));
