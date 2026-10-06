@@ -28,12 +28,12 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     const { streamMap } = require('./sw.js');
     const url = '/sw-download-pipe/test-port-ready';
 
-    let postedMessages = [];
+    let postedMessage = null;
     const mockPort = {
       onmessage: null,
       onmessageerror: null,
       close: () => {},
-      postMessage: (msg) => { postedMessages.push(msg); }
+      postMessage: (msg) => { postedMessage = msg; }
     };
 
     listeners['message']({
@@ -48,7 +48,7 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     });
 
     assert.equal(streamMap.has(url), true);
-    assert.equal(postedMessages.some(m => m && (m.type === 'PORT_READY' || m.type === 'READY')), true);
+    assert.deepEqual(postedMessage, { type: 'PORT_READY' });
   });
 
   test('formatContentDisposition formats RFC 6266 dual parameters correctly', () => {
@@ -324,7 +324,7 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
       onmessageerror: null,
       close: () => {},
       postMessage: (msg) => {
-        if (msg && msg.type === 'READY') {
+        if (msg && (msg.type === 'PORT_READY' || msg.type === 'READY')) {
           readyPosted = true;
         }
       }
