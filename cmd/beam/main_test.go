@@ -7,7 +7,6 @@ import (
 	"os"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/beamshare/beam/internal/server"
 )
