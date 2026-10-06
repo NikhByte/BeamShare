@@ -591,13 +591,40 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								}
 
 								bufferedAmountLowChan := make(chan struct{}, 1)
-								dc.SetBufferedAmountLowThreshold(512 * 1024)
 								dc.OnBufferedAmountLow(func() {
 									select {
 									case bufferedAmountLowChan <- struct{}{}:
 									default:
 									}
 								})
+
+								waitForBufferLow := func(targetThreshold uint64) error {
+									dc.SetBufferedAmountLowThreshold(targetThreshold)
+									if uint64(dc.BufferedAmount()) <= targetThreshold {
+										return nil
+									}
+									ticker := time.NewTicker(20 * time.Millisecond)
+									defer ticker.Stop()
+
+									for {
+										if dc.ReadyState() != webrtc.DataChannelStateOpen {
+											return fmt.Errorf("data channel is no longer open")
+										}
+										if uint64(dc.BufferedAmount()) <= targetThreshold {
+											return nil
+										}
+										select {
+										case <-bufferedAmountLowChan:
+											if uint64(dc.BufferedAmount()) <= targetThreshold {
+												return nil
+											}
+										case <-ticker.C:
+											if uint64(dc.BufferedAmount()) <= targetThreshold {
+												return nil
+											}
+										}
+									}
+								}
 
 								buffer := make([]byte, 64*1024) // 64KB chunk size
 								totalSent := offset
@@ -610,7 +637,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 									// Backpressure check: wait if buffered amount > 1MB
 									if dc.BufferedAmount() > 1024*1024 {
-										<-bufferedAmountLowChan
+										if errWait := waitForBufferLow(512 * 1024); errWait != nil {
+											fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
+											return
+										}
 									}
 
 									if !pauseCtrl.WaitIfPaused() {
@@ -637,9 +667,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								}
 
 								// Wait for buffer to clear before sending EOF
-								dc.SetBufferedAmountLowThreshold(0)
 								if dc.BufferedAmount() > 0 {
-									<-bufferedAmountLowChan
+									if errWait := waitForBufferLow(0); errWait != nil {
+										fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
+										return
+									}
 								}
 								dc.SendText("EOF")
 
