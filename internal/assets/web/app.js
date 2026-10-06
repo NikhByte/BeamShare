@@ -2989,6 +2989,15 @@ async function startWebRTC() {
   setState('webrtc');
   setMode('webrtc', 'WebRTC P2P (optical handshake)');
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.error("Failed to import decryption key", err);
+    showError("Decryption key error: " + err.message);
+    return;
+  }
+
   // 1. Fetch the full SDP offer from the server.
   let offer;
   const params = new URLSearchParams(window.location.search);
