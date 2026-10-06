@@ -3765,8 +3765,8 @@ function initSpotlight() {
 }
 
 // ── Local QR Code Generator ───────────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
+var GF256_EXP = (typeof GF256_EXP !== 'undefined') ? GF256_EXP : new Uint8Array(512);
+var GF256_LOG = (typeof GF256_LOG !== 'undefined') ? GF256_LOG : new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -4641,8 +4641,8 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Client-side QR Code Generator ─────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
+var GF256_EXP = (typeof GF256_EXP !== 'undefined') ? GF256_EXP : new Uint8Array(512);
+var GF256_LOG = (typeof GF256_LOG !== 'undefined') ? GF256_LOG : new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -5037,6 +5037,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     uploadFileP2P,
@@ -5059,6 +5060,7 @@ if (typeof module !== 'undefined' && module.exports) {
     resetState,
     stripAnsi,
     parseAnsiToHtml,
+    renderQRCode,
     handleSenderFileSelect,
     startSenderSharing,
     get_senderEncryptionKey: () => senderEncryptionKey,
