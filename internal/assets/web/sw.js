@@ -70,6 +70,7 @@ self.addEventListener('message', (event) => {
       }
       cleanup();
     }, STREAM_TTL_MS);
+    if (ttlTimer && typeof ttlTimer.unref === 'function') ttlTimer.unref();
 
     const stream = new ReadableStream({
       start(controller) {

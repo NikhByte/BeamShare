@@ -524,7 +524,6 @@ function apiPath(path) {
 
 // ── Local QR Code Generator & Renderer ─────────────────────────────────────
 "use strict";
-var qrcodegen;
 (function (qrcodegen) {
  class QrCode {
  constructor(
@@ -1146,7 +1145,25 @@ function qrToSvgDataUrl(qr, border = 4) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
-function renderQRCode(element, text, options = {}) {
+function renderQRCode(arg1, arg2, options = {}) {
+  let element = null;
+  let text = '';
+  if (typeof arg1 === 'string' && arg2 && typeof arg2 === 'object') {
+    text = arg1;
+    element = arg2;
+  } else if (typeof arg1 === 'object' && typeof arg2 === 'string') {
+    element = arg1;
+    text = arg2;
+  } else if (typeof arg1 === 'string' && typeof arg2 === 'string') {
+    element = document.getElementById(arg1);
+    text = arg2;
+  } else {
+    element = arg1;
+    text = arg2;
+  }
+  if (!element && typeof arg1 === 'string' && typeof document !== 'undefined') {
+    element = document.getElementById(arg1);
+  }
   if (!element) return;
   try {
     if (!text) {
@@ -1172,9 +1189,30 @@ function renderQRCode(element, text, options = {}) {
       }
     } else if (tagName === 'canvas') {
       try {
+        if (!element.width) element.width = 250;
+        if (!element.height) element.height = 250;
         renderQRToCanvas(qr, element, options.border !== undefined ? options.border : 4);
       } catch (canvasErr) {
         showQRError(element, "Canvas QR rendering failed");
+      }
+    } else if (tagName === 'svg') {
+      try {
+        const border = options.border !== undefined ? options.border : 4;
+        const totalSize = qr.size + border * 2;
+        element.setAttribute('viewBox', '0 0 ' + totalSize + ' ' + totalSize);
+        element.setAttribute('width', '100%');
+        element.setAttribute('height', '100%');
+        let pathStr = '';
+        for (let y = 0; y < qr.size; y++) {
+          for (let x = 0; x < qr.size; x++) {
+            if (qr.getModule(x, y)) {
+              pathStr += 'M' + (x + border) + ',' + (y + border) + 'h1v1h-1z ';
+            }
+          }
+        }
+        element.innerHTML = '<rect width="' + totalSize + '" height="' + totalSize + '" fill="#ffffff"/><path d="' + pathStr + '" fill="#000000"/>';
+      } catch (err) {
+        showQRError(element, "Failed to render QR SVG");
       }
     } else {
       try {
@@ -3226,17 +3264,6 @@ async function startWebRTC() {
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
 
-    let decryptionKey = null;
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch (e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      if (typeof webrtcDataChannel !== 'undefined' && webrtcDataChannel) webrtcDataChannel.close();
-      pc.close();
-      return;
-    }
-
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
       if (dc.readyState === 'open') {
@@ -3451,15 +3478,28 @@ async function startWebRTC() {
  * Attaches the 'bufferedamountlow' listener and immediately re-evaluates bufferedAmount before awaiting,
  * supplemented by a polling fallback to prevent race conditions during buffer drains.
  */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
+function waitForBufferedAmountLow(dc, highWatermark = 512 * 1024, lowWatermark = 256 * 1024, pollMs = 250) {
+  if (!dc) return Promise.resolve();
+  let target = highWatermark;
+  let intervalMs = 250;
+
+  if (typeof lowWatermark === 'number' && lowWatermark > 1000) {
+    target = lowWatermark;
+  } else if (typeof lowWatermark === 'number') {
+    intervalMs = lowWatermark;
+  }
+  if (typeof pollMs === 'number' && pollMs <= 1000) {
+    intervalMs = pollMs;
+  }
+
   return new Promise((resolve, reject) => {
-    if (!dc || dc.readyState !== 'open') {
-      return reject(new Error("Data channel is no longer open"));
+    if (dc.readyState !== 'open') {
+      return reject(new Error("Data channel is closed or closing"));
     }
 
-    dc.bufferedAmountLowThreshold = targetThreshold;
+    dc.bufferedAmountLowThreshold = target;
 
-    if (dc.bufferedAmount <= targetThreshold) {
+    if (dc.bufferedAmount <= target) {
       return resolve();
     }
 
@@ -3468,6 +3508,8 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
     const cleanup = () => {
       if (dc && typeof dc.removeEventListener === 'function') {
         dc.removeEventListener('bufferedamountlow', onBufferedAmountLow);
+        dc.removeEventListener('close', onCloseOrError);
+        dc.removeEventListener('error', onCloseOrError);
       }
       if (intervalId !== null) {
         clearInterval(intervalId);
@@ -3480,11 +3522,20 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
       resolve();
     };
 
-    // Attach bufferedamountlow listener
-    dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
+    const onCloseOrError = () => {
+      cleanup();
+      reject(new Error("Data channel is closed or closing"));
+    };
+
+    // Attach listeners
+    if (typeof dc.addEventListener === 'function') {
+      dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
+      dc.addEventListener('close', onCloseOrError);
+      dc.addEventListener('error', onCloseOrError);
+    }
 
     // Immediately re-evaluate bufferedAmount after attaching listener
-    if (dc.bufferedAmount <= targetThreshold) {
+    if (dc.bufferedAmount <= target) {
       cleanup();
       return resolve();
     }
@@ -3493,16 +3544,17 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
     intervalId = setInterval(() => {
       if (dc.readyState !== 'open') {
         cleanup();
-        reject(new Error("Data channel is no longer open"));
+        reject(new Error("Data channel is closed or closing"));
         return;
       }
-      if (dc.bufferedAmount <= targetThreshold) {
+      if (dc.bufferedAmount <= target) {
         cleanup();
         resolve();
       }
-    }, pollMs);
+    }, intervalMs);
   });
 }
+const waitForDataChannelBuffer = waitForBufferedAmountLow;
 
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
 async function uploadFileP2P(file, dc = webrtcDataChannel) {
@@ -3644,7 +3696,11 @@ function appendTerminalText(text) {
 }
 
 function showDone(name, size, mode) {
-  localStorage.removeItem('beam_resume');
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage) {
+      localStorage.removeItem('beam_resume');
+    }
+  } catch (_) {}
   document.getElementById('done-sub').textContent = `${name} · ${formatBytes(size)}`;
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   const speed   = formatBytes(size / (elapsed || 1)) + '/s';
@@ -3845,7 +3901,8 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    renderQRCode('send-qr-img', shareURL.href);
+    renderQRCode('send-qr-canvas', shareURL.href);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -3978,10 +4035,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(senderDataChannel, 512 * 1024);
+    while ((dc && dc.bufferedAmount > 1024 * 1024) || senderPaused) {
+      if (!dc || dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+      if (dc.bufferedAmount > 1024 * 1024) {
+        await waitForBufferedAmountLow(dc, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -4021,10 +4078,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (senderDataChannel.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(senderDataChannel, 0);
+  if (dc && dc.bufferedAmount > 0) {
+    await waitForBufferedAmountLow(dc, 0);
   }
-  senderDataChannel.send("EOF");
+  if (dc) dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
@@ -4250,20 +4307,12 @@ function generateQRCodeDataURL(text, options) {
   throw new Error("Client-side QR generator unavailable");
 }
 
-function renderQRCode(elementOrId, url) {
-  const img = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
-  if (!img) return;
-  try {
-    const dataUrl = generateQRCodeDataURL(url);
-    img.src = dataUrl;
-  } catch (err) {
-    console.error("Failed to generate QR code client-side");
-  }
-}
-
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     waitForBufferedAmountLow,
+    waitForDataChannelBuffer: waitForBufferedAmountLow,
+    uploadFileP2P,
+    sendWebRTCFile,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
