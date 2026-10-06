@@ -7,7 +7,6 @@ import (
 	"os"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/beamshare/beam/internal/server"
 )
@@ -39,6 +38,13 @@ func TestParseFlags(t *testing.T) {
 
 	if discoveryTimeout != 15*1000*1000*1000 { // 15 seconds
 		t.Fatalf("expected discovery timeout 15s, got %v", discoveryTimeout)
+	}
+
+	if !reflect.DeepEqual(parsedTurnServers, []string{"turn:1"}) {
+		t.Fatalf("expected parsedTurnServers ['turn:1'], got %v", parsedTurnServers)
+	}
+	if parsedTurnUsername != "user" || parsedTurnCredential != "pass" {
+		t.Fatalf("expected parsed turn auth user=user pass=pass, got user=%s pass=%s", parsedTurnUsername, parsedTurnCredential)
 	}
 }
 
@@ -114,81 +120,44 @@ func TestDownloadFile_Relay(t *testing.T) {
 	}
 }
 
-func TestBackpressureSelectLoop(t *testing.T) {
-	bufferedAmountLowChan := make(chan struct{}, 1)
-
-	var currentBuffer uint64 = 1500 * 1024 // 1.5MB > 1MB threshold
-
-	getBufferedAmount := func() uint64 {
-		return currentBuffer
+func TestDownloadFile_PathTraversalSanitization(t *testing.T) {
+	traversalCases := []struct {
+		rawMetaName      string
+		expectedFileName string
+	}{
+		{"../../etc/passwd", "received_passwd"},
+		{"..\\..\\evil.bat", "received_evil.bat"},
+		{"\x00../malicious.sh", "received_malicious.sh"},
+		{"....", "received_download.bin"},
 	}
 
-	waitBackpressure := func(target uint64) {
-		for getBufferedAmount() > target {
-			select {
-			case <-bufferedAmountLowChan:
-			case <-time.After(30 * time.Millisecond):
+	for _, tc := range traversalCases {
+		t.Run(tc.rawMetaName, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+				meta := server.FileMeta{
+					Name: tc.rawMetaName,
+					Size: 10,
+				}
+				json.NewEncoder(w).Encode(meta)
+			})
+			mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte("0123456789"))
+			})
+
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
+
+			defer os.Remove(tc.expectedFileName)
+
+			err := downloadFile(ts.URL)
+			if err != nil {
+				t.Fatalf("downloadFile failed for %s: %v", tc.rawMetaName, err)
 			}
-		}
-	}
 
-	// Case 1: Timeout fallback resolves when buffer drops without explicit signal
-	doneChan := make(chan struct{})
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		currentBuffer = 400 * 1024
-	}()
-
-	go func() {
-		waitBackpressure(1024 * 1024)
-		close(doneChan)
-	}()
-
-	select {
-	case <-doneChan:
-		// Success
-	case <-time.After(500 * time.Millisecond):
-		t.Fatalf("waitBackpressure deadlocked on timeout fallback")
-	}
-
-	// Case 2: Signal unblocks loop
-	currentBuffer = 1500 * 1024
-	doneChan2 := make(chan struct{})
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		currentBuffer = 200 * 1024
-		bufferedAmountLowChan <- struct{}{}
-	}()
-
-	go func() {
-		waitBackpressure(1024 * 1024)
-		close(doneChan2)
-	}()
-
-	select {
-	case <-doneChan2:
-		// Success
-	case <-time.After(500 * time.Millisecond):
-		t.Fatalf("waitBackpressure deadlocked on signal unblock")
-	}
-
-	// Case 3: EOF flush with target threshold 0
-	currentBuffer = 100 * 1024
-	doneChan3 := make(chan struct{})
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		currentBuffer = 0
-	}()
-
-	go func() {
-		waitBackpressure(0)
-		close(doneChan3)
-	}()
-
-	select {
-	case <-doneChan3:
-		// Success
-	case <-time.After(500 * time.Millisecond):
-		t.Fatalf("waitBackpressure deadlocked on EOF flush")
+			if _, err := os.Stat(tc.expectedFileName); os.IsNotExist(err) {
+				t.Fatalf("expected file %s to exist, but was not found", tc.expectedFileName)
+			}
+		})
 	}
 }
