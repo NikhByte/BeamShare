@@ -1,5 +1,5 @@
 // ── Client-side QR Code Generator Engine (Zero Network Dependencies) ──────
-const qrcodegen = (function() {
+var qrcodegen = (function() {
 	function QrCode(version, errorCorrectionLevel, dataCodewords, msk) {
 		if (version < QrCode.MIN_VERSION || version > QrCode.MAX_VERSION)
 			throw new RangeError("Version value out of range");
@@ -1146,7 +1146,15 @@ function qrToSvgDataUrl(qr, border = 4) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
-function renderQRCode(element, text, options = {}) {
+function renderQRCode(arg1, arg2, options = {}) {
+  let element, text;
+  if (typeof arg1 === 'string' && arg2 && typeof arg2 === 'object') {
+    text = arg1;
+    element = arg2;
+  } else {
+    element = typeof arg1 === 'string' ? document.getElementById(arg1) : arg1;
+    text = arg2;
+  }
   if (!element) return;
   try {
     if (!text) {
@@ -1175,6 +1183,28 @@ function renderQRCode(element, text, options = {}) {
         renderQRToCanvas(qr, element, options.border !== undefined ? options.border : 4);
       } catch (canvasErr) {
         showQRError(element, "Canvas QR rendering failed");
+      }
+    } else if (tagName === 'svg') {
+      try {
+        const border = options.border !== undefined ? options.border : 4;
+        const totalSize = qr.size + border * 2;
+        element.setAttribute('viewBox', '0 0 ' + totalSize + ' ' + totalSize);
+        element.setAttribute('width', '100%');
+        element.setAttribute('height', '100%');
+        element.setAttribute('shape-rendering', 'crispEdges');
+        let content = '<rect width="' + totalSize + '" height="' + totalSize + '" fill="#ffffff"/>';
+        content += '<path d="';
+        for (let y = 0; y < qr.size; y++) {
+          for (let x = 0; x < qr.size; x++) {
+            if (qr.getModule(x, y)) {
+              content += 'M' + (x + border) + ',' + (y + border) + 'h1v1h-1z ';
+            }
+          }
+        }
+        content += '" fill="#000000"/>';
+        element.innerHTML = content;
+      } catch (err) {
+        showQRError(element, "Failed to render QR SVG");
       }
     } else {
       try {
@@ -3226,16 +3256,6 @@ async function startWebRTC() {
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
 
-    let decryptionKey = null;
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch (e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      pc.close();
-      return;
-    }
-
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
       if (dc.readyState === 'open') {
@@ -3336,7 +3356,7 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
+      encBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -3345,43 +3365,8 @@ async function startWebRTC() {
             if (typeof e.data === 'string') {
               if (e.data === "EOF") {
                 chunkQueue.enqueueEOF();
-                await chunkQueue.drain();
-                if (diskWritableStream) {
-                  await diskWritableStream.close();
-                  if (useOPFS) {
-                    const file = await diskFileHandle.getFile();
-                    triggerSave(file, currentFile.name);
-                  }
-                  chunkQueue.enqueueEOF();
-                  try {
-                    await chunkQueue.drain();
-                    if (diskWritableStream) {
-                      await diskWritableStream.close();
-                      if (useOPFS) {
-                        const file = await diskFileHandle.getFile();
-                        triggerSave(file, currentFile.name);
-                      }
-                    } else if (swPipePort) {
-                      swPipePort.postMessage("EOF");
-                    } else {
-                      let finalBlob;
-                      if (useIndexedDB) {
-                        finalBlob = await getAllChunksIDB(currentFile.mime);
-                        await clearIDB();
-                      } else {
-                        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                      }
-                      triggerSave(finalBlob, currentFile.name);
-                    }
-                    resolve();
-                  } catch (err) {
-                    hasError = true;
-                    // Handled in chunkQueue onError callback
-                  }
-                });
-              } else {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
+                try {
+                  await chunkQueue.drain();
                   if (diskWritableStream) {
                     await diskWritableStream.close();
                     if (useOPFS) {
@@ -3400,9 +3385,10 @@ async function startWebRTC() {
                     }
                     triggerSave(finalBlob, currentFile.name);
                   }
-                  triggerSave(finalBlob, currentFile.name);
+                  resolve();
+                } catch (err) {
+                  // Handled in chunkQueue onError callback
                 }
-                resolve();
               }
               return;
             }
@@ -3478,58 +3464,6 @@ async function startWebRTC() {
             reject(err);
           }
         }
-
-        const chunk = new Uint8Array(e.data);
-        msgChain = msgChain.then(async () => {
-          if (isTerminated) return;
-
-          if (decryptionKey) {
-            let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(chunk, encBuffer.length);
-            encBuffer = newBuffer;
-
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-              const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
-
-                if (frameLen < 12) {
-                  throw new Error("Invalid frame length: header smaller than nonce size");
-                }
-
-                const nonce = new Uint8Array(frame.subarray(0, 12));
-                const ciphertext = new Uint8Array(frame.subarray(12));
-
-                let decrypted;
-                try {
-                  decrypted = await crypto.subtle.decrypt(
-                    { name: "AES-GCM", iv: nonce },
-                    decryptionKey,
-                    ciphertext
-                  );
-                } catch (decryptErr) {
-                  throw new Error("Decryption failed: corrupted frame or invalid key");
-                }
-
-                const decValue = new Uint8Array(decrypted);
-                chunkQueue.enqueue(decValue);
-              } else {
-                break;
-              }
-            }
-          } else {
-            chunkQueue.enqueue(chunk);
-          }
-        }).catch((err) => {
-          if (isTerminated) return;
-          isTerminated = true;
-          showError(`Transfer failed: ${err.message}`);
-          try { dc.close(); } catch (closeErr) {}
-          reject(err);
-        });
       };
 
       dc.onerror = (e) => reject(new Error('data channel error: ' + e));
@@ -3550,6 +3484,67 @@ async function startWebRTC() {
  * Attaches the 'bufferedamountlow' listener and immediately re-evaluates bufferedAmount before awaiting,
  * supplemented by a polling fallback to prevent race conditions during buffer drains.
  */
+function waitForDataChannelBuffer(dc, maxBufferedAmount = 1024 * 1024, targetThreshold = 512 * 1024) {
+  return new Promise((resolve, reject) => {
+    if (!dc || dc.readyState !== 'open') {
+      return reject(new Error("DataChannel closed or closing"));
+    }
+
+    dc.bufferedAmountLowThreshold = targetThreshold;
+
+    if (dc.bufferedAmount <= maxBufferedAmount && dc.bufferedAmount <= targetThreshold) {
+      return resolve();
+    }
+
+    let intervalId = null;
+
+    const cleanup = () => {
+      if (dc && typeof dc.removeEventListener === 'function') {
+        dc.removeEventListener('bufferedamountlow', onLow);
+        dc.removeEventListener('close', onClose);
+        dc.removeEventListener('error', onClose);
+      }
+      if (intervalId !== null) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+
+    const onLow = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error("DataChannel closed or closing"));
+    };
+
+    if (typeof dc.addEventListener === 'function') {
+      dc.addEventListener('bufferedamountlow', onLow);
+      dc.addEventListener('close', onClose);
+      dc.addEventListener('error', onClose);
+    }
+
+    if (dc.bufferedAmount <= targetThreshold) {
+      cleanup();
+      return resolve();
+    }
+
+    intervalId = setInterval(() => {
+      if (!dc || dc.readyState !== 'open') {
+        cleanup();
+        reject(new Error("DataChannel closed or closing"));
+        return;
+      }
+      if (dc.bufferedAmount <= targetThreshold) {
+        cleanup();
+        resolve();
+      }
+    }, 250);
+  });
+}
+
 function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
   return new Promise((resolve, reject) => {
     if (!dc || dc.readyState !== 'open') {
@@ -3579,18 +3574,15 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
       resolve();
     };
 
-    // Attach bufferedamountlow listener
     dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
 
-    // Immediately re-evaluate bufferedAmount after attaching listener
     if (dc.bufferedAmount <= targetThreshold) {
       cleanup();
       return resolve();
     }
 
-    // Polling fallback to check for buffer drain or closed channel
     intervalId = setInterval(() => {
-      if (dc.readyState !== 'open') {
+      if (!dc || dc.readyState !== 'open') {
         cleanup();
         reject(new Error("Data channel is no longer open"));
         return;
@@ -3944,7 +3936,10 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    const qrImg = document.getElementById('send-qr-img');
+    if (qrImg) renderQRCode(shareURL.href, qrImg);
+    const qrCanvas = document.getElementById('send-qr-canvas');
+    if (qrCanvas) renderQRCode(shareURL.href, qrCanvas);
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -4077,10 +4072,11 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(senderDataChannel, 512 * 1024);
+    const channel = dc || senderDataChannel;
+    while (channel && (channel.bufferedAmount > 1024 * 1024 || senderPaused)) {
+      if (channel.readyState !== 'open') throw new Error("Data channel is no longer open");
+      if (channel.bufferedAmount > 1024 * 1024) {
+        await waitForDataChannelBuffer(channel, 1024 * 1024, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -4120,11 +4116,13 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (senderDataChannel.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(senderDataChannel, 0);
+  const channelEnd = dc || senderDataChannel;
+  if (channelEnd && channelEnd.bufferedAmount > 0) {
+    await waitForDataChannelBuffer(channelEnd, 0, 0);
   }
-  senderDataChannel.send("EOF");
-  document.getElementById('send-status-label').textContent = "Transfer Complete!";
+  if (channelEnd) channelEnd.send("EOF");
+  const statusLabel = document.getElementById('send-status-label');
+  if (statusLabel) statusLabel.textContent = "Transfer Complete!";
 }
 
 async function startSenderPolling(backend) {
@@ -4349,20 +4347,14 @@ function generateQRCodeDataURL(text, options) {
   throw new Error("Client-side QR generator unavailable");
 }
 
-function renderQRCode(elementOrId, url) {
-  const img = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
-  if (!img) return;
-  try {
-    const dataUrl = generateQRCodeDataURL(url);
-    img.src = dataUrl;
-  } catch (err) {
-    console.error("Failed to generate QR code client-side");
-  }
-}
+
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    waitForDataChannelBuffer,
     waitForBufferedAmountLow,
+    uploadFileP2P,
+    sendWebRTCFile,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
