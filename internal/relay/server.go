@@ -1227,53 +1227,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 			copyDone := make(chan error, 1)
 			go func() {
-				type chunk struct {
-					data []byte
-					err  error
-				}
-				chunks := make(chan chunk, 16)
-
-				go func() {
-					defer close(chunks)
-					for {
-						buf := make([]byte, 32*1024)
-						n, readErr := part.Read(buf)
-						if n > 0 {
-							cData := make([]byte, n)
-							copy(cData, buf[:n])
-							chunks <- chunk{data: cData}
-						}
-						if readErr != nil {
-							if readErr != io.EOF {
-								chunks <- chunk{err: readErr}
-							}
-							break
-						}
-					}
-				}()
-
-				var writeErr error
-				for c := range chunks {
-					if c.err != nil {
-						writeErr = c.err
-						break
-					}
-					if len(c.data) > 0 {
-						_, err := pw.Write(c.data)
-						if err != nil {
-							writeErr = err
-							break
-						}
-					}
-				}
-
-				if writeErr != nil {
-					pw.CloseWithError(writeErr)
+				defer part.Close()
+				_, cErr := io.Copy(pw, part)
+				if cErr != nil {
+					pw.CloseWithError(cErr)
 				} else {
 					pw.Close()
 				}
-				part.Close()
-				copyDone <- writeErr
+				copyDone <- cErr
 			}()
 
 			select {
@@ -1281,6 +1242,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			case <-r.Context().Done():
 				uploadErr = fmt.Errorf("upload context cancelled: %w", r.Context().Err())
 				sess.ClosePipesIfMatch(pr, pw, uploadErr)
+				<-copyDone
 			}
 
 			if uploadErr != nil {
@@ -1332,5 +1294,6 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	case <-r.Context().Done():
 		pullErr = fmt.Errorf("pull context cancelled: %w", r.Context().Err())
 		sess.ClosePipesIfMatch(pr, pw, pullErr)
+		<-copyDone
 	}
 }
