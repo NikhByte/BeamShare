@@ -222,7 +222,7 @@ describe('Gaze Web Receiver Test Suite', () => {
       } catch (e) {}
     }
 
-    app.init();
+    app.init(true);
 
     assert.equal(document.documentElement.getAttribute('data-sw-ready'), null);
 
@@ -748,8 +748,10 @@ describe('Gaze Web Sender Test Suite', () => {
   let window;
   let document;
   let app;
+  let fetchedURLs;
 
   beforeEach(() => {
+    fetchedURLs = [];
     dom = new JSDOM(htmlContent, {
       url: 'http://localhost:8080/'
     });
