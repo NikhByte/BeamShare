@@ -109,9 +109,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -653,6 +650,7 @@ describe('Gaze Web Receiver Test Suite', () => {
     await decryptChain;
 
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
   test('WebRTC DataChannel String Control Messages (PAUSE/RESUME/EOF)', async () => {
     let paused = false;
     let eofEnqueued = false;
