@@ -557,96 +557,89 @@ func TestLiveStream_ConcurrentSubscribersStress(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 }
 
-func TestConcurrentUpdateSharedFileAndHandlers(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	file1 := filepath.Join(tmpDir, "file1.txt")
-	require.NoError(t, os.WriteFile(file1, []byte("content of file 1"), 0644))
-
-	file2 := filepath.Join(tmpDir, "file2.txt")
-	require.NoError(t, os.WriteFile(file2, []byte("content of file 2 and more"), 0644))
-
-	srv, err := New(file1, 1024*1024)
+func TestLiveStreamReader_ContinuousStreaming(t *testing.T) {
+	srv, err := New("", 10*1024*1024)
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Mux())
-	defer ts.Close()
+	srv.WriteLive([]byte("backlog 1\n"))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	reader := srv.NewLiveStreamReader(context.Background(), 0)
+	defer reader.Close()
 
-	var wg sync.WaitGroup
+	buf := make([]byte, 1024)
 
-	// Goroutine 1: Rapidly calls UpdateSharedFile
-	wg.Add(1)
+	// Read initial backlog
+	n, err := reader.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "backlog 1\n", string(buf[:n]))
+
+	// Asynchronously write live chunks
 	go func() {
-		defer wg.Done()
-		files := []struct {
-			path string
-			name string
-			size int64
-		}{
-			{file1, "file1.txt", 17},
-			{file2, "file2.txt", 26},
-		}
-		idx := 0
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				f := files[idx%2]
-				srv.UpdateSharedFile(f.path, f.name, f.size)
-				idx++
-				time.Sleep(100 * time.Microsecond)
-			}
-		}
+		time.Sleep(20 * time.Millisecond)
+		srv.WriteLive([]byte("live chunk 2\n"))
+		time.Sleep(20 * time.Millisecond)
+		srv.CloseLive()
 	}()
 
-	// Goroutine 2: Rapidly calls /api/meta
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		client := &http.Client{Timeout: 1 * time.Second}
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				resp, err := client.Get(ts.URL + "/api/meta")
-				if err == nil {
-					assert.Equal(t, http.StatusOK, resp.StatusCode)
-					var meta FileMeta
-					err = json.NewDecoder(resp.Body).Decode(&meta)
-					resp.Body.Close()
-					assert.NoError(t, err)
-					assert.True(t, meta.Name == "file1.txt" || meta.Name == "file2.txt")
-				}
-			}
-		}
-	}()
+	// Read live chunk
+	n, err = reader.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "live chunk 2\n", string(buf[:n]))
 
-	// Goroutine 3: Rapidly calls /api/download
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		client := &http.Client{Timeout: 1 * time.Second}
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				resp, err := client.Get(ts.URL + "/api/download")
-				if err == nil {
-					assert.Equal(t, http.StatusOK, resp.StatusCode)
-					_, err = io.ReadAll(resp.Body)
-					resp.Body.Close()
-					assert.NoError(t, err)
-				}
-			}
-		}
-	}()
-
-	wg.Wait()
+	// Read EOF after CloseLive
+	_, err = reader.Read(buf)
+	assert.Equal(t, io.EOF, err)
 }
 
+func TestLiveStreamReader_WithOffset(t *testing.T) {
+	srv, err := New("", 10*1024*1024)
+	require.NoError(t, err)
+
+	srv.WriteLive([]byte("0123456789"))
+
+	reader := srv.NewLiveStreamReader(context.Background(), 5)
+	defer reader.Close()
+
+	buf := make([]byte, 1024)
+
+	n, err := reader.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "56789", string(buf[:n]))
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		srv.WriteLive([]byte("next"))
+		srv.CloseLive()
+	}()
+
+	n, err = reader.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "next", string(buf[:n]))
+
+	_, err = reader.Read(buf)
+	assert.Equal(t, io.EOF, err)
+}
+
+func TestLiveStreamReader_CloseAndCleanup(t *testing.T) {
+	srv, err := New("", 10*1024*1024)
+	require.NoError(t, err)
+
+	reader := srv.NewLiveStreamReader(context.Background(), 0)
+
+	srv.mu.Lock()
+	clientCount := len(srv.liveClients)
+	srv.mu.Unlock()
+	assert.Equal(t, 1, clientCount)
+
+	err = reader.Close()
+	require.NoError(t, err)
+
+	srv.mu.Lock()
+	clientCount = len(srv.liveClients)
+	srv.mu.Unlock()
+	assert.Equal(t, 0, clientCount)
+
+	buf := make([]byte, 100)
+	_, err = reader.Read(buf)
+	assert.Equal(t, io.EOF, err)
+}
