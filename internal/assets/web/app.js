@@ -67,7 +67,8 @@ function getIceServers(offer) {
       }
     }
     if (params.get('turn_server')) {
-      const turnServers = params.get('turn_server').split(',');
+      const turnServerParams = params.getAll('turn_server');
+      const turnServers = turnServerParams.flatMap(s => s.split(',')).map(s => s.trim()).filter(Boolean);
       const username = params.get('turn_username');
       const credential = params.get('turn_credential');
       servers.push({
@@ -77,7 +78,8 @@ function getIceServers(offer) {
       });
     }
     if (params.get('stun_server')) {
-      const stunServers = params.get('stun_server').split(',');
+      const stunServerParams = params.getAll('stun_server');
+      const stunServers = stunServerParams.flatMap(s => s.split(',')).map(s => s.trim()).filter(Boolean);
       servers.push({ urls: stunServers });
     }
     if (servers.length > 0) {
@@ -827,8 +829,27 @@ async function getSWPipe(fileMeta) {
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
     const reg = await Promise.race([swReady, timeout]);
-    let sw = reg && (reg.active || navigator.serviceWorker.controller);
-    if (!sw) return null;
+
+    if (!navigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        if (navigator.serviceWorker.controller) {
+          resolve();
+          return;
+        }
+        const onControllerChange = () => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          resolve();
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+        setTimeout(resolve, 500);
+      });
+    }
+
+    const sw = navigator.serviceWorker.controller;
+    if (!sw) {
+      console.warn("Page is not controlled by a Service Worker, falling back to storage/RAM");
+      return null;
+    }
 
     const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
     const channel = new MessageChannel();
@@ -2591,6 +2612,7 @@ if (typeof module !== 'undefined' && module.exports) {
     checkRamWarning,
     extractKeyFragment,
     parseDecryptionKeyFromHash,
-    parseSessionInput
+    parseSessionInput,
+    getIceServers
   };
 }

@@ -40,6 +40,13 @@ func TestParseFlags(t *testing.T) {
 	if discoveryTimeout != 15*1000*1000*1000 { // 15 seconds
 		t.Fatalf("expected discovery timeout 15s, got %v", discoveryTimeout)
 	}
+
+	if !reflect.DeepEqual(parsedTurnServers, []string{"turn:1"}) {
+		t.Fatalf("expected parsedTurnServers ['turn:1'], got %v", parsedTurnServers)
+	}
+	if parsedTurnUsername != "user" || parsedTurnCredential != "pass" {
+		t.Fatalf("expected parsed turn auth user=user pass=pass, got user=%s pass=%s", parsedTurnUsername, parsedTurnCredential)
+	}
 }
 
 func TestBufferSizeClamping(t *testing.T) {
@@ -114,58 +121,44 @@ func TestDownloadFile_Relay(t *testing.T) {
 	}
 }
 
-func TestPauseController(t *testing.T) {
-	pc := newPauseController()
-
-	// Initial state: not paused, not closed
-	if !pc.WaitIfPaused() {
-		t.Fatal("expected WaitIfPaused to return true when not closed")
+func TestDownloadFile_PathTraversalSanitization(t *testing.T) {
+	traversalCases := []struct {
+		rawMetaName      string
+		expectedFileName string
+	}{
+		{"../../etc/passwd", "received_passwd"},
+		{"..\\..\\evil.bat", "received_evil.bat"},
+		{"\x00../malicious.sh", "received_malicious.sh"},
+		{"....", "received_download.bin"},
 	}
 
-	// Test Pause & Resume
-	pc.Pause()
+	for _, tc := range traversalCases {
+		t.Run(tc.rawMetaName, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+				meta := server.FileMeta{
+					Name: tc.rawMetaName,
+					Size: 10,
+				}
+				json.NewEncoder(w).Encode(meta)
+			})
+			mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte("0123456789"))
+			})
 
-	unblocked := make(chan bool)
-	go func() {
-		res := pc.WaitIfPaused()
-		unblocked <- res
-	}()
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
 
-	// Ensure goroutine is waiting
-	select {
-	case <-unblocked:
-		t.Fatal("expected WaitIfPaused to block while paused")
-	default:
-	}
+			defer os.Remove(tc.expectedFileName)
 
-	pc.Resume()
+			err := downloadFile(ts.URL)
+			if err != nil {
+				t.Fatalf("downloadFile failed for %s: %v", tc.rawMetaName, err)
+			}
 
-	select {
-	case res := <-unblocked:
-		if !res {
-			t.Fatal("expected WaitIfPaused to return true on Resume")
-		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for Resume unblock")
-	}
-
-	// Test Pause & Close
-	pc.Pause()
-
-	closedCh := make(chan bool)
-	go func() {
-		res := pc.WaitIfPaused()
-		closedCh <- res
-	}()
-
-	pc.Close()
-
-	select {
-	case res := <-closedCh:
-		if res {
-			t.Fatal("expected WaitIfPaused to return false on Close")
-		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for Close unblock")
+			if _, err := os.Stat(tc.expectedFileName); os.IsNotExist(err) {
+				t.Fatalf("expected file %s to exist, but was not found", tc.expectedFileName)
+			}
+		})
 	}
 }

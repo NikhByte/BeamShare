@@ -30,12 +30,15 @@ import (
 const version = "0.4.0"
 
 var (
-	activeChannels []*webrtc.DataChannel
-	channelsMu     sync.Mutex
-	liveFinished   bool
-	relayURL       string
-	receiverURL    string
-	liveBufferSize int = 10 * 1024 * 1024 // 10MB
+	activeChannels       []*webrtc.DataChannel
+	channelsMu           sync.Mutex
+	liveFinished         bool
+	relayURL             string
+	receiverURL          string
+	liveBufferSize       int = 10 * 1024 * 1024 // 10MB
+	parsedTurnServers    []string
+	parsedTurnUsername   string
+	parsedTurnCredential string
 )
 
 type pauseController struct {
@@ -258,6 +261,10 @@ func parseFlags(args []string) ([]string, []webrtc.ICEServer, time.Duration) {
 		})
 	}
 
+	parsedTurnServers = turnServers
+	parsedTurnUsername = turnUsername
+	parsedTurnCredential = turnCredential
+
 	return cleanArgs, iceServers, discoveryTimeout
 }
 
@@ -445,14 +452,16 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								fmt.Println("  ✅ Relay Transfer Complete!")
 							}
 						} else if cmd.Action == "upload" {
-							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", cmd.Filename)
+							sanitizedFilename := sanitizeFilename(cmd.Filename)
+							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", sanitizedFilename)
 							rc, err := relClient.DownloadData()
 							if err != nil {
 								fmt.Printf("  Error downloading from relay: %v\n", err)
 								continue
 							}
 
-							outName := "received_" + cmd.Filename
+							cleanBase := server.SanitizeFilename(cmd.Filename, "upload.bin")
+							outName := "received_" + cleanBase
 							outFile, err := os.Create(outName)
 							if err != nil {
 								fmt.Printf("  Error creating file: %v\n", err)
@@ -475,7 +484,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									elapsed.Seconds(),
 									ui.FormatBytes(int64(speed)),
 								)
-								srv.UpdateSharedFile(outName, cmd.Filename, copied)
+								srv.UpdateSharedFile(outName, cleanBase, copied)
 							}
 						}
 					}
@@ -521,11 +530,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								name := parts[1]
 								size, _ := strconv.ParseInt(parts[2], 10, 64)
 
-								cleanBase := filepath.Base(filepath.Clean(name))
-								cleanBase = strings.Trim(cleanBase, "\x00./\\")
-								if cleanBase == "" {
-									cleanBase = "upload.bin"
-								}
+								cleanBase := server.SanitizeFilename(name, "upload.bin")
 								uploadName = "received_" + cleanBase
 								uploadSize = size
 								uploaded = 0
@@ -782,6 +787,15 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		if session != nil {
 			qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+			if len(parsedTurnServers) > 0 {
+				qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
+				if parsedTurnUsername != "" {
+					qrURL += "&turn_username=" + url.QueryEscape(parsedTurnUsername)
+				}
+				if parsedTurnCredential != "" {
+					qrURL += "&turn_credential=" + url.QueryEscape(parsedTurnCredential)
+				}
+			}
 		}
 		qrURL += "#k=" + relKeyStr
 	} else {
@@ -790,11 +804,29 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 			qrURL = fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
 			if session != nil {
 				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				if len(parsedTurnServers) > 0 {
+					qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
+					if parsedTurnUsername != "" {
+						qrURL += "&turn_username=" + url.QueryEscape(parsedTurnUsername)
+					}
+					if parsedTurnCredential != "" {
+						qrURL += "&turn_credential=" + url.QueryEscape(parsedTurnCredential)
+					}
+				}
 			}
 		} else {
 			qrURL = localURL
 			if session != nil {
 				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				if len(parsedTurnServers) > 0 {
+					qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
+					if parsedTurnUsername != "" {
+						qrURL += "&turn_username=" + url.QueryEscape(parsedTurnUsername)
+					}
+					if parsedTurnCredential != "" {
+						qrURL += "&turn_credential=" + url.QueryEscape(parsedTurnCredential)
+					}
+				}
 			}
 		}
 	}
@@ -962,11 +994,7 @@ func downloadFile(code string) error {
 		}
 	}
 
-	cleanBase := filepath.Base(filepath.Clean(meta.Name))
-	cleanBase = strings.Trim(cleanBase, "\x00./\\")
-	if cleanBase == "" {
-		cleanBase = "download.bin"
-	}
+	cleanBase := server.SanitizeFilename(meta.Name, "download.bin")
 	outName := "received_" + cleanBase
 	outFile, err := os.Create(outName)
 	if err != nil {
@@ -1003,4 +1031,37 @@ func downloadFile(code string) error {
 
 	fmt.Printf("\n\n  ✅ Saved to %s\n", outName)
 	return nil
+}
+
+// sanitizeFilename cleans and strips directory path components from a filename, ensuring
+// cross-platform safety across both Unix and Windows path separators.
+func sanitizeFilename(rawFilename string) string {
+	// Normalize Windows backslashes to forward slashes for cross-platform handling
+	normalized := strings.ReplaceAll(rawFilename, "\\", "/")
+	cleanBase := filepath.Base(filepath.Clean(normalized))
+	cleanBase = strings.Trim(cleanBase, "\x00./\\")
+	if cleanBase == "" || cleanBase == "." || cleanBase == ".." {
+		cleanBase = "upload.bin"
+	}
+	return cleanBase
+}
+
+// verifyPathInOutputDir verifies that targetPath resides strictly within outputDir without path traversal.
+func verifyPathInOutputDir(targetPath, outputDir string) bool {
+	absOutput, err := filepath.Abs(outputDir)
+	if err != nil {
+		return false
+	}
+	absTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absOutput, absTarget)
+	if err != nil {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "..\\") || filepath.IsAbs(rel) {
+		return false
+	}
+	return true
 }
