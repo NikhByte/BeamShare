@@ -1,3 +1,18 @@
+function getToken() {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get('token');
+  if (!token) {
+    const rawBackend = params.get('backend') || params.get('b') || params.get('local');
+    if (rawBackend) {
+      try {
+        const u = new URL(rawBackend, window.location.origin);
+        token = u.searchParams.get('token');
+      } catch (e) {}
+    }
+  }
+  return token || '';
+}
+
 function getBackendURL() {
   const params = new URLSearchParams(window.location.search);
   let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
@@ -7,8 +22,14 @@ function getBackendURL() {
       backend = 'https://beamshare.onrender.com';
     }
   }
-  if (backend && backend.endsWith('/')) {
-    backend = backend.slice(0, -1);
+  if (backend) {
+    try {
+      const u = new URL(backend, window.location.origin);
+      backend = u.origin + u.pathname;
+    } catch (e) {}
+    if (backend && backend.endsWith('/')) {
+      backend = backend.slice(0, -1);
+    }
   }
   return backend;
 }
@@ -17,9 +38,14 @@ function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  const token = getToken();
+
   let fullPath = path;
-  if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+  if (s && !fullPath.includes('s=')) {
+    fullPath = fullPath.includes('?') ? fullPath + '&s=' + s : fullPath + '?s=' + s;
+  }
+  if (token && !fullPath.includes('token=')) {
+    fullPath = fullPath.includes('?') ? fullPath + '&token=' + token : fullPath + '?token=' + token;
   }
   if (backend) {
     return backend + fullPath;
@@ -1203,7 +1229,15 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      let localMetaURL = `${localURL}/api/meta`;
+      if (localURL.includes('?')) {
+        try {
+          const u = new URL(localURL);
+          localMetaURL = `${u.origin}/api/meta${u.search}`;
+        } catch (e) {}
+      }
+
+      const res = await fetch(localMetaURL, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
