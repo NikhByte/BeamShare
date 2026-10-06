@@ -2710,6 +2710,13 @@ async function startHTTPDownload() {
     return;
   }
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (e) {
+    console.warn("Could not parse decryption key from URL hash:", e);
+  }
+
   startTime     = Date.now();
   receivedBytes = 0;
   totalBytes    = currentFile.size;
@@ -2793,6 +2800,7 @@ async function startHTTPDownload() {
 
     while (true) {
       const { done, value } = await reader.read();
+      if (done) break;
 
       if (value && value.length > 0) {
         if (decryptionKey) {
@@ -3661,7 +3669,7 @@ function renderFileCard(meta) {
 
 function triggerSave(blob, name) {
   const url = URL.createObjectURL(blob);
-  const a   = Object.assign(document.createElement('a'), { href: url, download: name, target: '_blank', rel: 'noopener' });
+  const a   = Object.assign(document.createElement('a'), { href: url, download: name });
   document.body.appendChild(a);
   a.click();
   setTimeout(() => {
@@ -4667,6 +4675,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     uploadFileP2P,

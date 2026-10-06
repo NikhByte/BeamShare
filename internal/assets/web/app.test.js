@@ -160,6 +160,11 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.pako = pako;
     window.__BEAM_TEST_ENV__ = true;
 
+    window.fetch = async (url) => {
+      return { ok: true, json: async () => ({ name: 'test.txt', size: 100 }) };
+    };
+    global.fetch = window.fetch;
+
     // Load qrcode.min.js and app.js
     delete require.cache[require.resolve('./qrcode.min.js')];
     const qrcodeLib1 = require('./qrcode.min.js');
@@ -747,8 +752,10 @@ describe('Gaze Web Sender Test Suite', () => {
   let window;
   let document;
   let app;
+  let fetchedURLs = [];
 
   beforeEach(() => {
+    fetchedURLs = [];
     dom = new JSDOM(htmlContent, {
       url: 'http://localhost:8080/'
     });
@@ -862,8 +869,9 @@ describe('Gaze Web Sender Test Suite', () => {
     let externalRequests = [];
     window.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
+    global.fetch = window.fetch;
 
     await app.startSenderSharing();
 
