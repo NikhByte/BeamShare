@@ -5,6 +5,8 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
   let listeners = {};
   let mockSelf;
 
+  const originalSelf = global.self;
+
   beforeEach(() => {
     listeners = {};
     mockSelf = {
@@ -21,7 +23,11 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
   });
 
   afterEach(() => {
-    delete global.self;
+    if (typeof originalSelf !== 'undefined') {
+      global.self = originalSelf;
+    } else {
+      delete global.self;
+    }
   });
 
   test('Service worker posts PORT_READY message on port upon INIT_PORT', () => {

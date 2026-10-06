@@ -206,20 +206,9 @@ describe('Gaze Web Receiver Test Suite', () => {
       addEventListener: () => {}
     };
 
-    Object.defineProperty(window.navigator, 'serviceWorker', {
-      value: mockSW,
-      configurable: true,
-      writable: true
-    });
-    if (typeof global.navigator !== 'undefined') {
-      try {
-        Object.defineProperty(global.navigator, 'serviceWorker', {
-          value: mockSW,
-          configurable: true,
-          writable: true
-        });
-      } catch (e) {}
-    }
+    global.navigator = window.navigator;
+    window.navigator.serviceWorker = mockSW;
+    global.navigator.serviceWorker = mockSW;
 
     app.init();
 
@@ -821,6 +810,7 @@ describe('Gaze Web Sender Test Suite', () => {
       });
     }
 
+    const fetchedURLs = [];
     global.fetch = async (url) => {
       fetchedURLs.push(url.toString());
       if (url.includes('/poll')) {
@@ -862,7 +852,7 @@ describe('Gaze Web Sender Test Suite', () => {
     let externalRequests = [];
     window.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
