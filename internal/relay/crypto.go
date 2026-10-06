@@ -10,12 +10,12 @@ import (
 	"io"
 )
 
-// MaxFrameSize is the maximum allowable payload size for an encrypted frame (1MB).
-const MaxFrameSize = 1 * 1024 * 1024
+// MaxFrameSize is the maximum allowable payload size for an encrypted frame (128KB).
+const MaxFrameSize = 128 * 1024 // 128 KB (131,072 bytes)
 
 var (
 	// ErrFrameTooLarge is returned when a frame length header exceeds MaxFrameSize.
-	ErrFrameTooLarge = errors.New("frame size exceeds maximum limit")
+	ErrFrameTooLarge = errors.New("frame length exceeds maximum allowed size")
 	// ErrMaxFrameSizeExceeded is an alias for ErrFrameTooLarge.
 	ErrMaxFrameSizeExceeded = ErrFrameTooLarge
 )

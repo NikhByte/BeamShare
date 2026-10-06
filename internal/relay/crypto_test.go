@@ -2,6 +2,8 @@ package relay
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -187,6 +189,45 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 	}
 }
 
+type trackingReader struct {
+	r     io.Reader
+	nRead int
+}
+
+func (tr *trackingReader) Read(p []byte) (int, error) {
+	n, err := tr.r.Read(p)
+	tr.nRead += n
+	return n, err
+}
+
+func TestDecryptingReader_FrameTooLarge(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// Create a length header of MaxFrameSize + 1 (131,073 bytes) followed by payload data
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, uint32(MaxFrameSize+1))
+	buf.Write(make([]byte, 2000)) // trailing payload that shouldn't be read
+
+	tr := &trackingReader{r: buf}
+	decReader, err := NewDecryptingReader(tr, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	out := make([]byte, 64)
+	_, err = decReader.Read(out)
+	if err != ErrFrameTooLarge {
+		t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+	}
+
+	if tr.nRead != 4 {
+		t.Fatalf("expected only 4 bytes (the length header) to be read, but read %d bytes", tr.nRead)
+	}
+}
+
 func TestMaxFrameSizeExceeded(t *testing.T) {
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
@@ -240,44 +281,122 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 	})
 }
 
-func TestZeroAllocationsPerFrame(t *testing.T) {
+func TestDecryptingReader_FrameTooShortBeforeRead(t *testing.T) {
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
 
-	payload := make([]byte, 64*1024)
-	if _, err := io.ReadFull(rand.Reader, payload); err != nil {
-		t.Fatalf("failed to generate random data: %v", err)
-	}
+	// Create a length header claiming 11 bytes (< 12-byte NonceSize)
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, uint32(11))
+	buf.Write(make([]byte, 20)) // trailing payload that shouldn't be read
 
-	encReader, err := NewEncryptingReader(bytes.NewReader(payload), key)
-	if err != nil {
-		t.Fatalf("NewEncryptingReader failed: %v", err)
-	}
-	encryptedData, err := io.ReadAll(encReader)
-	if err != nil {
-		t.Fatalf("reading encrypted data failed: %v", err)
-	}
-
-	br := bytes.NewReader(encryptedData)
-	decReader, err := NewDecryptingReader(br, key)
+	tr := &trackingReader{r: buf}
+	decReader, err := NewDecryptingReader(tr, key)
 	if err != nil {
 		t.Fatalf("NewDecryptingReader failed: %v", err)
 	}
 
-	out := make([]byte, 64*1024)
+	out := make([]byte, 64)
+	_, err = decReader.Read(out)
+	if err != io.ErrUnexpectedEOF {
+		t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+	}
+
+	if tr.nRead != 4 {
+		t.Fatalf("expected only 4 bytes (the length header) to be read, but read %d bytes", tr.nRead)
+	}
+}
+
+func TestDecryptingReader_ExactMaxFrameSize(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher failed: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("cipher.NewGCM failed: %v", err)
+	}
+
+	// Plaintext length such that nonce (12) + len(plaintext) + tag (16) == MaxFrameSize
+	// So frame payload length == MaxFrameSize = 131,072 bytes.
+	plaintextLen := MaxFrameSize - gcm.NonceSize() - gcm.Overhead()
+	plaintext := make([]byte, plaintextLen)
+	if _, err := io.ReadFull(rand.Reader, plaintext); err != nil {
+		t.Fatalf("failed to generate plaintext: %v", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		t.Fatalf("failed to generate nonce: %v", err)
+	}
+
+	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
+
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, uint32(len(nonce)+len(ciphertext)))
+	buf.Write(nonce)
+	buf.Write(ciphertext)
+
+	if buf.Len() != 4+MaxFrameSize {
+		t.Fatalf("expected frame buffer len %d, got %d", 4+MaxFrameSize, buf.Len())
+	}
+
+	decReader, err := NewDecryptingReader(buf, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	decrypted, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("failed to decrypt max frame size payload: %v", err)
+	}
+
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Fatal("decrypted payload does not match original plaintext for max frame size")
+	}
+}
+
+func TestDecryptingReader_ZeroAllocationsPerFrame(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// Generate 10 frames
+	data := make([]byte, 10*64*1024)
+	if _, err := io.ReadFull(rand.Reader, data); err != nil {
+		t.Fatalf("failed to generate data: %v", err)
+	}
+
+	encReader, err := NewEncryptingReader(bytes.NewReader(data), key)
+	if err != nil {
+		t.Fatalf("NewEncryptingReader failed: %v", err)
+	}
+
+	encData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("failed to read encrypted data: %v", err)
+	}
+
+	decReader, err := NewDecryptingReader(bytes.NewReader(encData), key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	out := make([]byte, 65536)
 	allocs := testing.AllocsPerRun(10, func() {
-		br.Seek(0, io.SeekStart)
-		decReader.buf = nil
-		_, err := decReader.Read(out)
-		if err != nil {
-			t.Fatalf("Read failed: %v", err)
-		}
+		_, _ = decReader.Read(out)
 	})
 
 	if allocs > 0 {
-		t.Fatalf("expected 0 allocations per frame read, got %f", allocs)
+		t.Fatalf("expected 0 allocs per frame read, got %f", allocs)
 	}
 }
 
