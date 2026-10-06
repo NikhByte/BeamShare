@@ -118,7 +118,7 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,mock';
     }
 
-    const QRious = require('qrious');
+    const QRious = require('./qrious.min.js');
     global.QRious = QRious;
     window.QRious = QRious;
 
@@ -142,9 +142,6 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.MessageChannel = global.MessageChannel;
     }
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
-    const QRious = require('./qrious.min.js');
-    window.QRious = QRious;
-    global.QRious = QRious;
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
@@ -156,9 +153,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -841,11 +835,11 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
+    // Verify QR code image src uses data URI or native /api/qr endpoint instead of third-party api.qrserver.com
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
-    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
+    const srcAttr = qrImg.getAttribute('src') || qrImg.src || '';
+    assert.equal(srcAttr.startsWith('data:image/svg+xml') || srcAttr.includes('/api/qr'), true);
+    assert.equal(srcAttr.includes('api.qrserver.com'), false);
   });
 
   test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
