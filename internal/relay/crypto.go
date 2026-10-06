@@ -10,12 +10,16 @@ import (
 	"io"
 )
 
-// MaxFrameSize is the maximum allowable payload size for an encrypted frame (1MB).
-const MaxFrameSize = 1 * 1024 * 1024
+const (
+	// MaxFrameLength is the maximum allowed frame length (64KB payload + AEAD overhead).
+	// Calculated as 64KB chunk size (65536) + GCM NonceSize (12) + GCM TagSize (16) = 65564 bytes.
+	MaxFrameLength = 65564
+	MaxFrameSize   = MaxFrameLength
+)
 
 var (
-	// ErrFrameTooLarge is returned when a frame length header exceeds MaxFrameSize.
-	ErrFrameTooLarge = errors.New("frame size exceeds maximum limit")
+	// ErrFrameTooLarge is returned when an incoming frame length header exceeds MaxFrameLength.
+	ErrFrameTooLarge = errors.New("frame length exceeds maximum allowed size")
 	// ErrMaxFrameSizeExceeded is an alias for ErrFrameTooLarge.
 	ErrMaxFrameSizeExceeded = ErrFrameTooLarge
 )
@@ -81,12 +85,12 @@ func (er *EncryptingReader) Read(p []byte) (int, error) {
 }
 
 type DecryptingReader struct {
-	r            io.Reader
-	gcm          cipher.AEAD
-	buf          []byte
-	frameBuf     []byte
-	plaintextBuf []byte
-	headerBuf    [4]byte
+	r         io.Reader
+	gcm       cipher.AEAD
+	buf       []byte
+	rawBuf    []byte
+	plainBuf  []byte
+	headerBuf [4]byte
 }
 
 func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
@@ -102,10 +106,10 @@ func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
 		return nil, err
 	}
 	return &DecryptingReader{
-		r:            r,
-		gcm:          gcm,
-		frameBuf:     make([]byte, MaxFrameSize),
-		plaintextBuf: make([]byte, MaxFrameSize),
+		r:        r,
+		gcm:      gcm,
+		rawBuf:   make([]byte, MaxFrameLength),
+		plainBuf: make([]byte, MaxFrameLength),
 	}, nil
 }
 
@@ -122,26 +126,25 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 	if _, err := io.ReadFull(dr.r, dr.headerBuf[:]); err != nil {
 		return 0, err
 	}
+
 	length := binary.BigEndian.Uint32(dr.headerBuf[:])
-
-	if length > MaxFrameSize {
-		return 0, ErrFrameTooLarge
-	}
-
 	nonceSize := dr.gcm.NonceSize()
+
 	if int(length) < nonceSize {
 		return 0, io.ErrUnexpectedEOF
 	}
+	if length > MaxFrameLength {
+		return 0, ErrFrameTooLarge
+	}
 
-	frameData := dr.frameBuf[:length]
-	if _, err := io.ReadFull(dr.r, frameData); err != nil {
+	if _, err := io.ReadFull(dr.r, dr.rawBuf[:length]); err != nil {
 		return 0, err
 	}
 
-	nonce := frameData[:nonceSize]
-	ciphertext := frameData[nonceSize:]
+	nonce := dr.rawBuf[:nonceSize]
+	ciphertext := dr.rawBuf[nonceSize:length]
 
-	plaintext, err := dr.gcm.Open(dr.plaintextBuf[:0], nonce, ciphertext, nil)
+	plaintext, err := dr.gcm.Open(dr.plainBuf[:0], nonce, ciphertext, nil)
 	if err != nil {
 		return 0, err
 	}

@@ -187,25 +187,25 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 	}
 }
 
-func TestMaxFrameSizeExceeded(t *testing.T) {
+func TestDecryptingReader_FrameTooLarge(t *testing.T) {
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
 
 	testCases := []struct {
-		name        string
-		claimLength uint32
+		name   string
+		length uint32
 	}{
-		{name: "One Byte Over MaxFrameSize", claimLength: MaxFrameSize + 1},
-		{name: "10MB Oversized Frame", claimLength: 10 * 1024 * 1024},
-		{name: "Max Uint32 Oversized Frame", claimLength: 0xFFFFFFFF},
+		{"Just above MaxFrameLength", MaxFrameLength + 1},
+		{"Huge length 4GB", 0xFFFFFFFF},
+		{"Large length 10MB", 10 * 1024 * 1024},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			buf := new(bytes.Buffer)
-			binary.Write(buf, binary.BigEndian, tc.claimLength)
+			binary.Write(buf, binary.BigEndian, tc.length)
 
 			decReader, err := NewDecryptingReader(buf, key)
 			if err != nil {
@@ -214,9 +214,6 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 
 			out := make([]byte, 64)
 			_, err = decReader.Read(out)
-			if err == nil {
-				t.Fatalf("expected error for frame size %d exceeding MaxFrameSize, got nil", tc.claimLength)
-			}
 			if !errors.Is(err, ErrFrameTooLarge) {
 				t.Fatalf("expected ErrFrameTooLarge (%v), got %v", ErrFrameTooLarge, err)
 			}
