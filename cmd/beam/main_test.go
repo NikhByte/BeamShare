@@ -5,9 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-
 	"reflect"
 	"testing"
+	"time"
+
 	"github.com/beamshare/beam/internal/server"
 )
 
