@@ -820,9 +820,11 @@ describe('Gaze Web Sender Test Suite', () => {
   test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
     // Intercept fetch / network calls to verify no external requests are made
     let externalRequests = [];
-    window.fetch = async (url) => {
-      externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+    global.fetch = window.fetch = async (url) => {
+      const urlStr = url.toString();
+      externalRequests.push(urlStr);
+      if (urlStr.includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ session: 'test-session' }) };
     };
 
     await app.startSenderSharing();
@@ -850,12 +852,13 @@ describe('Gaze Web Sender Test Suite', () => {
 
   test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
     let externalCallMade = false;
-    const origFetch = global.fetch;
-    global.fetch = async (url, opts) => {
-      if (typeof url === 'string' && (url.includes('qrserver.com') || url.includes('/api/qr'))) {
+    global.fetch = window.fetch = async (url, opts) => {
+      const urlStr = url.toString();
+      if (urlStr.includes('qrserver.com') || urlStr.includes('/api/qr')) {
         externalCallMade = true;
       }
-      return origFetch(url, opts);
+      if (urlStr.includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ session: 'test-session' }) };
     };
 
     await app.startSenderSharing();
