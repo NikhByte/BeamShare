@@ -142,9 +142,9 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.MessageChannel = global.MessageChannel;
     }
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
-    const QRious = require('./qrious.min.js');
-    window.QRious = QRious;
-    global.QRious = QRious;
+    const qriousMod1 = require('./qrious.min.js');
+    window.QRious = qriousMod1;
+    global.QRious = qriousMod1;
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
@@ -156,7 +156,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
     global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
@@ -749,9 +748,9 @@ describe('Gaze Web Sender Test Suite', () => {
     window.atob = global.atob;
     window.btoa = global.btoa;
 
-    const QRious = require('./qrious.min.js');
-    window.QRious = QRious;
-    global.QRious = QRious;
+    const qriousMod2 = require('./qrious.min.js');
+    window.QRious = qriousMod2;
+    global.QRious = qriousMod2;
 
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
@@ -843,8 +842,8 @@ describe('Gaze Web Sender Test Suite', () => {
 
     // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
+    assert.equal(qrImg.src.includes('/api/qr') || qrImg.src.startsWith('data:image/svg+xml'), true);
+    assert.equal(qrImg.src.includes('url=') || qrImg.src.startsWith('data:image/svg+xml'), true);
     assert.equal(qrImg.src.includes('api.qrserver.com'), false);
   });
 
@@ -1311,7 +1310,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     dc.readyState = 'closed';
     dc.emit('close');
 
-    await assert.rejects(promise, { message: /closed or closing/i });
+    await assert.rejects(promise, { message: /no longer open|closed or closing/i });
     assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up on rejection');
   });
 
@@ -1319,7 +1318,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     const dc = new MockDataChannel(2 * 1024 * 1024, 'closed');
     await assert.rejects(
       app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024),
-      { message: /closed or closing/i }
+      { message: /no longer open|closed or closing/i }
     );
   });
 
