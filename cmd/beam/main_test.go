@@ -6,8 +6,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
-	"sync"
-	"sync/atomic"
 	"testing"
 
 	"github.com/beamshare/beam/internal/server"
