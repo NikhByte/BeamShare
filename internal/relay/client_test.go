@@ -225,4 +225,36 @@ func TestUploadReaderAtOffset(t *testing.T) {
 			t.Fatalf("expected offset uploaded data '%s', got '%s'", string(offsetData), string(receivedOffset))
 		}
 	})
+
+	t.Run("InvalidKeyLength", func(t *testing.T) {
+		invalidKeyLengths := [][]byte{
+			[]byte("shortkey"),
+			bytes.Repeat([]byte("a"), 16),
+			bytes.Repeat([]byte("b"), 31),
+			bytes.Repeat([]byte("c"), 33),
+			bytes.Repeat([]byte("d"), 64),
+		}
+
+		for _, key := range invalidKeyLengths {
+			requestMade := false
+			spyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestMade = true
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			client := NewClient(spyServer.URL)
+			client.SessionID = "test-session"
+			client.Key = key
+
+			err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+			spyServer.Close()
+
+			if err == nil {
+				t.Errorf("expected error for key length %d, got nil", len(key))
+			}
+			if requestMade {
+				t.Errorf("expected no HTTP request to be made for invalid key length %d, but request was sent", len(key))
+			}
+		}
+	})
 }
