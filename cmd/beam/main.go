@@ -23,7 +23,6 @@ import (
 	"github.com/beamshare/beam/internal/relay"
 	"github.com/beamshare/beam/internal/server"
 	"github.com/beamshare/beam/internal/signaling"
-	"github.com/beamshare/beam/internal/stream"
 	"github.com/beamshare/beam/internal/ui"
 	"github.com/pion/webrtc/v3"
 )
