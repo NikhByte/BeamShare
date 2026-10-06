@@ -374,6 +374,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 			session.Close()
 			session = nil
 		} else {
+			session.RegisterHandlers(srv.Mux())
 			if relClient != nil {
 				// We need to convert candidates to map[string]interface{}
 				var mCands []map[string]interface{}
@@ -490,9 +491,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					}
 				}()
 			}
-
-			// Register /api/signal/* routes on the server's mux.
-			session.RegisterHandlers(srv.Mux())
 
 			session.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 				if state == webrtc.ICEConnectionStateFailed {
@@ -847,6 +845,8 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	}
 
 	localURL := srv.LocalURL()
+	token := srv.Token()
+	shareURL := fmt.Sprintf("%s/?token=%s", localURL, token)
 
 	// ── Phase 2: mDNS ────────────────────────────────────────────────────────
 	broadcaster := mdns.New("", srv.Port())
@@ -859,7 +859,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	}
 
 	// ── Print URLs ────────────────────────────────────────────────────────────
-	ui.PrintDiscovery(localURL, mdnsName)
+	ui.PrintDiscovery(shareURL, mdnsName)
 
 	if relClient != nil {
 		baseHost := relayURL
@@ -868,7 +868,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
 
-		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s&token=%s", baseHost, relSessionID, url.QueryEscape(localURL), token)
 		if receiverURL != "" {
 			relayDisplayURL += "&backend=" + url.QueryEscape(relayURL)
 		}
@@ -876,7 +876,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		fmt.Printf("    %s    (global relay)\n", relayDisplayURL)
 	} else if receiverURL != "" {
 		baseHost := strings.TrimRight(receiverURL, "/")
-		localDisplayURL := fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+		localDisplayURL := fmt.Sprintf("%s/?backend=%s&token=%s", baseHost, url.QueryEscape(localURL), token)
 		fmt.Printf("    %s    (custom receiver)\n", localDisplayURL)
 	}
 
@@ -889,7 +889,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
 
-		qrURL = fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		qrURL = fmt.Sprintf("%s/?s=%s&local=%s&token=%s", baseHost, relSessionID, url.QueryEscape(localURL), token)
 		if receiverURL != "" {
 			qrURL += "&backend=" + url.QueryEscape(relayURL)
 		}
@@ -909,7 +909,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	} else {
 		if receiverURL != "" {
 			baseHost := strings.TrimRight(receiverURL, "/")
-			qrURL = fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+			qrURL = fmt.Sprintf("%s/?backend=%s&token=%s", baseHost, url.QueryEscape(localURL), token)
 			if session != nil {
 				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
 				if len(parsedTurnServers) > 0 {
@@ -923,9 +923,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 				}
 			}
 		} else {
-			qrURL = localURL
+			qrURL = fmt.Sprintf("%s/?token=%s", localURL, token)
 			if session != nil {
-				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
 				if len(parsedTurnServers) > 0 {
 					qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
 					if parsedTurnUsername != "" {
