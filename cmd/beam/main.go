@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -513,6 +514,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					uploaded   int64
 					uploadStat time.Time
 				)
+				var streamActive atomic.Bool
 
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
@@ -566,6 +568,8 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							}
 							// File sender goroutine (Direct-to-Disk + Backpressure + Pause/Resume Flow Control)
 							go func() {
+								defer streamActive.Store(false)
+
 								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
 								file, err := os.Open(filePath)
 								if err != nil {
@@ -647,9 +651,12 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 										return
 									}
 
-									n, err := file.Read(buffer)
+									n, errRead := file.Read(buffer)
 									if n > 0 {
-										errSend := dc.Send(buffer[:n])
+										// Isolated heap slice allocation per chunk send
+										chunk := make([]byte, n)
+										copy(chunk, buffer[:n])
+										errSend := dc.Send(chunk)
 										if errSend != nil {
 											fmt.Printf("\n  Error sending chunk: %v\n", errSend)
 											return
@@ -661,7 +668,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 											ui.FormatBytes(fileSize),
 										)
 									}
-									if err != nil {
+									if errRead != nil {
 										break
 									}
 								}
