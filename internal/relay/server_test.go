@@ -173,12 +173,10 @@ func TestServer_DownloadQueueCleanupOnSessionExpiration(t *testing.T) {
 	}
 	assert.Equal(t, 1, sess.DownloadQueueLen())
 
-	// Wait for sweeper to clean up expired session
+	// Wait for sweeper to clean up expired session and clear queue
 	assert.Eventually(t, func() bool {
-		return srv.GetSession(sess.ID) == nil
+		return srv.GetSession(sess.ID) == nil && sess.DownloadQueueLen() == 0
 	}, 2*time.Second, 10*time.Millisecond, "Session did not expire in time")
-
-	assert.Equal(t, 0, sess.DownloadQueueLen())
 }
 
 func TestServer_NotFoundHandler(t *testing.T) {
