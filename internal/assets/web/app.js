@@ -2129,15 +2129,53 @@ async function startWebRTC() {
                     const file = await diskFileHandle.getFile();
                     triggerSave(file, currentFile.name);
                   }
-                } else if (swPipePort) {
-                  swPipePort.postMessage("EOF");
-                } else {
-                  let finalBlob;
-                  if (useIndexedDB) {
-                    finalBlob = await getAllChunksIDB(currentFile.mime);
-                    await clearIDB();
+                  chunkQueue.enqueueEOF();
+                  try {
+                    await chunkQueue.drain();
+                    if (diskWritableStream) {
+                      await diskWritableStream.close();
+                      if (useOPFS) {
+                        const file = await diskFileHandle.getFile();
+                        triggerSave(file, currentFile.name);
+                      }
+                    } else if (swPipePort) {
+                      swPipePort.postMessage("EOF");
+                    } else {
+                      let finalBlob;
+                      if (useIndexedDB) {
+                        finalBlob = await getAllChunksIDB(currentFile.mime);
+                        await clearIDB();
+                      } else {
+                        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
+                      }
+                      triggerSave(finalBlob, currentFile.name);
+                    }
+                    resolve();
+                  } catch (err) {
+                    hasError = true;
+                    // Handled in chunkQueue onError callback
+                  }
+                });
+              } else {
+                chunkQueue.enqueueEOF();
+                chunkQueue.drain().then(async () => {
+                  if (diskWritableStream) {
+                    await diskWritableStream.close();
+                    if (useOPFS) {
+                      const file = await diskFileHandle.getFile();
+                      triggerSave(file, currentFile.name);
+                    }
+                  } else if (swPipePort) {
+                    swPipePort.postMessage("EOF");
                   } else {
-                    finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
+                    let finalBlob;
+                    if (useIndexedDB) {
+                      finalBlob = await getAllChunksIDB(currentFile.mime);
+                      await clearIDB();
+                    } else {
+                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
+                    }
+                    triggerSave(finalBlob, currentFile.name);
                   }
                   triggerSave(finalBlob, currentFile.name);
                 }
