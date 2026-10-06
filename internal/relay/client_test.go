@@ -220,6 +220,31 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		}
 	})
 
+	t.Run("InvalidKeyLengths", func(t *testing.T) {
+		invalidKeys := [][]byte{
+			make([]byte, 10),
+			make([]byte, 16),
+			make([]byte, 64),
+		}
+
+		for _, badKey := range invalidKeys {
+			client, _ := createIsolatedSession(t)
+			client.Key = badKey
+
+			err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+			if err == nil {
+				t.Fatalf("expected error for key length %d in UploadReaderAtOffset, got nil", len(badKey))
+			}
+
+			tmpFile := filepath.Join(t.TempDir(), "test.txt")
+			os.WriteFile(tmpFile, testData, 0644)
+			err = client.UploadData(context.Background(), tmpFile)
+			if err == nil {
+				t.Fatalf("expected error for key length %d in UploadData, got nil", len(badKey))
+			}
+		}
+	})
+
 	t.Run("WithOffset", func(t *testing.T) {
 		client, sess := createIsolatedSession(t)
 		sess.mu.Lock()
@@ -283,4 +308,50 @@ func TestUploadReaderAtOffset(t *testing.T) {
 			t.Fatalf("expected error message stating expected 32 bytes and actual 16 bytes, got: %v", err)
 		}
 	})
+}
+
+func TestRelayClient_InvalidKeyLength(t *testing.T) {
+	relayServer := NewServer()
+	ts := httptest.NewServer(relayServer)
+	defer ts.Close()
+
+	client := NewClient(ts.URL)
+	sessID, err := client.Register(context.Background())
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	sess := relayServer.getSession(sessID)
+	pr, pw := io.Pipe()
+	sess.SetPipes(pr, pw)
+	defer pr.Close()
+	defer pw.Close()
+
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "dummy.txt")
+	if err := os.WriteFile(filePath, []byte("test content"), 0644); err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+
+	invalidKeys := [][]byte{
+		[]byte("too-short"),
+		make([]byte, 16),
+		make([]byte, 31),
+		make([]byte, 33),
+		make([]byte, 64),
+	}
+
+	for _, key := range invalidKeys {
+		client.Key = key
+
+		err := client.UploadData(context.Background(), filePath)
+		if err == nil {
+			t.Fatalf("expected error for invalid key length %d in UploadData, got nil", len(key))
+		}
+
+		err = client.UploadReaderAtOffset(context.Background(), bytes.NewReader([]byte("data")), 0)
+		if err == nil {
+			t.Fatalf("expected error for invalid key length %d in UploadReaderAtOffset, got nil", len(key))
+		}
+	}
 }
