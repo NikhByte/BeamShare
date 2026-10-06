@@ -232,7 +232,7 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 }
 
 func TestServer_LongPollingUnblockedAndGoroutinesCleanedOnExpiration(t *testing.T) {
-	srv := NewServerWithConfig(100*time.Millisecond, 20*time.Millisecond)
+	srv := NewServerWithConfig(1*time.Second, 50*time.Millisecond)
 	defer srv.Stop()
 
 	ts := httptest.NewServer(srv)

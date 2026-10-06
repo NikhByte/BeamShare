@@ -66,6 +66,12 @@ func TestStreamManager_SingleFlightCancellation(t *testing.T) {
 	require.NoError(t, os.WriteFile(filePath, fileData, 0644))
 
 	dc := &mockDataChannel{}
+	var hookOnce sync.Once
+	dc.sendHook = func(data []byte) {
+		hookOnce.Do(func() {
+			time.Sleep(10 * time.Millisecond)
+		})
+	}
 	mgr := NewManager()
 
 	var completedCount int32
@@ -269,6 +275,12 @@ func TestStreamManager_DeterministicEOFFlush(t *testing.T) {
 	}
 
 	mgr.StartStream(context.Background(), dc, opts)
+
+	require.Eventually(t, func() bool {
+		dc.mu.Lock()
+		defer dc.mu.Unlock()
+		return len(dc.sentChunks) > 0
+	}, 2*time.Second, 5*time.Millisecond)
 
 	// Wait 50ms while bufferedAmount is 500KB
 	time.Sleep(50 * time.Millisecond)
