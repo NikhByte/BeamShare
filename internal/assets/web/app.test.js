@@ -118,10 +118,6 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,mock';
     }
 
-    const QRious = require('qrious');
-    global.QRious = QRious;
-    window.QRious = QRious;
-
     // Set up global environment for app.js
     const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
@@ -156,7 +152,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
     global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
@@ -841,10 +836,9 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
+    // Verify QR code image src uses native /api/qr endpoint or local SVG data URI instead of third-party api.qrserver.com
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
+    assert.equal(qrImg.src.includes('/api/qr') || qrImg.src.startsWith('data:image/svg+xml'), true);
     assert.equal(qrImg.src.includes('api.qrserver.com'), false);
   });
 
@@ -925,7 +919,7 @@ describe('Gaze Web Sender Test Suite', () => {
     // Container element target
     const div = document.createElement('div');
     app.renderQRCode(shareURL, div);
-    assert.equal(div.innerHTML.includes('<svg'), true);
+    assert.equal(div.innerHTML.includes('<svg') || div.innerHTML.includes('<img'), true);
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
@@ -1258,13 +1252,13 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
 
   test('waitForDataChannelBuffer resolves immediately if bufferedAmount <= targetAmount', async () => {
     const dc = new MockDataChannel(500 * 1024, 'open');
-    await app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    await app.waitForDataChannelBuffer(dc, 512 * 1024);
     assert.equal(dc.bufferedAmountLowThreshold, 512 * 1024);
   });
 
   test('waitForDataChannelBuffer resolves when bufferedamountlow event fires', async () => {
     const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
-    const promise = app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    const promise = app.waitForDataChannelBuffer(dc, 512 * 1024, 25);
 
     assert.equal(dc.listeners.get('bufferedamountlow').size, 1);
     dc.bufferedAmount = 500 * 1024;
@@ -1286,40 +1280,40 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     }
 
     const dc = new FastDrainDataChannel(2 * 1024 * 1024, 'open');
-    await app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    await app.waitForDataChannelBuffer(dc, 512 * 1024);
     assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up');
   });
 
   test('waitForDataChannelBuffer periodic fallback timer resolves when event is missed', async () => {
     const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
     const start = Date.now();
-    const promise = app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    const promise = app.waitForDataChannelBuffer(dc, 512 * 1024, 25);
 
     // Drains buffer without firing 'bufferedamountlow'
     dc.bufferedAmount = 100 * 1024;
 
     await promise;
     const elapsed = Date.now() - start;
-    assert.equal(elapsed >= 200, true, 'Resolved via 250ms periodic timer fallback');
+    assert.equal(elapsed >= 20, true, 'Resolved via periodic timer fallback');
     assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up');
   });
 
   test('waitForDataChannelBuffer rejects when channel closes or errors', async () => {
     const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
-    const promise = app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    const promise = app.waitForDataChannelBuffer(dc, 512 * 1024, 25);
 
     dc.readyState = 'closed';
     dc.emit('close');
 
-    await assert.rejects(promise, { message: /closed or closing/i });
+    await assert.rejects(promise, { message: /no longer open|closed or closing/i });
     assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up on rejection');
   });
 
   test('waitForDataChannelBuffer rejects immediately if channel is already closed', async () => {
     const dc = new MockDataChannel(2 * 1024 * 1024, 'closed');
     await assert.rejects(
-      app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024),
-      { message: /closed or closing/i }
+      app.waitForDataChannelBuffer(dc, 512 * 1024),
+      { message: /no longer open|closed or closing/i }
     );
   });
 

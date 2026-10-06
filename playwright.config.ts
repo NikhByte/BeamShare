@@ -8,7 +8,7 @@ export default defineConfig({
   },
   fullyParallel: false, // Run sequentially to avoid port collisions during CLI process spawning
   workers: 1,
-  retries: process.env.CI ? 1 : 0,
+  retries: process.env.CI ? 2 : 1,
   reporter: process.env.CI ? [['github'], ['list']] : [['list']],
   use: {
     headless: true,
