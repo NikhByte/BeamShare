@@ -1,5 +1,5 @@
 // ── Client-side QR Code Generator Engine (Zero Network Dependencies) ──────
-const qrcodegen = (function() {
+var qrcodegen = (function() {
 	function QrCode(version, errorCorrectionLevel, dataCodewords, msk) {
 		if (version < QrCode.MIN_VERSION || version > QrCode.MAX_VERSION)
 			throw new RangeError("Version value out of range");
@@ -394,72 +394,76 @@ const qrcodegen = (function() {
 	return { QrCode };
 })();
 
-function renderQRCode(text, targetElement, options = {}) {
-  if (!text || !targetElement) return;
-  const cellSize = options.cellSize || 4;
-  const margin = options.margin !== undefined ? options.margin : 4;
-  const qr = qrcodegen.QrCode.encodeText(text, qrcodegen.QrCode.Ecc.MEDIUM);
-  const count = qr.size;
-  const size = (count + margin * 2) * cellSize;
+function renderQRCode(arg1, arg2, options = {}) {
+  let text = null;
+  let targetElement = null;
 
+  if (arg1 && typeof arg1 === 'object') {
+    targetElement = arg1;
+    text = arg2;
+  } else if (arg2 && typeof arg2 === 'object') {
+    targetElement = arg2;
+    text = arg1;
+  } else if (typeof arg1 === 'string' && typeof arg2 === 'string') {
+    const el1 = document.getElementById(arg1);
+    if (el1) {
+      targetElement = el1;
+      text = arg2;
+    } else {
+      const el2 = document.getElementById(arg2);
+      if (el2) {
+        targetElement = el2;
+        text = arg1;
+      } else {
+        text = arg1;
+      }
+    }
+  } else if (typeof arg1 === 'string') {
+    targetElement = document.getElementById(arg1);
+    text = arg2;
+  }
+
+  if (!text || !targetElement) return;
+
+  const rawSvg = generateQRCodeSVG(text);
+  const svgStr = rawSvg.replace('<path fill="#000000" d=', '<path d=');
   const tag = targetElement.tagName ? targetElement.tagName.toLowerCase() : '';
 
-  if (tag === 'canvas') {
-    targetElement.width = size;
-    targetElement.height = size;
-    const ctx = targetElement.getContext ? targetElement.getContext('2d') : null;
-    if (ctx) {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, size, size);
-      ctx.fillStyle = '#000000';
-      for (let y = 0; y < count; y++) {
-        for (let x = 0; x < count; x++) {
-          if (qr.getModule(x, y)) {
-            ctx.fillRect((x + margin) * cellSize, (y + margin) * cellSize, cellSize, cellSize);
-          }
-        }
-      }
-    }
-  } else if (tag === 'svg') {
-    targetElement.setAttribute('viewBox', `0 0 ${size} ${size}`);
-    targetElement.setAttribute('width', size);
-    targetElement.setAttribute('height', size);
-    const pathParts = [];
-    for (let y = 0; y < count; y++) {
-      for (let x = 0; x < count; x++) {
-        if (qr.getModule(x, y)) {
-          const px = (x + margin) * cellSize;
-          const py = (y + margin) * cellSize;
-          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
-        }
-      }
-    }
-    targetElement.innerHTML = `<rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/>`;
-  } else if (tag === 'img') {
-    const pathParts = [];
-    for (let y = 0; y < count; y++) {
-      for (let x = 0; x < count; x++) {
-        if (qr.getModule(x, y)) {
-          const px = (x + margin) * cellSize;
-          const py = (y + margin) * cellSize;
-          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
-        }
-      }
-    }
-    const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/></svg>`;
+  if (tag === 'img') {
     targetElement.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
-  } else {
-    const pathParts = [];
-    for (let y = 0; y < count; y++) {
-      for (let x = 0; x < count; x++) {
-        if (qr.getModule(x, y)) {
-          const px = (x + margin) * cellSize;
-          const py = (y + margin) * cellSize;
-          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
+  } else if (tag === 'svg') {
+    const vbMatch = svgStr.match(/viewBox="([^"]+)"/);
+    if (vbMatch) {
+      targetElement.setAttribute('viewBox', vbMatch[1]);
+    }
+    const innerMatch = svgStr.match(/<svg[^>]*>([\s\S]*)<\/svg>/);
+    if (innerMatch) {
+      targetElement.innerHTML = innerMatch[1];
+    }
+  } else if (tag === 'canvas') {
+    targetElement.width = targetElement.width || 256;
+    targetElement.height = targetElement.height || 256;
+    const qrc = (typeof window !== 'undefined' && window.qrcodegen) ? window.qrcodegen : (typeof globalThis !== 'undefined' && globalThis.qrcodegen ? globalThis.qrcodegen : (typeof qrcodegen !== 'undefined' ? qrcodegen : null));
+    if (qrc && qrc.QrCode) {
+      try {
+        const qr = qrc.QrCode.encodeText(text, qrc.QrCode.Ecc.MEDIUM);
+        renderQRToCanvas(qr, targetElement, 4);
+      } catch (e) {
+        const ctx = targetElement.getContext ? targetElement.getContext('2d') : null;
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, targetElement.width, targetElement.height);
         }
       }
+    } else {
+      const ctx = targetElement.getContext ? targetElement.getContext('2d') : null;
+      if (ctx) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, targetElement.width, targetElement.height);
+      }
     }
-    targetElement.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/></svg>`;
+  } else {
+    targetElement.innerHTML = svgStr;
   }
 }
 
@@ -524,7 +528,7 @@ function apiPath(path) {
 
 // ── Local QR Code Generator & Renderer ─────────────────────────────────────
 "use strict";
-var qrcodegen;
+// var qrcodegen;
 (function (qrcodegen) {
  class QrCode {
  constructor(
@@ -1146,61 +1150,7 @@ function qrToSvgDataUrl(qr, border = 4) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
-function renderQRCode(element, text, options = {}) {
-  if (!element) return;
-  try {
-    if (!text) {
-      showQRError(element, "No URL provided for QR code");
-      return;
-    }
-    const qrc = (typeof window !== 'undefined' && window.qrcodegen) ? window.qrcodegen : (typeof globalThis !== 'undefined' && globalThis.qrcodegen ? globalThis.qrcodegen : (typeof qrcodegen !== 'undefined' ? qrcodegen : null));
-    if (!qrc || !qrc.QrCode) {
-      showQRError(element, "QR generator library missing");
-      return;
-    }
-    const eccLevel = (options.ecc && qrc.QrCode.Ecc[options.ecc]) || qrc.QrCode.Ecc.MEDIUM;
-    const qr = qrc.QrCode.encodeText(text, eccLevel);
-    
-    const tagName = element.tagName ? element.tagName.toLowerCase() : '';
-    if (tagName === 'img') {
-      try {
-        const dataUrl = qrToSvgDataUrl(qr, options.border !== undefined ? options.border : 4);
-        element.src = dataUrl;
-        element.alt = options.alt || "QR Code for share URL";
-      } catch (renderErr) {
-        showQRError(element, "Failed to render QR image");
-      }
-    } else if (tagName === 'canvas') {
-      try {
-        renderQRToCanvas(qr, element, options.border !== undefined ? options.border : 4);
-      } catch (canvasErr) {
-        showQRError(element, "Canvas QR rendering failed");
-      }
-    } else {
-      try {
-        const border = options.border !== undefined ? options.border : 4;
-        const totalSize = qr.size + border * 2;
-        let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + totalSize + ' ' + totalSize + '" width="100%" height="100%" shape-rendering="crispEdges">';
-        svg += '<rect width="' + totalSize + '" height="' + totalSize + '" fill="#ffffff"/>';
-        svg += '<path d="';
-        for (let y = 0; y < qr.size; y++) {
-          for (let x = 0; x < qr.size; x++) {
-            if (qr.getModule(x, y)) {
-              svg += 'M' + (x + border) + ',' + (y + border) + 'h1v1h-1z ';
-            }
-          }
-        }
-        svg += '" fill="#000000"/></svg>';
-        element.innerHTML = svg;
-      } catch (err) {
-        showQRError(element, "Failed to render QR SVG");
-      }
-    }
-  } catch (err) {
-    console.error("QR Code generation error:", err);
-    showQRError(element, "Unable to generate QR code");
-  }
-}
+
 
 function renderQRToCanvas(qr, canvas, border = 4) {
   const ctx = canvas.getContext('2d');
@@ -1797,13 +1747,15 @@ class OPFSStreamWriter {
   async close() {
     if (!this.worker) return;
     return new Promise((resolve) => {
-      const handleMsg = () => {
-        if (this.worker) {
-          this.worker.removeEventListener('message', handleMsg);
-          this.worker.terminate();
-          this.worker = null;
+      const handleMsg = (e) => {
+        if (e.data && e.data.type === 'CLOSE_OK') {
+          if (this.worker) {
+            this.worker.removeEventListener('message', handleMsg);
+            this.worker.terminate();
+            this.worker = null;
+          }
+          resolve();
         }
-        resolve();
       };
       this.worker.addEventListener('message', handleMsg);
       this.worker.postMessage({ type: 'CLOSE' });
@@ -2192,6 +2144,13 @@ function setMode(mode, label) {
 async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
 
+  // WebKit (Safari / Mobile Safari) does not reliably route iframe navigations through SW fetch handlers
+  const isWebKit = typeof navigator !== 'undefined' && (/AppleWebKit/i.test(navigator.userAgent) && !/Chrome|Chromium|Edg|Firefox/i.test(navigator.userAgent));
+  if (isWebKit) {
+    console.warn("Service Worker iframe pipe not supported in WebKit; bypassing SW pipe.");
+    return null;
+  }
+
   try {
     let cancelTimeout;
     const swReady = navigator.serviceWorker.ready;
@@ -2230,7 +2189,7 @@ async function getSWPipe(fileMeta) {
       }, 10000);
 
       function onMessage(e) {
-        if (e.data && e.data.type === 'READY') {
+        if (e.data && (e.data.type === 'READY' || e.data.type === 'PORT_READY' || e.data.type === 'INIT_PORT_ACK')) {
           cleanup();
           resolve();
         }
@@ -2257,8 +2216,8 @@ async function getSWPipe(fileMeta) {
 
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
-    iframe.src = swUrl;
     document.body.appendChild(iframe);
+    iframe.src = swUrl;
 
     setTimeout(() => {
       try { iframe.remove(); } catch (_) {}
@@ -2313,6 +2272,9 @@ function checkRamWarning(size) {
 }
 
 function generateClientQRCodeDataURL(text) {
+  if (typeof generateQRCodeDataURL === 'function') {
+    return generateQRCodeDataURL(text);
+  }
   if (typeof generateQRCodeSVGDataURL === 'function') {
     return generateQRCodeSVGDataURL(text);
   }
@@ -2763,21 +2725,17 @@ async function startHTTPDownload() {
     }
   }
 
-  if (!diskWritableStream && swSupported) {
-    swPipePort = await getSWPipe(currentFile);
-  }
-
-  if (!diskWritableStream && !swPipePort && opfsSupported) {
+  if (!diskWritableStream && opfsSupported) {
     try {
       const root = await navigator.storage.getDirectory();
-      try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
+      const opfsFileName = `beam_temp_${Date.now()}_${Math.random().toString(36).substring(2)}`;
       
       const estimate = await navigator.storage.estimate();
       if (estimate && estimate.quota && currentFile.size > (estimate.quota - estimate.usage)) {
          throw new Error("Device disk is full");
       }
       
-      diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
+      diskFileHandle = await root.getFileHandle(opfsFileName, { create: true });
       diskWritableStream = await createOPFSWriter(diskFileHandle, initialOffset);
       useOPFS = true;
       useIndexedDB = false;
@@ -2790,6 +2748,10 @@ async function startHTTPDownload() {
       diskWritableStream = null;
       useOPFS = false;
     }
+  }
+
+  if (!diskWritableStream && swSupported) {
+    swPipePort = await getSWPipe(currentFile);
   }
 
   if (!diskWritableStream && !swPipePort && !useOPFS) {
@@ -2813,15 +2775,7 @@ async function startHTTPDownload() {
 
     const reader = res.body.getReader();
     let received = initialOffset;
-    let decryptionKey = null;
     let encBuffer = new Uint8Array(0);
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch(e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      return;
-    }
 
     while (true) {
       const { done, value } = await reader.read();
@@ -2902,7 +2856,10 @@ async function startHTTPDownload() {
       await diskWritableStream.close();
       if (useOPFS) {
         const file = await diskFileHandle.getFile();
-        triggerSave(file, currentFile.name);
+        const buffer = await file.arrayBuffer();
+        const blob = new Blob([buffer], { type: currentFile ? currentFile.mime : file.type });
+        try { const root = await navigator.storage.getDirectory(); await root.removeEntry(diskFileHandle.name); } catch(e){}
+        triggerSave(blob, currentFile.name);
       }
     } else if (swPipePort) {
       swPipePort.postMessage('EOF');
@@ -3173,21 +3130,17 @@ async function startWebRTC() {
       }
     }
 
-    if (!diskWritableStream && swSupported) {
-      swPipePort = await getSWPipe(currentFile);
-    }
-
-    if (!diskWritableStream && !swPipePort && opfsSupported) {
+    if (!diskWritableStream && opfsSupported) {
       try {
         const root = await navigator.storage.getDirectory();
-        try { await root.removeEntry('beam_temp', {recursive: true}); } catch(e){}
+        const opfsFileName = `beam_temp_${Date.now()}_${Math.random().toString(36).substring(2)}`;
         
         const estimate = await navigator.storage.estimate();
         if (estimate && estimate.quota && currentFile.size > (estimate.quota - estimate.usage)) {
            throw new Error("Device disk is full");
         }
         
-        diskFileHandle = await root.getFileHandle('beam_temp', { create: true });
+        diskFileHandle = await root.getFileHandle(opfsFileName, { create: true });
         diskWritableStream = await createOPFSWriter(diskFileHandle, initialOffset);
         useOPFS = true;
         useIndexedDB = false;
@@ -3201,6 +3154,10 @@ async function startWebRTC() {
         diskWritableStream = null;
         useOPFS = false;
       }
+    }
+
+    if (!diskWritableStream && swSupported) {
+      swPipePort = await getSWPipe(currentFile);
     }
 
     if (!diskWritableStream && !swPipePort && !useOPFS) {
@@ -3225,16 +3182,6 @@ async function startWebRTC() {
     setState('downloading');
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
-
-    let decryptionKey = null;
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch (e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      pc.close();
-      return;
-    }
 
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
@@ -3336,7 +3283,7 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
+      encBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -3345,43 +3292,8 @@ async function startWebRTC() {
             if (typeof e.data === 'string') {
               if (e.data === "EOF") {
                 chunkQueue.enqueueEOF();
-                await chunkQueue.drain();
-                if (diskWritableStream) {
-                  await diskWritableStream.close();
-                  if (useOPFS) {
-                    const file = await diskFileHandle.getFile();
-                    triggerSave(file, currentFile.name);
-                  }
-                  chunkQueue.enqueueEOF();
-                  try {
-                    await chunkQueue.drain();
-                    if (diskWritableStream) {
-                      await diskWritableStream.close();
-                      if (useOPFS) {
-                        const file = await diskFileHandle.getFile();
-                        triggerSave(file, currentFile.name);
-                      }
-                    } else if (swPipePort) {
-                      swPipePort.postMessage("EOF");
-                    } else {
-                      let finalBlob;
-                      if (useIndexedDB) {
-                        finalBlob = await getAllChunksIDB(currentFile.mime);
-                        await clearIDB();
-                      } else {
-                        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                      }
-                      triggerSave(finalBlob, currentFile.name);
-                    }
-                    resolve();
-                  } catch (err) {
-                    hasError = true;
-                    // Handled in chunkQueue onError callback
-                  }
-                });
-              } else {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
+                try {
+                  await chunkQueue.drain();
                   if (diskWritableStream) {
                     await diskWritableStream.close();
                     if (useOPFS) {
@@ -3400,9 +3312,11 @@ async function startWebRTC() {
                     }
                     triggerSave(finalBlob, currentFile.name);
                   }
-                  triggerSave(finalBlob, currentFile.name);
+                  resolve();
+                } catch (err) {
+                  hasError = true;
+                  // Handled in chunkQueue onError callback
                 }
-                resolve();
               }
               return;
             }
@@ -3733,8 +3647,12 @@ function triggerSave(blob, name) {
   const a   = Object.assign(document.createElement('a'), { href: url, download: name, target: '_blank', rel: 'noopener' });
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  setTimeout(() => {
+    if (a.parentNode) {
+      a.parentNode.removeChild(a);
+    }
+    URL.revokeObjectURL(url);
+  }, 5000);
 }
 
 function appendTerminalText(text) {
@@ -3766,7 +3684,7 @@ function showDone(name, size, mode) {
     // Load QR SVG data URL locally without external network requests
     const qrImg = document.getElementById('done-qr-img');
     if (qrImg) {
-      qrImg.src = generateClientQRCodeDataURL(shareLink);
+      qrImg.src = generateQRCodeDataURL(shareLink);
     }
     
     if (doneShare) doneShare.classList.remove('hidden');
@@ -3944,7 +3862,14 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    document.getElementById('send-qr-img').src = apiPath("/api/qr") + (apiPath("/api/qr").includes('?') ? '&' : '?') + "url=" + encodeURIComponent(shareURL.href);
+    const sendQrImg = document.getElementById('send-qr-img');
+    if (sendQrImg) {
+      renderQRCode(shareURL.href, sendQrImg);
+    }
+    const sendQrCanvas = document.getElementById('send-qr-canvas');
+    if (sendQrCanvas) {
+      renderQRCode(shareURL.href, sendQrCanvas);
+    }
     
     document.getElementById('send-link-section').classList.remove('hidden');
     document.getElementById('send-progress-section').classList.add('hidden');
@@ -4015,12 +3940,7 @@ function setupSenderDataChannel() {
           await reverseStream.close();
         } else {
           const blob = new Blob(reverseChunks);
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = reverseName;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
+          triggerSave(blob, reverseName);
         }
         document.getElementById('send-status-label').textContent = "Reverse Transfer Complete!";
       }
@@ -4077,10 +3997,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(senderDataChannel, 512 * 1024);
+    while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
+      if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+      if (dc.bufferedAmount > 1024 * 1024) {
+        await waitForBufferedAmountLow(dc, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -4120,10 +4040,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (senderDataChannel.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(senderDataChannel, 0);
+  if (dc.bufferedAmount > 0) {
+    await waitForBufferedAmountLow(dc, 0);
   }
-  senderDataChannel.send("EOF");
+  dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
@@ -4135,7 +4055,7 @@ async function startSenderPolling(backend) {
     try {
       const pollRes = await fetch(`${backend}/relay/poll?session=${senderSessionID}`);
       if (!pollRes.ok) {
-        if (pollRes.status === 404) {
+        if (pollRes.status === 404 || pollRes.status === 410) {
           break;
         }
         await new Promise(resolve => setTimeout(resolve, 2000));
@@ -4333,36 +4253,410 @@ if (typeof window !== 'undefined') {
   });
 }
 
-// ── Local Client-Side QR Generation ───────────────────────────────────────────
-function generateQRCodeDataURL(text, options) {
-  if (typeof QRCode !== 'undefined' && QRCode.generateQRCodeDataURL) {
-    return QRCode.generateQRCodeDataURL(text, options);
+// ── Client-side QR Code Generator ─────────────────────────────────────────────
+const GF256_EXP = new Uint8Array(512);
+const GF256_LOG = new Uint8Array(256);
+(function initGF256() {
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    GF256_EXP[i] = x;
+    GF256_LOG[x] = i;
+    x <<= 1;
+    if (x & 0x100) x ^= 0x11d;
   }
-  if (typeof require === 'function') {
-    try {
-      const qrcodeLib = require('./qrcode.min.js');
-      if (qrcodeLib && qrcodeLib.generateQRCodeDataURL) {
-        return qrcodeLib.generateQRCodeDataURL(text, options);
-      }
-    } catch (e) {}
+  for (let i = 255; i < 512; i++) {
+    GF256_EXP[i] = GF256_EXP[i - 255];
   }
-  throw new Error("Client-side QR generator unavailable");
+})();
+
+function gfMul(x, y) {
+  if (x === 0 || y === 0) return 0;
+  return GF256_EXP[GF256_LOG[x] + GF256_LOG[y]];
 }
 
-function renderQRCode(elementOrId, url) {
-  const img = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
-  if (!img) return;
-  try {
-    const dataUrl = generateQRCodeDataURL(url);
-    img.src = dataUrl;
-  } catch (err) {
-    console.error("Failed to generate QR code client-side");
+function rsGeneratorPoly(degree) {
+  let poly = [1];
+  for (let i = 0; i < degree; i++) {
+    const nextPoly = new Array(poly.length + 1).fill(0);
+    const alpha = GF256_EXP[i];
+    for (let j = 0; j < poly.length; j++) {
+      nextPoly[j] ^= gfMul(poly[j], alpha);
+      nextPoly[j + 1] ^= poly[j];
+    }
+    poly = nextPoly;
   }
+  return poly;
+}
+
+function rsRemainder(data, eccCount) {
+  const gen = rsGeneratorPoly(eccCount);
+  const res = new Uint8Array(data.length + eccCount);
+  res.set(data);
+  for (let i = 0; i < data.length; i++) {
+    const coef = res[i];
+    if (coef !== 0) {
+      for (let j = 0; j < gen.length; j++) {
+        res[i + j] ^= gfMul(gen[j], coef);
+      }
+    }
+  }
+  return res.slice(data.length);
+}
+
+const QR_VERSIONS_L = [
+  null,
+  [1, 21, 19, [[1, 19]], 7],
+  [2, 25, 34, [[1, 34]], 10],
+  [3, 29, 55, [[1, 55]], 15],
+  [4, 33, 80, [[1, 80]], 20],
+  [5, 37, 108, [[1, 108]], 26],
+  [6, 41, 136, [[2, 68]], 18],
+  [7, 45, 156, [[2, 78]], 20],
+  [8, 49, 194, [[2, 97]], 24],
+  [9, 53, 232, [[2, 116]], 30],
+  [10, 57, 274, [[2, 68], [2, 69]], 18],
+  [11, 61, 324, [[4, 81]], 20],
+  [12, 65, 370, [[2, 92], [2, 93]], 24],
+  [13, 69, 428, [[4, 107]], 26],
+  [14, 73, 461, [[3, 115], [1, 116]], 30],
+  [15, 77, 523, [[5, 87], [1, 88]], 22],
+  [16, 81, 586, [[5, 97], [1, 98]], 24],
+  [17, 85, 644, [[1, 107], [5, 108]], 28],
+  [18, 89, 718, [[5, 120], [1, 121]], 30],
+  [19, 93, 792, [[3, 113], [4, 114]], 28],
+  [20, 97, 858, [[3, 107], [5, 108]], 28],
+  [21, 101, 929, [[4, 116], [4, 117]], 28],
+  [22, 105, 1003, [[2, 111], [7, 112]], 28],
+  [23, 109, 1091, [[4, 121], [5, 122]], 30],
+  [24, 113, 1171, [[6, 117], [4, 118]], 30],
+  [25, 117, 1273, [[8, 106], [4, 107]], 26],
+  [26, 121, 1347, [[10, 114], [2, 115]], 28],
+  [27, 125, 1425, [[8, 122], [4, 123]], 30],
+  [28, 129, 1501, [[3, 117], [10, 118]], 30],
+  [29, 133, 1581, [[7, 116], [7, 117]], 30],
+  [30, 137, 1677, [[5, 115], [10, 116]], 30],
+  [31, 141, 1782, [[13, 115], [3, 116]], 30],
+  [32, 145, 1897, [[17, 115]], 30],
+  [33, 149, 2022, [[17, 115], [1, 116]], 30],
+  [34, 153, 2157, [[19, 113], [1, 114]], 30],
+  [35, 157, 2301, [[18, 107], [4, 108]], 30],
+  [36, 161, 2431, [[22, 110], [1, 111]], 30],
+  [37, 165, 2561, [[21, 111], [2, 112]], 30],
+  [38, 169, 2711, [[19, 112], [5, 113]], 30],
+  [39, 173, 2871, [[22, 114], [4, 115]], 30],
+  [40, 177, 3031, [[22, 112], [7, 113]], 30]
+];
+
+const QR_ALIGN_POS = [
+  null,
+  [], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34],
+  [6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50],
+  [6, 30, 54], [6, 32, 58], [6, 34, 62], [6, 26, 46, 66],
+  [6, 26, 48, 70], [6, 26, 50, 74], [6, 30, 54, 78], [6, 30, 56, 82],
+  [6, 30, 58, 86], [6, 34, 62, 90], [6, 28, 50, 72, 94], [6, 26, 50, 74, 98],
+  [6, 30, 54, 78, 102], [6, 28, 54, 80, 106], [6, 32, 58, 84, 110], [6, 30, 58, 86, 114],
+  [6, 34, 62, 90, 118], [6, 26, 50, 74, 98, 122], [6, 30, 54, 78, 102, 126], [6, 26, 52, 78, 104, 130],
+  [6, 30, 56, 82, 108, 134], [6, 34, 60, 86, 112, 138], [6, 30, 58, 86, 114, 142], [6, 34, 62, 90, 118, 146],
+  [6, 30, 54, 78, 102, 126, 150], [6, 24, 50, 76, 102, 128, 154], [6, 28, 54, 80, 106, 132, 158], [6, 32, 58, 84, 110, 136, 162],
+  [6, 26, 54, 82, 110, 138, 166], [6, 30, 58, 86, 114, 142, 170]
+];
+
+function getFormatBits(ecLevel, mask) {
+  const data = (ecLevel << 3) | mask;
+  let rem = data << 10;
+  const g = 0x537;
+  for (let i = 4; i >= 0; i--) {
+    if (rem & (1 << (i + 10))) {
+      rem ^= g << i;
+    }
+  }
+  return ((data << 10) | rem) ^ 0x5412;
+}
+
+function getVersionBits(version) {
+  let rem = version << 12;
+  const g = 0x1f25;
+  for (let i = 5; i >= 0; i--) {
+    if (rem & (1 << (i + 12))) {
+      rem ^= g << i;
+    }
+  }
+  return (version << 12) | rem;
+}
+
+function generateQRCodeSVG(text) {
+  const utf8Encoder = new (typeof TextEncoder !== 'undefined' ? TextEncoder : require('util').TextEncoder)();
+  const textBytes = utf8Encoder.encode(text);
+  
+  let ver = 1;
+  while (ver <= 40) {
+    const spec = QR_VERSIONS_L[ver];
+    const totalData = spec[2];
+    const charCountBits = ver >= 10 ? 16 : 8;
+    const headerBits = 4 + charCountBits;
+    const availableBytes = Math.floor((totalData * 8 - headerBits) / 8);
+    if (textBytes.length <= availableBytes) break;
+    ver++;
+  }
+  if (ver > 40) throw new Error('Text too long for QR code');
+
+  const spec = QR_VERSIONS_L[ver];
+  const verNumber = spec[0];
+  const size = spec[1];
+  const maxDataBytes = spec[2];
+  const blockSpecs = spec[3];
+  const ecBytesPerBlock = spec[4];
+
+  const bitBuf = [];
+  function pushBits(val, count) {
+    for (let i = count - 1; i >= 0; i--) {
+      bitBuf.push((val >> i) & 1);
+    }
+  }
+
+  pushBits(4, 4);
+  const countBits = verNumber >= 10 ? 16 : 8;
+  pushBits(textBytes.length, countBits);
+  for (let i = 0; i < textBytes.length; i++) {
+    pushBits(textBytes[i], 8);
+  }
+
+  const maxBits = maxDataBytes * 8;
+  const termBits = Math.min(4, maxBits - bitBuf.length);
+  if (termBits > 0) pushBits(0, termBits);
+
+  while (bitBuf.length % 8 !== 0) bitBuf.push(0);
+
+  const padBytes = [0xec, 0x11];
+  let padIdx = 0;
+  while (bitBuf.length < maxBits) {
+    pushBits(padBytes[padIdx], 8);
+    padIdx = (padIdx + 1) % 2;
+  }
+
+  const dataBytes = new Uint8Array(maxDataBytes);
+  for (let i = 0; i < maxDataBytes; i++) {
+    let b = 0;
+    for (let j = 0; j < 8; j++) {
+      b = (b << 1) | bitBuf[i * 8 + j];
+    }
+    dataBytes[i] = b;
+  }
+
+  const dataBlocks = [];
+  const ecBlocks = [];
+  let byteOffset = 0;
+  for (let s = 0; s < blockSpecs.length; s++) {
+    const numBlocks = blockSpecs[s][0];
+    const blockLen = blockSpecs[s][1];
+    for (let b = 0; b < numBlocks; b++) {
+      const bData = dataBytes.slice(byteOffset, byteOffset + blockLen);
+      byteOffset += blockLen;
+      const bEc = rsRemainder(bData, ecBytesPerBlock);
+      dataBlocks.push(bData);
+      ecBlocks.push(bEc);
+    }
+  }
+
+  const finalCodewords = [];
+  let maxBlockLen = 0;
+  for (let i = 0; i < dataBlocks.length; i++) {
+    if (dataBlocks[i].length > maxBlockLen) maxBlockLen = dataBlocks[i].length;
+  }
+  for (let i = 0; i < maxBlockLen; i++) {
+    for (let b = 0; b < dataBlocks.length; b++) {
+      if (i < dataBlocks[b].length) {
+        finalCodewords.push(dataBlocks[b][i]);
+      }
+    }
+  }
+
+  for (let i = 0; i < ecBytesPerBlock; i++) {
+    for (let b = 0; b < ecBlocks.length; b++) {
+      finalCodewords.push(ecBlocks[b][i]);
+    }
+  }
+
+  const finalBits = [];
+  for (let i = 0; i < finalCodewords.length; i++) {
+    for (let j = 7; j >= 0; j--) {
+      finalBits.push((finalCodewords[i] >> j) & 1);
+    }
+  }
+
+  const grid = Array.from({ length: size }, () => new Uint8Array(size));
+  const reserved = Array.from({ length: size }, () => new Uint8Array(size));
+
+  function setModule(r, c, isDark, isRes = true) {
+    grid[r][c] = isDark ? 1 : 2;
+    if (isRes) reserved[r][c] = 1;
+  }
+
+  function drawFinder(r0, c0) {
+    for (let r = -1; r <= 7; r++) {
+      for (let c = -1; c <= 7; c++) {
+        const rr = r0 + r;
+        const cc = c0 + c;
+        if (rr >= 0 && rr < size && cc >= 0 && cc < size) {
+          const isDark = (r >= 0 && r <= 6 && (r === 0 || r === 6 || c === 0 || c === 6 || (r >= 2 && r <= 4 && c >= 2 && c <= 4)));
+          setModule(rr, cc, isDark);
+        }
+      }
+    }
+  }
+
+  drawFinder(0, 0);
+  drawFinder(0, size - 7);
+  drawFinder(size - 7, 0);
+
+  for (let i = 8; i < size - 8; i++) {
+    if (!reserved[6][i]) setModule(6, i, i % 2 === 0);
+    if (!reserved[i][6]) setModule(i, 6, i % 2 === 0);
+  }
+
+  const alignCoords = QR_ALIGN_POS[verNumber];
+  for (let i = 0; i < alignCoords.length; i++) {
+    for (let j = 0; j < alignCoords.length; j++) {
+      const r0 = alignCoords[i];
+      const c0 = alignCoords[j];
+      let overlap = false;
+      for (let dr = -2; dr <= 2; dr++) {
+        for (let dc = -2; dc <= 2; dc++) {
+          if (reserved[r0 + dr] && reserved[r0 + dr][c0 + dc]) overlap = true;
+        }
+      }
+      if (!overlap) {
+        for (let dr = -2; dr <= 2; dr++) {
+          for (let dc = -2; dc <= 2; dc++) {
+            const isDark = Math.max(Math.abs(dr), Math.abs(dc)) !== 1;
+            setModule(r0 + dr, c0 + dc, isDark);
+          }
+        }
+      }
+    }
+  }
+
+  setModule(4 * verNumber + 9, 8, true);
+
+  for (let i = 0; i < 9; i++) {
+    if (!reserved[8][i]) reserved[8][i] = 1;
+    if (!reserved[i][8]) reserved[i][8] = 1;
+    if (!reserved[8][size - 1 - i]) reserved[8][size - 1 - i] = 1;
+    if (!reserved[size - 1 - i][8]) reserved[size - 1 - i][8] = 1;
+  }
+
+  if (verNumber >= 7) {
+    for (let r = 0; r < 6; r++) {
+      for (let c = 0; c < 3; c++) {
+        reserved[r][size - 11 + c] = 1;
+        reserved[size - 11 + c][r] = 1;
+      }
+    }
+  }
+
+  let bitIdx = 0;
+  let dir = -1;
+  let col = size - 1;
+  while (col > 0) {
+    if (col === 6) col--;
+    const rowStart = dir === -1 ? size - 1 : 0;
+    const rowEnd = dir === -1 ? -1 : size;
+    for (let r = rowStart; r !== rowEnd; r += dir) {
+      for (let c = col; c >= col - 1; c--) {
+        if (!reserved[r][c]) {
+          const isDark = bitIdx < finalBits.length ? finalBits[bitIdx++] === 1 : false;
+          grid[r][c] = isDark ? 1 : 2;
+        }
+      }
+    }
+    dir = -dir;
+    col -= 2;
+  }
+
+  const mask = 0;
+  function isMasked(r, c, pattern) {
+    switch (pattern) {
+      case 0: return (r + c) % 2 === 0;
+      case 1: return r % 2 === 0;
+      case 2: return c % 3 === 0;
+      case 3: return (r + c) % 3 === 0;
+      case 4: return (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0;
+      case 5: return ((r * c) % 2 + (r * c) % 3) === 0;
+      case 6: return (((r * c) % 2 + (r * c) % 3) % 2) === 0;
+      case 7: return (((r + c) % 2 + (r * c) % 3) % 2) === 0;
+    }
+    return false;
+  }
+
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      if (!reserved[r][c]) {
+        if (isMasked(r, c, mask)) {
+          grid[r][c] = grid[r][c] === 1 ? 2 : 1;
+        }
+      }
+    }
+  }
+
+  const formatBits = getFormatBits(1, mask);
+  const fmtPos1 = [
+    [8, 0], [8, 1], [8, 2], [8, 3], [8, 4], [8, 5], [8, 7], [8, 8],
+    [7, 8], [5, 8], [4, 8], [3, 8], [2, 8], [1, 8], [0, 8]
+  ];
+  const fmtPos2 = [
+    [size - 1, 8], [size - 2, 8], [size - 3, 8], [size - 4, 8], [size - 5, 8], [size - 6, 8], [size - 7, 8],
+    [8, size - 8], [8, size - 7], [8, size - 6], [8, size - 5], [8, size - 4], [8, size - 3], [8, size - 2], [8, size - 1]
+  ];
+  for (let i = 0; i < 15; i++) {
+    const bit = (formatBits >> i) & 1;
+    grid[fmtPos1[i][0]][fmtPos1[i][1]] = bit ? 1 : 2;
+    grid[fmtPos2[i][0]][fmtPos2[i][1]] = bit ? 1 : 2;
+  }
+
+  if (verNumber >= 7) {
+    const verBits = getVersionBits(verNumber);
+    for (let i = 0; i < 18; i++) {
+      const bit = (verBits >> i) & 1;
+      const r = Math.floor(i / 3);
+      const c = (i % 3);
+      grid[r][size - 11 + c] = bit ? 1 : 2;
+      grid[size - 11 + c][r] = bit ? 1 : 2;
+    }
+  }
+
+  const quietZone = 4;
+  const viewBoxSize = size + quietZone * 2;
+  let pathD = "";
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      if (grid[r][c] === 1) {
+        pathD += `M${c + quietZone},${r + quietZone}h1v1h-1z`;
+      }
+    }
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${viewBoxSize} ${viewBoxSize}" width="100%" height="100%" shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#ffffff"/><path fill="#000000" d="${pathD}"/></svg>`;
+}
+
+function generateQRCodeDataURL(text) {
+  const svg = generateQRCodeSVG(text);
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+
+function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark = 512 * 1024, pollMs = 25) {
+  const targetThreshold = (typeof lowWatermark === 'number') ? lowWatermark : highWatermark;
+  return waitForBufferedAmountLow(dc, targetThreshold, pollMs);
 }
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     waitForBufferedAmountLow,
+    waitForDataChannelBuffer,
+    uploadFileP2P,
+    sendWebRTCFile,
+    generateQRCodeSVG,
+    generateQRCodeDataURL,
+    generateClientQRCodeDataURL,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
