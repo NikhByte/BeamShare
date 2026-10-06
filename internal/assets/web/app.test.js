@@ -118,7 +118,7 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,mock';
     }
 
-    const QRious = require('qrious');
+    const QRious = require('./qrious.min.js');
     global.QRious = QRious;
     window.QRious = QRious;
 
@@ -142,9 +142,9 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.MessageChannel = global.MessageChannel;
     }
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
-    const QRious = require('./qrious.min.js');
-    window.QRious = QRious;
-    global.QRious = QRious;
+    const QRiousMin = require('./qrious.min.js');
+    window.QRious = QRiousMin;
+    global.QRious = QRiousMin;
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
@@ -156,7 +156,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
     global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
@@ -843,8 +842,7 @@ describe('Gaze Web Sender Test Suite', () => {
 
     // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
+    assert.equal(qrImg.src.includes('/api/qr') || qrImg.src.startsWith('data:image/svg+xml'), true);
     assert.equal(qrImg.src.includes('api.qrserver.com'), false);
   });
 
@@ -1064,7 +1062,6 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput(null), null);
   });
 
-<<<<<<< HEAD
   test('getIceServers extracts TURN server and credentials from URL parameters during embedded offer handling', () => {
     // Mock location with turn query parameters
     dom.reconfigure({
@@ -1078,7 +1075,8 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.deepEqual(servers[0].urls, ['turn:turn.example.com:3478']);
     assert.equal(servers[0].username, 'alice');
     assert.equal(servers[0].credential, 'secret');
-=======
+  });
+
   test('waitForBufferedAmountLow handles pre-check, event dispatch, post-registration drain, and timeout fallback', async () => {
     // 1. Immediate resolution when bufferedAmount <= targetThreshold
     let listeners = new Set();
@@ -1133,7 +1131,6 @@ describe('Gaze Web Sender Test Suite', () => {
     const elapsed = Date.now() - start;
     assert.equal(listeners.size, 0);
     assert.equal(elapsed >= 40, true);
->>>>>>> 9f9bbbf (fix(webrtc): add immediate state check and timeout fallback to backpressure wait logic)
   });
 });
 

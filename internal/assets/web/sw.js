@@ -70,6 +70,7 @@ self.addEventListener('message', (event) => {
       }
       cleanup();
     }, STREAM_TTL_MS);
+    if (ttlTimer && typeof ttlTimer.unref === 'function') ttlTimer.unref();
 
     const stream = new ReadableStream({
       start(controller) {
@@ -116,7 +117,7 @@ self.addEventListener('message', (event) => {
     streamMap.set(url, { stream, filename, size, mime, cleanup, ttlTimer, port });
     try {
       port.postMessage({ type: 'READY' });
-      port.postMessage({ type: 'INIT_ACK' });
+      port.postMessage({ type: 'PORT_READY' });
     } catch (_) {}
   }
 });
