@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -27,6 +28,9 @@ type EncryptingReader struct {
 }
 
 func NewEncryptingReader(r io.Reader, key []byte) (*EncryptingReader, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d bytes", len(key))
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -83,6 +87,9 @@ type DecryptingReader struct {
 }
 
 func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d bytes", len(key))
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
