@@ -410,8 +410,12 @@ describe('Gaze Web Receiver Test Suite', () => {
       queue.enqueue(new Uint8Array(e.data));
     };
 
-    // Synchronously fire 5 binary messages
-    for (let i = 1; i <= 5; i++) {
+    // Synchronously fire 5 binary messages with interleaved PAUSE/RESUME control messages
+    onmessage({ data: new Uint8Array([1]).buffer });
+    onmessage({ data: 'PAUSE' });
+    onmessage({ data: new Uint8Array([2]).buffer });
+    onmessage({ data: 'RESUME' });
+    for (let i = 3; i <= 5; i++) {
       onmessage({ data: new Uint8Array([i]).buffer });
     }
 

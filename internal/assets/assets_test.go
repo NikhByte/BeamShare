@@ -124,4 +124,3 @@ func TestNotFoundHTML(t *testing.T) {
 	assert.Contains(t, html, "404")
 	assert.Contains(t, html, "Page Not Found")
 }
-

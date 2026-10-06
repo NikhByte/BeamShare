@@ -642,4 +642,3 @@ func TestLiveStreamReader_CloseAndCleanup(t *testing.T) {
 	_, err = reader.Read(buf)
 	assert.Equal(t, io.EOF, err)
 }
-

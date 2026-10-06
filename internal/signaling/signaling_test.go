@@ -626,4 +626,3 @@ func BenchmarkCompressSDP(b *testing.B) {
 		}
 	}
 }
-

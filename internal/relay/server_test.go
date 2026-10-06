@@ -227,7 +227,3 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
 }
-
-
-
-

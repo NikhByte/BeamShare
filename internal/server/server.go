@@ -21,20 +21,20 @@ import (
 
 // Server holds the state for one Beam session.
 type Server struct {
-	filePath     string
-	fileName     string
-	fileSize     int64
-	port         int
-	srv          *http.Server
-	mux          *http.ServeMux
-	mu           sync.Mutex
-	downloads    int
+	filePath  string
+	fileName  string
+	fileSize  int64
+	port      int
+	srv       *http.Server
+	mux       *http.ServeMux
+	mu        sync.Mutex
+	downloads int
 
 	// Phase 5: Live Pipe
-	isLivePipe     bool
-	liveBuf        *RingBuffer
-	liveClients    []chan []byte
-	liveFinished   bool
+	isLivePipe   bool
+	liveBuf      *RingBuffer
+	liveClients  []chan []byte
+	liveFinished bool
 }
 
 // FileMeta is the JSON response for /api/meta.
@@ -72,12 +72,12 @@ func New(filePath string, bufferSize int) (*Server, error) {
 	mux := http.NewServeMux()
 
 	s := &Server{
-		filePath:       filePath,
-		fileName:       fileName,
-		fileSize:       fileSize,
-		port:           port,
-		mux:            mux,
-		isLivePipe:     isLive,
+		filePath:   filePath,
+		fileName:   fileName,
+		fileSize:   fileSize,
+		port:       port,
+		mux:        mux,
+		isLivePipe: isLive,
 	}
 
 	if isLive {
@@ -502,7 +502,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					totalReceived += int64(n)
-					
+
 					if r.ContentLength > 0 {
 						pct := float64(totalReceived) / float64(r.ContentLength) * 100
 						fmt.Printf("\r  📥 Receiving HTTP Upload: %.1f%% (%s/%s)",
@@ -687,7 +687,7 @@ func (r *RingBuffer) Bytes() []byte {
 	res := make([]byte, len(r.buf))
 	copy(res, r.buf[r.head:])
 	copy(res[len(r.buf)-r.head:], r.buf[:r.head])
-	
+
 	// Trim to the first newline to avoid partial lines
 	idx := -1
 	for i := 0; i < len(res); i++ {
