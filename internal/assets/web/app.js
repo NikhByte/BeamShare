@@ -1294,7 +1294,9 @@ let currentFile      = null;
  * @returns {Promise<void>}
  */
 function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 250) {
-  if (!dc) return Promise.resolve();
+  if (!dc || dc.readyState !== 'open') {
+    return Promise.reject(new Error("Data channel is no longer open"));
+  }
   try {
     dc.bufferedAmountLowThreshold = targetThreshold;
   } catch (e) {}
@@ -1303,43 +1305,60 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 250) {
     return Promise.resolve();
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let timer = null;
     let resolved = false;
 
-    const cleanupAndResolve = () => {
+    const cleanup = () => {
       if (resolved) return;
       resolved = true;
       if (timer !== null) {
-        clearTimeout(timer);
+        clearInterval(timer);
         timer = null;
       }
       try {
         dc.removeEventListener('bufferedamountlow', listener);
+        dc.removeEventListener('close', closeListener);
+        dc.removeEventListener('error', closeListener);
       } catch (e) {}
-      resolve();
     };
 
     const listener = () => {
-      cleanupAndResolve();
+      cleanup();
+      resolve();
+    };
+
+    const closeListener = () => {
+      cleanup();
+      reject(new Error("Data channel is no longer open"));
     };
 
     try {
       dc.addEventListener('bufferedamountlow', listener);
+      dc.addEventListener('close', closeListener);
+      dc.addEventListener('error', closeListener);
     } catch (e) {
-      cleanupAndResolve();
+      cleanup();
+      reject(e);
       return;
     }
 
-    // Immediate post-registration check in case threshold was crossed during callback setup
     if (dc.bufferedAmount <= targetThreshold) {
-      cleanupAndResolve();
-      return;
+      cleanup();
+      return resolve();
     }
 
-    timer = setTimeout(() => {
-      cleanupAndResolve();
-    }, timeoutMs);
+    timer = setInterval(() => {
+      if (dc.readyState !== 'open') {
+        cleanup();
+        reject(new Error("Data channel is no longer open"));
+        return;
+      }
+      if (dc.bufferedAmount <= targetThreshold) {
+        cleanup();
+        resolve();
+      }
+    }, typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 25);
   });
 }
 let transferMode     = 'http';   // 'webrtc' | 'http'
@@ -3336,7 +3355,7 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
+      encBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -3550,10 +3569,11 @@ async function startWebRTC() {
  * Attaches the 'bufferedamountlow' listener and immediately re-evaluates bufferedAmount before awaiting,
  * supplemented by a polling fallback to prevent race conditions during buffer drains.
  */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
+function waitForDataChannelBuffer(dc, highWaterMark = 1024 * 1024, lowWaterMark = 512 * 1024) {
+  const targetThreshold = (typeof lowWaterMark === 'number') ? lowWaterMark : highWaterMark;
   return new Promise((resolve, reject) => {
-    if (!dc || dc.readyState !== 'open') {
-      return reject(new Error("Data channel is no longer open"));
+    if (!dc || dc.readyState === 'closed' || dc.readyState === 'closing') {
+      return reject(new Error("DataChannel closed or closing"));
     }
 
     dc.bufferedAmountLowThreshold = targetThreshold;
@@ -3567,6 +3587,8 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
     const cleanup = () => {
       if (dc && typeof dc.removeEventListener === 'function') {
         dc.removeEventListener('bufferedamountlow', onBufferedAmountLow);
+        dc.removeEventListener('close', onCloseOrError);
+        dc.removeEventListener('error', onCloseOrError);
       }
       if (intervalId !== null) {
         clearInterval(intervalId);
@@ -3579,27 +3601,31 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
       resolve();
     };
 
-    // Attach bufferedamountlow listener
-    dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
+    const onCloseOrError = () => {
+      cleanup();
+      reject(new Error("DataChannel closed or closing"));
+    };
 
-    // Immediately re-evaluate bufferedAmount after attaching listener
+    dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
+    dc.addEventListener('close', onCloseOrError);
+    dc.addEventListener('error', onCloseOrError);
+
     if (dc.bufferedAmount <= targetThreshold) {
       cleanup();
       return resolve();
     }
 
-    // Polling fallback to check for buffer drain or closed channel
     intervalId = setInterval(() => {
-      if (dc.readyState !== 'open') {
+      if (dc.readyState === 'closed' || dc.readyState === 'closing') {
         cleanup();
-        reject(new Error("Data channel is no longer open"));
+        reject(new Error("DataChannel closed or closing"));
         return;
       }
       if (dc.bufferedAmount <= targetThreshold) {
         cleanup();
         resolve();
       }
-    }, pollMs);
+    }, 250);
   });
 }
 
@@ -4077,10 +4103,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(senderDataChannel, 512 * 1024);
+    while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
+      if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+      if (dc.bufferedAmount > 1024 * 1024) {
+        await waitForBufferedAmountLow(dc, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -4120,10 +4146,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (senderDataChannel.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(senderDataChannel, 0);
+  if (dc && dc.bufferedAmount > 0) {
+    await waitForBufferedAmountLow(dc, 0);
   }
-  senderDataChannel.send("EOF");
+  if (dc) dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
@@ -4363,6 +4389,7 @@ function renderQRCode(elementOrId, url) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     waitForBufferedAmountLow,
+    waitForDataChannelBuffer,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
@@ -4381,6 +4408,8 @@ if (typeof module !== 'undefined' && module.exports) {
     renderQRCode,
     handleSenderFileSelect,
     startSenderSharing,
+    uploadFileP2P,
+    sendWebRTCFile,
     get_senderEncryptionKey: () => senderEncryptionKey,
     OPFSStreamWriter,
     createOPFSWriter,
