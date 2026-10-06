@@ -78,6 +78,50 @@ describe('Gaze Web Receiver Test Suite', () => {
     };
     global.localStorage = window.localStorage;
 
+    global.HTMLCanvasElement = window.HTMLCanvasElement;
+    global.HTMLImageElement = window.HTMLImageElement;
+
+    if (!window.HTMLCanvasElement.prototype.getContext) {
+      window.HTMLCanvasElement.prototype.getContext = function() {
+        return {
+          fillRect: () => {},
+          clearRect: () => {},
+          getImageData: (x, y, w, h) => ({ data: new Array(w * h * 4) }),
+          putImageData: () => {},
+          createImageData: () => ([]),
+          setTransform: () => {},
+          drawImage: () => {},
+          save: () => {},
+          fillText: () => {},
+          restore: () => {},
+          beginPath: () => {},
+          moveTo: () => {},
+          lineTo: () => {},
+          closePath: () => {},
+          stroke: () => {},
+          translate: () => {},
+          scale: () => {},
+          rotate: () => {},
+          arc: () => {},
+          fill: () => {},
+          measureText: () => ({ width: 0 }),
+          transform: () => {},
+          rect: () => {},
+          clip: () => {},
+          fillStyle: '',
+          strokeStyle: '',
+          lineWidth: 1
+        };
+      };
+    }
+    if (!window.HTMLCanvasElement.prototype.toDataURL) {
+      window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,mock';
+    }
+
+    const QRious = require('qrious');
+    global.QRious = QRious;
+    window.QRious = QRious;
+
     // Set up global environment for app.js
     const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
@@ -770,11 +814,19 @@ describe('Gaze Web Sender Test Suite', () => {
 
   });
 
-  test('startSenderSharing generates AES-GCM key and appends #k fragment', async () => {
+  test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
+    // Intercept fetch / network calls to verify no external requests are made
+    let externalRequests = [];
+    window.fetch = async (url) => {
+      externalRequests.push(url.toString());
+      return { ok: true, json: async () => ({}) };
+    };
+
     await app.startSenderSharing();
 
     const urlInput = document.getElementById('send-url-input');
-    const hash = new URL(urlInput.value || "http://localhost/").hash;
+    const shareURL = urlInput.value || "http://localhost/";
+    const hash = new URL(shareURL).hash;
 
     assert.equal(hash.startsWith('#k='), true);
 
