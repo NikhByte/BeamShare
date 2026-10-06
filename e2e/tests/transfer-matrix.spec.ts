@@ -30,6 +30,12 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
     expectedHash = computeHash(buffer);
   });
 
+  test.beforeEach(({ page }) => {
+    page.on('console', msg => console.log('[BROWSER LOG]', msg.type(), msg.text()));
+    page.on('pageerror', err => console.error('[BROWSER ERROR]', err));
+    page.on('requestfailed', req => console.error('[REQ FAILED]', req.url(), req.failure()?.errorText));
+  });
+
   test.afterAll(() => {
     stopAllProcesses();
     cleanupTempDir();
@@ -149,7 +155,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
 
       // Modify local parameter to point to an unreachable port (simulate restricted firewalled LAN)
       const relayURL = new URL(parsed.relayDisplayURL!);
-      relayURL.searchParams.set('local', 'http://127.0.0.1:0');
+      relayURL.searchParams.set('local', 'http://127.0.0.1:1');
 
       await page.goto(relayURL.toString());
 

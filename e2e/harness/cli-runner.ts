@@ -236,12 +236,16 @@ export function startBeamSender(options: {
   };
 
   proc.stdout?.on('data', (data) => {
-    output += data.toString();
+    const s = data.toString();
+    output += s;
+    console.log('[BEAM STDOUT]', s);
     checkOutput();
   });
 
   proc.stderr?.on('data', (data) => {
-    output += data.toString();
+    const s = data.toString();
+    output += s;
+    console.error('[BEAM STDERR]', s);
     checkOutput();
   });
 

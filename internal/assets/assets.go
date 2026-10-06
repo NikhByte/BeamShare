@@ -37,11 +37,15 @@ var pakoJS string
 //go:embed web/qrcode.min.js
 var qrcodeJS string
 
+//go:embed web/qrious.min.js
+var qriousJS string
+
 var (
 	styleETag  = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(styleCSS)))
 	appETag    = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(appJS)))
 	pakoETag   = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(pakoJS)))
 	qrcodeETag = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(qrcodeJS)))
+	qriousETag = fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(qriousJS)))
 )
 
 // IndexHTML returns the full content of the receiver web page.
@@ -89,6 +93,11 @@ func QrcodeJS() string {
 	return qrcodeJS
 }
 
+// QriousJS returns the qrious.min.js content.
+func QriousJS() string {
+	return qriousJS
+}
+
 // StaticHandler returns an http.Handler that serves the embedded CSS and JS.
 func StaticHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +123,10 @@ func StaticHandler() http.Handler {
 			contentType = "application/javascript; charset=utf-8"
 			etag = qrcodeETag
 			content = []byte(qrcodeJS)
+		case "qrious.min.js":
+			contentType = "application/javascript; charset=utf-8"
+			etag = qriousETag
+			content = []byte(qriousJS)
 		default:
 			http.NotFound(w, r)
 			return
