@@ -4135,7 +4135,7 @@ async function startSenderPolling(backend) {
     try {
       const pollRes = await fetch(`${backend}/relay/poll?session=${senderSessionID}`);
       if (!pollRes.ok) {
-        if (pollRes.status === 404) {
+        if (pollRes.status === 404 || pollRes.status === 410) {
           break;
         }
         await new Promise(resolve => setTimeout(resolve, 2000));

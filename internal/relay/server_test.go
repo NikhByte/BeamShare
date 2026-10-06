@@ -2,11 +2,11 @@ package relay
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -230,72 +230,82 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
 }
 
-func TestServer_LongPollUnblocksOnSessionExpiration(t *testing.T) {
-	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+func TestServer_LongPollingUnblockedAndGoroutinesCleanedOnExpiration(t *testing.T) {
+	srv := NewServerWithConfig(100*time.Millisecond, 20*time.Millisecond)
 	defer srv.Stop()
 
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
-	client := newTestHTTPClient()
+	client := NewClient(ts.URL)
+	ctx := context.Background()
 
-	reqCtx, reqCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer reqCancel()
-
-	// Register session
-	regReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, ts.URL+"/relay/register", nil)
+	sessID, err := client.Register(ctx)
 	require.NoError(t, err)
-
-	resp, err := client.Do(regReq)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var regData map[string]string
-	require.NoError(t, reqCtx.Err())
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&regData))
-	resp.Body.Close()
-
-	sessID := regData["session"]
-	require.NotEmpty(t, sessID)
 
 	sess := srv.GetSession(sessID)
 	require.NotNil(t, sess)
-	require.NotNil(t, sess.ctx, "Session must maintain a context.Context created at initialization")
-	require.NotNil(t, sess.cancel, "Session must maintain a CancelCauseFunc created at initialization")
 
-	// Start long-poll in a goroutine
-	pollRespCh := make(chan *http.Response, 1)
-	pollErrCh := make(chan error, 1)
+	// Baseline goroutine count
+	baselineGoroutines := runtime.NumGoroutine()
 
-	go func() {
-		pollReq, pollErr := http.NewRequestWithContext(reqCtx, http.MethodGet, fmt.Sprintf("%s/relay/poll?session=%s", ts.URL, sessID), nil)
-		if pollErr != nil {
-			pollErrCh <- pollErr
-			return
-		}
-		pResp, pErr := client.Do(pollReq)
-		if pErr != nil {
-			pollErrCh <- pErr
-			return
-		}
-		pollRespCh <- pResp
-	}()
+	// Launch multiple long-poll handlers blocking on AnswerReady/UploadReq/downloadNotify
+	numPollers := 5
+	errChan := make(chan int, numPollers)
 
-	// Ensure long-poll has started and is waiting
-	time.Sleep(20 * time.Millisecond)
+	for i := 0; i < numPollers; i++ {
+		go func() {
+			req, reqErr := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/relay/poll?session=%s", ts.URL, sessID), nil)
+			if reqErr != nil {
+				errChan <- -1
+				return
+			}
+			httpClient := newTestHTTPClient()
+			defer httpClient.CloseIdleConnections()
 
-	// Wait for session to expire via sweeper
-	select {
-	case pResp := <-pollRespCh:
-		defer pResp.Body.Close()
-		assert.Equal(t, http.StatusNotFound, pResp.StatusCode, "Long poll should respond with HTTP 404 upon session expiration")
-	case pErr := <-pollErrCh:
-		t.Fatalf("Unexpected error during long-poll: %v", pErr)
-	case <-time.After(3 * time.Second):
-		t.Fatal("Long poll did not unblock within timeout after session expiration")
+			resp, doErr := httpClient.Do(req)
+			if doErr != nil {
+				errChan <- -1
+				return
+			}
+			defer resp.Body.Close()
+			errChan <- resp.StatusCode
+		}()
 	}
 
-	assert.Nil(t, srv.GetSession(sessID), "Session should be removed from server after expiration")
+	// Verify goroutine count increased while polls are active
+	require.Eventually(t, func() bool {
+		return runtime.NumGoroutine() >= baselineGoroutines+numPollers
+	}, 2*time.Second, 10*time.Millisecond, "Goroutine count should increase when long-polling HTTP handlers are blocked")
+
+	// Verify AnswerReady and UploadReq channels are closed upon session expiration
+	assert.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.closed
+	}, 2*time.Second, 10*time.Millisecond, "Session should be marked closed after expiration sweep")
+
+	// Verify all long-poll requests complete with HTTP 410 StatusGone
+	for i := 0; i < numPollers; i++ {
+		select {
+		case statusCode := <-errChan:
+			assert.Equal(t, http.StatusGone, statusCode, "Polling request should terminate with HTTP 410 StatusGone on session expiration")
+		case <-time.After(3 * time.Second):
+			t.Fatalf("Timeout waiting for long-poll request %d to unblock", i)
+		}
+	}
+
+	// Verify channels are closed
+	_, answerChanOpen := <-sess.AnswerReady
+	assert.False(t, answerChanOpen, "AnswerReady channel must be closed on session expiration")
+
+	_, uploadChanOpen := <-sess.UploadReq
+	assert.False(t, uploadChanOpen, "UploadReq channel must be closed on session expiration")
+
+	// Verify goroutine count returns to baseline post-expiration
+	require.Eventually(t, func() bool {
+		return runtime.NumGoroutine() <= baselineGoroutines+1
+	}, 3*time.Second, 20*time.Millisecond, "Goroutine count must return to baseline after long-poll handlers unblock on session expiration")
 }
 
 func TestServer_SeekingReaderCheckSessionContextCancellation(t *testing.T) {
