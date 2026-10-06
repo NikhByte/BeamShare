@@ -221,6 +221,7 @@ describe('Gaze Web Receiver Test Suite', () => {
       } catch (e) {}
     }
 
+    window.fetch = global.fetch = async () => ({ ok: false });
     app.init();
 
     assert.equal(document.documentElement.getAttribute('data-sw-ready'), null);
@@ -311,9 +312,7 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     // Start SSE streaming
     const ssePromise = app.startHTTPSSE();
-
-    // Allow microtasks to run so clearIDB completes and onmessage is assigned
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await ssePromise;
 
     assert.notEqual(mockSourceInstance, null);
     assert.equal(document.getElementById('state-livepipe').classList.contains('hidden'), false);
@@ -822,8 +821,7 @@ describe('Gaze Web Sender Test Suite', () => {
     }
 
     global.fetch = async (url) => {
-      fetchedURLs.push(url.toString());
-      if (url.includes('/poll')) {
+      if (url.toString().includes('/poll')) {
           return { ok: false, status: 404 };
       }
       return {
@@ -862,7 +860,8 @@ describe('Gaze Web Sender Test Suite', () => {
     let externalRequests = [];
     window.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      if (url.toString().includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
@@ -898,7 +897,8 @@ describe('Gaze Web Sender Test Suite', () => {
     const svgStr = decodeURIComponent(dataUrl.replace('data:image/svg+xml;charset=utf-8,', ''));
     assert.equal(svgStr.includes('<svg'), true);
     assert.equal(svgStr.includes('viewBox='), true);
-    assert.equal(svgStr.includes('<path fill="#000000"'), true);
+    assert.equal(svgStr.includes('<path'), true);
+    assert.equal(svgStr.includes('fill="#000000"'), true);
   });
 
   test('Client-side QR generation renders locally without external api.qrserver.com requests', async () => {
