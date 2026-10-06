@@ -491,3 +491,44 @@ func TestServer_ReassignUploadPipesClosesPreviousPipes(t *testing.T) {
 	_, errWrite := pw1.Write([]byte("data"))
 	assert.Error(t, errWrite, "Previous UploadPipeW should be closed")
 }
+
+func TestServer_GoroutineLeakPrevention(t *testing.T) {
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	initialGoroutines := runtime.NumGoroutine()
+
+	// Spawn 10 concurrent long-polling requests across 10 sessions
+	numSessions := 10
+	var wg sync.WaitGroup
+	wg.Add(numSessions)
+
+	for i := 0; i < numSessions; i++ {
+		sess := srv.createSession()
+		go func(id string) {
+			defer wg.Done()
+			resp, err := http.Get(ts.URL + "/relay/poll?session=" + id)
+			if err == nil {
+				resp.Body.Close()
+			}
+		}(sess.ID)
+	}
+
+	// Wait for all poll goroutines to complete after session expiration
+	wg.Wait()
+
+	// Ensure all sessions are purged
+	assert.Eventually(t, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return len(srv.sessions) == 0
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Verify goroutine count returns to baseline
+	assert.Eventually(t, func() bool {
+		return runtime.NumGoroutine() <= initialGoroutines+2
+	}, 2*time.Second, 10*time.Millisecond, "Goroutine count did not return to baseline")
+}
