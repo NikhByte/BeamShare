@@ -978,7 +978,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	sess.mu.Lock()
 	if sess.DataPipeR != nil || sess.DataPipeW != nil {
-		sess.closePipesIfMatchLocked(nil, nil, fmt.Errorf("replaced by new download request"))
+		if sess.DataPipeR != nil {
+			sess.closePipesIfMatchLocked(sess.DataPipeR, sess.DataPipeW, fmt.Errorf("replaced by new download request"))
+		} else if sess.DataPipeW != nil {
+			sess.DataPipeW.CloseWithError(fmt.Errorf("replaced by new download request"))
+			sess.DataPipeW = nil
+		}
 	}
 	sess.DataPipeR = pr
 	sess.DataPipeW = pw
@@ -1303,6 +1308,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 			if uploadErr != nil {
 				http.Error(w, uploadErr.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			if uploadErr != nil {
+				http.Error(w, fmt.Sprintf("upload error: %v", uploadErr), http.StatusInternalServerError)
 				return
 			}
 
