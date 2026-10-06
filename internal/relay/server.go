@@ -281,6 +281,14 @@ func (s *Server) SweepExpiredSessions() {
 		sess.ClosePipes(fmt.Errorf("session expired"))
 		sess.ClearDownloadQueue()
 	}
+
+	s.failedAttemptsMu.Lock()
+	for ip, fa := range s.failedAttempts {
+		if now.Sub(fa.firstSeen) > time.Minute {
+			delete(s.failedAttempts, ip)
+		}
+	}
+	s.failedAttemptsMu.Unlock()
 }
 
 func (s *Server) GetSession(id string) *Session {

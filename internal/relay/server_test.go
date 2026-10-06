@@ -215,7 +215,7 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	rateLimited := false
 	for i := 0; i < 40; i++ {
 		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/signal/offer?s=nonexistent_%d", i), nil)
-		req.RemoteAddr = "192.0.2.1:12345"
+		req.RemoteAddr = "198.51.100.1:12345"
 		rr := httptest.NewRecorder()
 		srv.ServeHTTP(rr, req)
 
