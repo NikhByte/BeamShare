@@ -24,6 +24,33 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     delete global.self;
   });
 
+  test('Service worker posts PORT_READY message on port upon INIT_PORT', () => {
+    const { streamMap } = require('./sw.js');
+    const url = '/sw-download-pipe/test-port-ready';
+
+    let postedMessages = [];
+    const mockPort = {
+      onmessage: null,
+      onmessageerror: null,
+      close: () => {},
+      postMessage: (msg) => { postedMessages.push(msg); }
+    };
+
+    listeners['message']({
+      data: {
+        type: 'INIT_PORT',
+        url,
+        filename: 'test.bin',
+        size: 100,
+        mime: 'application/octet-stream'
+      },
+      ports: [mockPort]
+    });
+
+    assert.equal(streamMap.has(url), true);
+    assert.equal(postedMessages.some(m => m && (m.type === 'PORT_READY' || m.type === 'READY')), true);
+  });
+
   test('formatContentDisposition formats RFC 6266 dual parameters correctly', () => {
     const { formatContentDisposition } = require('./sw.js');
 
@@ -46,6 +73,20 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     assert.equal(
       header3,
       'attachment; filename="file \\"test\\".txt"; filename*=UTF-8\'\'file%20%22test%22.txt'
+    );
+
+    // Case 4: Special RFC 5987 characters (single quote, asterisk) and backslashes
+    const header4 = formatContentDisposition("test'file*.txt");
+    assert.equal(
+      header4,
+      'attachment; filename="test\'file*.txt"; filename*=UTF-8\'\'test%27file%2A.txt'
+    );
+
+    // Case 5: Empty or missing filename fallback
+    const header5 = formatContentDisposition('');
+    assert.equal(
+      header5,
+      'attachment; filename="download"; filename*=UTF-8\'\'download'
     );
   });
 
@@ -271,5 +312,35 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     );
     assert.equal(responseResult.headers.get('Content-Type'), 'application/pdf');
     assert.equal(responseResult.headers.get('Content-Length'), '1024');
+  });
+
+  test('INIT_PORT message handler posts READY message over message port', () => {
+    require('./sw.js');
+    const url = '/sw-download-pipe/test-ready';
+    let readyPosted = false;
+
+    const mockPort = {
+      onmessage: null,
+      onmessageerror: null,
+      close: () => {},
+      postMessage: (msg) => {
+        if (msg && msg.type === 'READY') {
+          readyPosted = true;
+        }
+      }
+    };
+
+    listeners['message']({
+      data: {
+        type: 'INIT_PORT',
+        url,
+        filename: 'test.bin',
+        size: 100,
+        mime: 'application/octet-stream'
+      },
+      ports: [mockPort]
+    });
+
+    assert.equal(readyPosted, true);
   });
 });
