@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 )
@@ -217,11 +218,27 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected error for frame size %d exceeding MaxFrameSize, got nil", tc.claimLength)
 			}
-			if err != ErrFrameTooLarge {
+			if !errors.Is(err, ErrFrameTooLarge) {
 				t.Fatalf("expected ErrFrameTooLarge (%v), got %v", ErrFrameTooLarge, err)
 			}
 		})
 	}
+
+	t.Run("Exact MaxFrameSize boundary passes length check", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		binary.Write(buf, binary.BigEndian, uint32(MaxFrameSize))
+
+		decReader, err := NewDecryptingReader(buf, key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		out := make([]byte, 64)
+		_, err = decReader.Read(out)
+		if errors.Is(err, ErrFrameTooLarge) {
+			t.Fatalf("expected length check to pass for MaxFrameSize, but got ErrFrameTooLarge")
+		}
+	})
 }
 
 func TestZeroAllocationsPerFrame(t *testing.T) {
