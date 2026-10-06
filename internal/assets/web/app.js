@@ -1070,6 +1070,10 @@ async function getSWPipe(fileMeta) {
     iframe.src = swUrl;
     document.body.appendChild(iframe);
 
+    setTimeout(() => {
+      try { iframe.remove(); } catch (_) {}
+    }, 10000);
+
     return port;
   } catch (err) {
     console.warn("Failed to get SW pipe, falling back to storage/RAM:", err);
