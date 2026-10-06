@@ -798,9 +798,17 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 					// Broadcast to WebRTC data channels
 					channelsMu.Lock()
+					var validChannels []*webrtc.DataChannel
 					for _, dc := range activeChannels {
-						dc.SendText(string(chunk))
+						if dc.ReadyState() != webrtc.DataChannelStateOpen {
+							continue
+						}
+						if err := dc.SendText(string(chunk)); err != nil {
+							continue
+						}
+						validChannels = append(validChannels, dc)
 					}
+					activeChannels = validChannels
 					channelsMu.Unlock()
 				}
 				if err != nil {
@@ -810,8 +818,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					channelsMu.Lock()
 					liveFinished = true
 					for _, dc := range activeChannels {
-						dc.SendText("EOF")
-						dc.Close()
+						if dc.ReadyState() == webrtc.DataChannelStateOpen {
+							dc.SendText("EOF")
+							dc.Close()
+						}
 					}
 					activeChannels = nil
 					channelsMu.Unlock()
