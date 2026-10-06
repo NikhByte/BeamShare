@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -16,10 +15,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/beamshare/beam/internal/mdns"
+	"github.com/beamshare/beam/internal/p2p"
 	"github.com/beamshare/beam/internal/relay"
 	"github.com/beamshare/beam/internal/server"
 	"github.com/beamshare/beam/internal/signaling"
@@ -30,13 +31,59 @@ import (
 const version = "0.4.0"
 
 var (
-	activeChannels []*webrtc.DataChannel
-	channelsMu     sync.Mutex
-	liveFinished   bool
-	relayURL       string
-	receiverURL    string
-	liveBufferSize int = 10 * 1024 * 1024 // 10MB
+	activeChannels       []*webrtc.DataChannel
+	channelsMu           sync.Mutex
+	liveFinished         bool
+	relayURL             string
+	receiverURL          string
+	keyFlag              string
+	liveBufferSize       int = 10 * 1024 * 1024 // 10MB
+	parsedTurnServers    []string
+	parsedTurnUsername   string
+	parsedTurnCredential string
 )
+
+type pauseController struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	paused bool
+	closed bool
+}
+
+func newPauseController() *pauseController {
+	pc := &pauseController{}
+	pc.cond = sync.NewCond(&pc.mu)
+	return pc
+}
+
+func (pc *pauseController) Pause() {
+	pc.mu.Lock()
+	pc.paused = true
+	pc.mu.Unlock()
+}
+
+func (pc *pauseController) Resume() {
+	pc.mu.Lock()
+	pc.paused = false
+	pc.cond.Broadcast()
+	pc.mu.Unlock()
+}
+
+func (pc *pauseController) Close() {
+	pc.mu.Lock()
+	pc.closed = true
+	pc.cond.Broadcast()
+	pc.mu.Unlock()
+}
+
+func (pc *pauseController) WaitIfPaused() bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	for pc.paused && !pc.closed {
+		pc.cond.Wait()
+	}
+	return !pc.closed
+}
 
 func main() {
 	relayURL = os.Getenv("BEAM_RELAY_URL")
@@ -184,6 +231,15 @@ func parseFlags(args []string) ([]string, []webrtc.ICEServer, time.Duration) {
 				}
 				i++
 			}
+		} else if strings.HasPrefix(arg, "--key=") {
+			keyFlag = strings.TrimPrefix(arg, "--key=")
+		} else if arg == "--key" || arg == "-k" {
+			if i+1 < len(args) {
+				keyFlag = args[i+1]
+				i++
+			}
+		} else if strings.HasPrefix(arg, "-k=") {
+			keyFlag = strings.TrimPrefix(arg, "-k=")
 		} else {
 			cleanArgs = append(cleanArgs, arg)
 		}
@@ -215,6 +271,10 @@ func parseFlags(args []string) ([]string, []webrtc.ICEServer, time.Duration) {
 			Credential: turnCredential,
 		})
 	}
+
+	parsedTurnServers = turnServers
+	parsedTurnUsername = turnUsername
+	parsedTurnCredential = turnCredential
 
 	return cleanArgs, iceServers, discoveryTimeout
 }
@@ -311,6 +371,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 	// ── Phase 3: WebRTC signaling session ─────────────────────────────────────
 	fmt.Printf("  %s\n", dimStr("Setting up WebRTC session…"))
+	streamSender := p2p.NewStreamSender()
 	session, err := signaling.NewSession(iceServers, discoveryTimeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  warn: WebRTC unavailable (%v) — HTTP-only mode\n", err)
@@ -387,11 +448,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								fmt.Println("\n  [Relay] Bridge active! Streaming data via relay...")
 							}
 							if isLive {
-								r := bytes.NewReader(srv.GetLiveBacklog())
-								if cmd.Offset > 0 {
-									_, _ = r.Seek(cmd.Offset, io.SeekStart)
-								}
+								r := srv.NewLiveStreamReader(mainCtx, cmd.Offset)
 								err = relClient.UploadReaderAtOffset(mainCtx, r, cmd.Offset)
+								r.Close()
 							} else {
 								err = relClient.UploadDataAtOffset(mainCtx, filePath, cmd.Offset)
 							}
@@ -403,14 +462,16 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								fmt.Println("  ✅ Relay Transfer Complete!")
 							}
 						} else if cmd.Action == "upload" {
-							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", cmd.Filename)
+							sanitizedFilename := sanitizeFilename(cmd.Filename)
+							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", sanitizedFilename)
 							rc, err := relClient.DownloadData()
 							if err != nil {
 								fmt.Printf("  Error downloading from relay: %v\n", err)
 								continue
 							}
 
-							outName := "received_" + cmd.Filename
+							cleanBase := server.SanitizeFilename(cmd.Filename, "upload.bin")
+							outName := "received_" + cleanBase
 							outFile, err := os.Create(outName)
 							if err != nil {
 								fmt.Printf("  Error creating file: %v\n", err)
@@ -433,7 +494,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									elapsed.Seconds(),
 									ui.FormatBytes(int64(speed)),
 								)
-								srv.UpdateSharedFile(outName, cmd.Filename, copied)
+								srv.UpdateSharedFile(outName, cleanBase, copied)
 							}
 						}
 					}
@@ -451,6 +512,22 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 			// Hook up data channel handler
 			session.OnOpen = func(dc *webrtc.DataChannel) {
+				pauseCtrl := newPauseController()
+				var (
+					streamMu     sync.Mutex
+					streamCancel context.CancelFunc
+				)
+
+				dc.OnClose(func() {
+					pauseCtrl.Close()
+					streamMu.Lock()
+					if streamCancel != nil {
+						streamCancel()
+						streamCancel = nil
+					}
+					streamMu.Unlock()
+				})
+
 				// Upload state variables for incoming files from receiver
 				var (
 					uploadFile *os.File
@@ -459,21 +536,34 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					uploaded   int64
 					uploadStat time.Time
 				)
+				var isStreaming atomic.Bool
+
+				var senderMu sync.Mutex
+				var activeCancel context.CancelFunc
+
+				dc.OnClose(func() {
+					senderMu.Lock()
+					if activeCancel != nil {
+						activeCancel()
+						activeCancel = nil
+					}
+					senderMu.Unlock()
+				})
 
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
 						dataStr := string(msg.Data)
-						if strings.HasPrefix(dataStr, "UPLOAD_META:") {
+						if dataStr == "PAUSE" {
+							pauseCtrl.Pause()
+						} else if dataStr == "RESUME" {
+							pauseCtrl.Resume()
+						} else if strings.HasPrefix(dataStr, "UPLOAD_META:") {
 							parts := strings.SplitN(dataStr, ":", 3)
 							if len(parts) == 3 {
 								name := parts[1]
 								size, _ := strconv.ParseInt(parts[2], 10, 64)
 
-								cleanBase := filepath.Base(filepath.Clean(name))
-								cleanBase = strings.Trim(cleanBase, "\x00./\\")
-								if cleanBase == "" {
-									cleanBase = "upload.bin"
-								}
+								cleanBase := server.SanitizeFilename(name, "upload.bin")
 								uploadName = "received_" + cleanBase
 								uploadSize = size
 								uploaded = 0
@@ -505,13 +595,25 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if isLive {
 								return
 							}
+							if !isStreaming.CompareAndSwap(false, true) {
+								return
+							}
 							parts := strings.SplitN(dataStr, ":", 2)
 							var offset int64
 							if len(parts) == 2 {
 								offset, _ = strconv.ParseInt(parts[1], 10, 64)
 							}
-							// File sender goroutine (Direct-to-Disk + Backpressure)
-							go func() {
+							streamMu.Lock()
+							if streamCancel != nil {
+								streamCancel()
+							}
+							var streamCtx context.Context
+							streamCtx, streamCancel = context.WithCancel(mainCtx)
+							streamMu.Unlock()
+
+							// File sender goroutine (Direct-to-Disk + Backpressure + Pause/Resume Flow Control)
+							go func(ctx context.Context, reqOffset int64) {
+								defer isStreaming.Store(false)
 								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
 								file, err := os.Open(filePath)
 								if err != nil {
@@ -519,13 +621,20 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									return
 								}
 								defer file.Close()
+								defer pauseCtrl.Close()
 
-								if offset > 0 {
-									_, err = file.Seek(offset, io.SeekStart)
+								if reqOffset > 0 {
+									_, err = file.Seek(reqOffset, io.SeekStart)
 									if err != nil {
 										fmt.Printf("  Error seeking file: %v\n", err)
 										return
 									}
+								}
+
+								select {
+								case <-ctx.Done():
+									return
+								default:
 								}
 
 								// Send META header
@@ -536,7 +645,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								}
 
 								bufferedAmountLowChan := make(chan struct{}, 1)
-								dc.SetBufferedAmountLowThreshold(512 * 1024)
 								dc.OnBufferedAmountLow(func() {
 									select {
 									case bufferedAmountLowChan <- struct{}{}:
@@ -544,27 +652,74 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									}
 								})
 
-								buffer := make([]byte, 64*1024) // 64KB chunk size
-								totalSent := offset
-								start := time.Now()
+								waitForBufferLow := func(targetThreshold uint64) error {
+									dc.SetBufferedAmountLowThreshold(targetThreshold)
+									if uint64(dc.BufferedAmount()) <= targetThreshold {
+										return nil
+									}
+									ticker := time.NewTicker(20 * time.Millisecond)
+									defer ticker.Stop()
 
-								for {
-									// Backpressure check: wait if buffered amount > 1MB
-									if dc.BufferedAmount() > 1024*1024 {
-										for dc.BufferedAmount() > 512*1024 && dc.ReadyState() == webrtc.DataChannelStateOpen {
-											select {
-											case <-bufferedAmountLowChan:
-											case <-time.After(50 * time.Millisecond):
+									for {
+										if dc.ReadyState() != webrtc.DataChannelStateOpen {
+											return fmt.Errorf("data channel is no longer open")
+										}
+										if uint64(dc.BufferedAmount()) <= targetThreshold {
+											return nil
+										}
+										select {
+										case <-ctx.Done():
+											return ctx.Err()
+										case <-bufferedAmountLowChan:
+											if uint64(dc.BufferedAmount()) <= targetThreshold {
+												return nil
+											}
+										case <-ticker.C:
+											if uint64(dc.BufferedAmount()) <= targetThreshold {
+												return nil
 											}
 										}
 									}
-									if dc.ReadyState() != webrtc.DataChannelStateOpen {
+								}
+
+								buffer := make([]byte, 32*1024) // 32KB chunk size
+								totalSent := reqOffset
+								start := time.Now()
+
+								for {
+									select {
+									case <-ctx.Done():
+										return
+									default:
+									}
+
+									// Backpressure check: wait if buffered amount > 1MB
+									if dc.BufferedAmount() > 1024*1024 {
+										if errWait := waitForBufferLow(512 * 1024); errWait != nil {
+											if ctx.Err() != nil {
+												return
+											}
+											fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
+											return
+										}
+									}
+
+									if !pauseCtrl.WaitIfPaused() {
 										return
 									}
 
-									n, err := file.Read(buffer)
+									n, errRead := file.Read(buffer)
 									if n > 0 {
-										errSend := dc.Send(buffer[:n])
+										select {
+										case <-ctx.Done():
+											return
+										default:
+										}
+
+										// Isolated heap slice allocation per chunk send
+										chunk := make([]byte, n)
+										copy(chunk, buffer[:n])
+										errSend := dc.Send(chunk)
 										if errSend != nil {
 											fmt.Printf("\n  Error sending chunk: %v\n", errSend)
 											return
@@ -576,33 +731,36 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 											ui.FormatBytes(fileSize),
 										)
 									}
-									if err != nil {
+									if errRead != nil {
 										break
 									}
 								}
 
 								// Wait for buffer to clear before sending EOF
-								dc.SetBufferedAmountLowThreshold(0)
 								if dc.BufferedAmount() > 0 {
-									for dc.BufferedAmount() > 0 && dc.ReadyState() == webrtc.DataChannelStateOpen {
-										select {
-										case <-bufferedAmountLowChan:
-										case <-time.After(50 * time.Millisecond):
+									if errWait := waitForBufferLow(0); errWait != nil {
+										if ctx.Err() != nil {
+											return
 										}
+										fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
+										return
 									}
 								}
-								if dc.ReadyState() == webrtc.DataChannelStateOpen {
-									dc.SendText("EOF")
+
+								if ctx.Err() != nil {
+									return
 								}
 
+								dc.SendText("EOF")
+
 								elapsed := time.Since(start)
-								sentInSession := totalSent - offset
+								sentInSession := totalSent - reqOffset
 								fmt.Printf("\n  ✅ P2P Transfer Complete! Sent %s in %.1fs (avg %s)\n",
 									ui.FormatBytes(sentInSession),
 									elapsed.Seconds(),
 									ui.FormatSpeed(sentInSession, elapsed),
 								)
-							}()
+							}(streamCtx, offset)
 						}
 					} else {
 						if uploadFile != nil {
@@ -664,9 +822,17 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 					// Broadcast to WebRTC data channels
 					channelsMu.Lock()
+					var validChannels []*webrtc.DataChannel
 					for _, dc := range activeChannels {
-						dc.SendText(string(chunk))
+						if dc.ReadyState() != webrtc.DataChannelStateOpen {
+							continue
+						}
+						if err := dc.SendText(string(chunk)); err != nil {
+							continue
+						}
+						validChannels = append(validChannels, dc)
 					}
+					activeChannels = validChannels
 					channelsMu.Unlock()
 				}
 				if err != nil {
@@ -676,8 +842,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					channelsMu.Lock()
 					liveFinished = true
 					for _, dc := range activeChannels {
-						dc.SendText("EOF")
-						dc.Close()
+						if dc.ReadyState() == webrtc.DataChannelStateOpen {
+							dc.SendText("EOF")
+							dc.Close()
+						}
 					}
 					activeChannels = nil
 					channelsMu.Unlock()
@@ -736,6 +904,15 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		if session != nil {
 			qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+			if len(parsedTurnServers) > 0 {
+				qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
+				if parsedTurnUsername != "" {
+					qrURL += "&turn_username=" + url.QueryEscape(parsedTurnUsername)
+				}
+				if parsedTurnCredential != "" {
+					qrURL += "&turn_credential=" + url.QueryEscape(parsedTurnCredential)
+				}
+			}
 		}
 		qrURL += "#k=" + relKeyStr
 	} else {
@@ -744,11 +921,29 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 			qrURL = fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
 			if session != nil {
 				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				if len(parsedTurnServers) > 0 {
+					qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
+					if parsedTurnUsername != "" {
+						qrURL += "&turn_username=" + url.QueryEscape(parsedTurnUsername)
+					}
+					if parsedTurnCredential != "" {
+						qrURL += "&turn_credential=" + url.QueryEscape(parsedTurnCredential)
+					}
+				}
 			}
 		} else {
 			qrURL = localURL
 			if session != nil {
 				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				if len(parsedTurnServers) > 0 {
+					qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
+					if parsedTurnUsername != "" {
+						qrURL += "&turn_username=" + url.QueryEscape(parsedTurnUsername)
+					}
+					if parsedTurnCredential != "" {
+						qrURL += "&turn_credential=" + url.QueryEscape(parsedTurnCredential)
+					}
+				}
 			}
 		}
 	}
@@ -777,6 +972,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	go func() {
 		<-quit
 		fmt.Println("\n  beam: shutting down…")
+		streamSender.Stop()
 		mainCancel()
 		broadcaster.Stop()
 		if session != nil {
@@ -838,12 +1034,56 @@ func printHelp() {
 
 func dimStr(s string) string   { return "\033[2m" + s + "\033[0m" }
 func greenStr(s string) string { return "\033[32m" + s + "\033[0m" }
+
+func extractKeyFromURL(u *url.URL) string {
+	if k := u.Query().Get("k"); k != "" {
+		return k
+	}
+	frag := u.Fragment
+	if frag == "" {
+		return ""
+	}
+	if strings.HasPrefix(frag, "k=") {
+		return frag[2:]
+	}
+	if vals, err := url.ParseQuery(frag); err == nil {
+		if k := vals.Get("k"); k != "" {
+			return k
+		}
+	}
+	return ""
+}
+
 func runReceive(code string) {
 	err := downloadFile(code)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n  ❌ Download failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func decodeBase64Key(kStr string) ([]byte, error) {
+	encodings := []*base64.Encoding{
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+	}
+	var keyBytes []byte
+	var err error
+	for _, enc := range encodings {
+		keyBytes, err = enc.DecodeString(kStr)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("invalid base64 key encoding: %w", err)
+	}
+	if len(keyBytes) != 32 {
+		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d", len(keyBytes))
+	}
+	return keyBytes, nil
 }
 
 func downloadFile(code string) error {
@@ -862,9 +1102,18 @@ func downloadFile(code string) error {
 	backend = strings.TrimRight(backend, "/")
 
 	s := u.Query().Get("s")
-	k := u.Fragment
-	if strings.HasPrefix(k, "k=") {
-		k = k[2:]
+	k := extractKeyFromURL(u)
+
+	var keyBytes []byte
+	if k != "" {
+		var err error
+		keyBytes, err = decodeBase64Key(k)
+		if err != nil {
+			return fmt.Errorf("invalid base64 key encoding: %w", err)
+		}
+		if len(keyBytes) != 32 {
+			return fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d", len(keyBytes))
+		}
 	}
 
 	metaURL := backend + "/api/meta"
@@ -905,22 +1154,16 @@ func downloadFile(code string) error {
 	}
 
 	var r io.Reader = respDL.Body
-	if k != "" {
-		keyBytes, err := base64.URLEncoding.DecodeString(k)
-		if err == nil && len(keyBytes) == 32 {
-			r, err = relay.NewDecryptingReader(respDL.Body, keyBytes)
-			if err != nil {
-				return fmt.Errorf("failed to initialize decryptor: %w", err)
-			}
-			fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
+	if len(keyBytes) == 32 {
+		var errDec error
+		r, errDec = relay.NewDecryptingReader(respDL.Body, keyBytes)
+		if errDec != nil {
+			return fmt.Errorf("failed to initialize decryptor: %w", errDec)
 		}
+		fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
 	}
 
-	cleanBase := filepath.Base(filepath.Clean(meta.Name))
-	cleanBase = strings.Trim(cleanBase, "\x00./\\")
-	if cleanBase == "" {
-		cleanBase = "download.bin"
-	}
+	cleanBase := server.SanitizeFilename(meta.Name, "download.bin")
 	outName := "received_" + cleanBase
 	outFile, err := os.Create(outName)
 	if err != nil {
@@ -957,4 +1200,37 @@ func downloadFile(code string) error {
 
 	fmt.Printf("\n\n  ✅ Saved to %s\n", outName)
 	return nil
+}
+
+// sanitizeFilename cleans and strips directory path components from a filename, ensuring
+// cross-platform safety across both Unix and Windows path separators.
+func sanitizeFilename(rawFilename string) string {
+	// Normalize Windows backslashes to forward slashes for cross-platform handling
+	normalized := strings.ReplaceAll(rawFilename, "\\", "/")
+	cleanBase := filepath.Base(filepath.Clean(normalized))
+	cleanBase = strings.Trim(cleanBase, "\x00./\\")
+	if cleanBase == "" || cleanBase == "." || cleanBase == ".." {
+		cleanBase = "upload.bin"
+	}
+	return cleanBase
+}
+
+// verifyPathInOutputDir verifies that targetPath resides strictly within outputDir without path traversal.
+func verifyPathInOutputDir(targetPath, outputDir string) bool {
+	absOutput, err := filepath.Abs(outputDir)
+	if err != nil {
+		return false
+	}
+	absTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absOutput, absTarget)
+	if err != nil {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "..\\") || filepath.IsAbs(rel) {
+		return false
+	}
+	return true
 }
