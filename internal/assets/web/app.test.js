@@ -160,8 +160,11 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.pako = pako;
     window.__BEAM_TEST_ENV__ = true;
 
+    window.fetch = global.fetch = async (url) => {
+      return { ok: true, json: async () => ({}) };
+    };
+
     // Load qrcode.min.js and app.js
-    delete require.cache[require.resolve('./qrcode.min.js')];
     const qrcodeLib1 = require('./qrcode.min.js');
     global.generateQRCodeSVGDataURL = qrcodeLib1.generateQRCodeSVGDataURL;
     window.generateQRCodeSVGDataURL = qrcodeLib1.generateQRCodeSVGDataURL;
@@ -747,8 +750,10 @@ describe('Gaze Web Sender Test Suite', () => {
   let window;
   let document;
   let app;
+  let fetchedURLs;
 
   beforeEach(() => {
+    fetchedURLs = [];
     dom = new JSDOM(htmlContent, {
       url: 'http://localhost:8080/'
     });
@@ -821,6 +826,7 @@ describe('Gaze Web Sender Test Suite', () => {
       });
     }
 
+    fetchedURLs = [];
     global.fetch = async (url) => {
       fetchedURLs.push(url.toString());
       if (url.includes('/poll')) {
@@ -841,9 +847,10 @@ describe('Gaze Web Sender Test Suite', () => {
     }
     window.RTCPeerConnection = RTCPeerConnection;
     global.RTCPeerConnection = RTCPeerConnection;
+    window.crypto = webcrypto;
+    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
-    delete require.cache[require.resolve('./qrcode.min.js')];
     const qrcodeLib2 = require('./qrcode.min.js');
     global.generateQRCodeSVGDataURL = qrcodeLib2.generateQRCodeSVGDataURL;
     window.generateQRCodeSVGDataURL = qrcodeLib2.generateQRCodeSVGDataURL;
@@ -860,9 +867,9 @@ describe('Gaze Web Sender Test Suite', () => {
   test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
     // Intercept fetch / network calls to verify no external requests are made
     let externalRequests = [];
-    window.fetch = async (url) => {
+    window.fetch = global.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
