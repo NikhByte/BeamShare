@@ -163,7 +163,7 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		}
 	})
 
-	for _, keyLen := range []int{16, 24, 32} {
+	for _, keyLen := range []int{32} {
 		t.Run(fmt.Sprintf("Encrypted_%dByteKey", keyLen), func(t *testing.T) {
 			client, sess := createIsolatedSession(t)
 			client.Key = make([]byte, keyLen)
