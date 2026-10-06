@@ -1001,7 +1001,7 @@ function setMode(mode, label) {
 
 // ── Service Worker Pipe ───────────────────────────────────────────────────────
 async function getSWPipe(fileMeta) {
-  if (!('serviceWorker' in navigator)) return null;
+  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
 
   try {
     const swReady = navigator.serviceWorker.ready;

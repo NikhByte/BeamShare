@@ -79,6 +79,9 @@ describe('Gaze Web Receiver Test Suite', () => {
     global.localStorage = window.localStorage;
 
     // Set up global environment for app.js
+    const { webcrypto } = require('node:crypto');
+    window.crypto = webcrypto;
+    global.crypto = webcrypto;
     global.window = window;
     global.document = document;
     global.HTMLCanvasElement = window.HTMLCanvasElement;
