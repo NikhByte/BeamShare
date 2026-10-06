@@ -5,8 +5,13 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 )
+
+const MaxFrameSize = 65564
+
+var ErrFrameTooLarge = errors.New("frame too large")
 
 type EncryptingReader struct {
 	r     io.Reader
@@ -66,9 +71,13 @@ func (er *EncryptingReader) Read(p []byte) (int, error) {
 }
 
 type DecryptingReader struct {
-	r   io.Reader
-	gcm cipher.AEAD
-	buf []byte
+	r        io.Reader
+	gcm      cipher.AEAD
+	buf      []byte
+	lenBuf   [4]byte
+	frameBuf []byte
+	plainBuf []byte
+	err      error
 }
 
 func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
@@ -81,12 +90,17 @@ func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
 		return nil, err
 	}
 	return &DecryptingReader{
-		r:   r,
-		gcm: gcm,
+		r:        r,
+		gcm:      gcm,
+		frameBuf: make([]byte, MaxFrameSize),
+		plainBuf: make([]byte, 0, MaxFrameSize),
 	}, nil
 }
 
 func (dr *DecryptingReader) Read(p []byte) (int, error) {
+	if dr.err != nil {
+		return 0, dr.err
+	}
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -96,26 +110,34 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 		return n, nil
 	}
 
-	var length uint32
-	if err := binary.Read(dr.r, binary.BigEndian, &length); err != nil {
+	if _, err := io.ReadFull(dr.r, dr.lenBuf[:]); err != nil {
+		dr.err = err
 		return 0, err
 	}
+	length := binary.BigEndian.Uint32(dr.lenBuf[:])
 
-	frameData := make([]byte, length)
-	if _, err := io.ReadFull(dr.r, frameData); err != nil {
-		return 0, err
-	}
-
-	nonceSize := dr.gcm.NonceSize()
-	if len(frameData) < nonceSize {
+	nonceSize := uint32(dr.gcm.NonceSize())
+	if length < nonceSize {
+		dr.err = io.ErrUnexpectedEOF
 		return 0, io.ErrUnexpectedEOF
+	}
+	if length > MaxFrameSize {
+		dr.err = ErrFrameTooLarge
+		return 0, ErrFrameTooLarge
+	}
+
+	frameData := dr.frameBuf[:length]
+	if _, err := io.ReadFull(dr.r, frameData); err != nil {
+		dr.err = err
+		return 0, err
 	}
 
 	nonce := frameData[:nonceSize]
 	ciphertext := frameData[nonceSize:]
 
-	plaintext, err := dr.gcm.Open(nil, nonce, ciphertext, nil)
+	plaintext, err := dr.gcm.Open(dr.plainBuf[:0], nonce, ciphertext, nil)
 	if err != nil {
+		dr.err = err
 		return 0, err
 	}
 
@@ -124,3 +146,4 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 	dr.buf = dr.buf[n:]
 	return n, nil
 }
+
