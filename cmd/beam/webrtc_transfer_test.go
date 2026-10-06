@@ -33,18 +33,32 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 	require.NoError(t, err)
 
 	var mu sync.Mutex
+	var senderCandidates []webrtc.ICECandidateInit
+	var receiverCandidates []webrtc.ICECandidateInit
+	var senderRemoteSet, receiverRemoteSet bool
+
 	senderPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
+			cand := c.ToJSON()
 			mu.Lock()
-			_ = receiverPC.AddICECandidate(c.ToJSON())
+			if receiverRemoteSet {
+				_ = receiverPC.AddICECandidate(cand)
+			} else {
+				senderCandidates = append(senderCandidates, cand)
+			}
 			mu.Unlock()
 		}
 	})
 
 	receiverPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
+			cand := c.ToJSON()
 			mu.Lock()
-			_ = senderPC.AddICECandidate(c.ToJSON())
+			if senderRemoteSet {
+				_ = senderPC.AddICECandidate(cand)
+			} else {
+				receiverCandidates = append(receiverCandidates, cand)
+			}
 			mu.Unlock()
 		}
 	})
@@ -65,10 +79,26 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 	require.NoError(t, senderPC.SetLocalDescription(offer))
 	require.NoError(t, receiverPC.SetRemoteDescription(offer))
 
+	mu.Lock()
+	receiverRemoteSet = true
+	for _, cand := range senderCandidates {
+		_ = receiverPC.AddICECandidate(cand)
+	}
+	senderCandidates = nil
+	mu.Unlock()
+
 	answer, err := receiverPC.CreateAnswer(nil)
 	require.NoError(t, err)
 	require.NoError(t, receiverPC.SetLocalDescription(answer))
 	require.NoError(t, senderPC.SetRemoteDescription(answer))
+
+	mu.Lock()
+	senderRemoteSet = true
+	for _, cand := range receiverCandidates {
+		_ = senderPC.AddICECandidate(cand)
+	}
+	receiverCandidates = nil
+	mu.Unlock()
 
 	var receiverDC *webrtc.DataChannel
 	select {
