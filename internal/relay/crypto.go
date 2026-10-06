@@ -6,12 +6,19 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 )
 
-const MaxFrameSize = 65564
+// MaxFrameSize is the maximum allowable payload size for an encrypted frame (1MB).
+const MaxFrameSize = 1 * 1024 * 1024
 
-var ErrFrameTooLarge = errors.New("frame size exceeds maximum limit")
+var (
+	// ErrFrameTooLarge is returned when a frame length header exceeds MaxFrameSize.
+	ErrFrameTooLarge = errors.New("frame size exceeds maximum limit")
+	// ErrMaxFrameSizeExceeded is an alias for ErrFrameTooLarge.
+	ErrMaxFrameSizeExceeded = ErrFrameTooLarge
+)
 
 type EncryptingReader struct {
 	r     io.Reader
@@ -21,6 +28,9 @@ type EncryptingReader struct {
 }
 
 func NewEncryptingReader(r io.Reader, key []byte) (*EncryptingReader, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d bytes", len(key))
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -80,6 +90,9 @@ type DecryptingReader struct {
 }
 
 func NewDecryptingReader(r io.Reader, key []byte) (*DecryptingReader, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d bytes", len(key))
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -115,7 +128,7 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 		return 0, ErrFrameTooLarge
 	}
 
-	frameData := dr.frameBuf[:length]
+	frameData := make([]byte, length)
 	if _, err := io.ReadFull(dr.r, frameData); err != nil {
 		return 0, err
 	}
