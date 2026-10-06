@@ -614,7 +614,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							// File sender goroutine (Direct-to-Disk + Backpressure + Pause/Resume Flow Control)
 							go func(ctx context.Context, reqOffset int64) {
 								defer isStreaming.Store(false)
-
 								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
 								file, err := os.Open(filePath)
 								if err != nil {
@@ -683,7 +682,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									}
 								}
 
-								buffer := make([]byte, 64*1024) // 64KB chunk size
+								buffer := make([]byte, 32*1024) // 32KB chunk size
 								totalSent := reqOffset
 								start := time.Now()
 
@@ -694,13 +693,12 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									default:
 									}
 
-									if !pauseCtrl.WaitIfPaused() {
-										return
-									}
-
 									// Backpressure check: wait if buffered amount > 1MB
 									if dc.BufferedAmount() > 1024*1024 {
 										if errWait := waitForBufferLow(512 * 1024); errWait != nil {
+											if ctx.Err() != nil {
+												return
+											}
 											fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
 											return
 										}
@@ -741,15 +739,16 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								// Wait for buffer to clear before sending EOF
 								if dc.BufferedAmount() > 0 {
 									if errWait := waitForBufferLow(0); errWait != nil {
+										if ctx.Err() != nil {
+											return
+										}
 										fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
 										return
 									}
 								}
 
-								select {
-								case <-ctx.Done():
+								if ctx.Err() != nil {
 									return
-								default:
 								}
 
 								dc.SendText("EOF")
