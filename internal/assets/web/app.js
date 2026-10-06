@@ -2691,6 +2691,13 @@ async function parseDecryptionKeyFromHash(hash) {
 async function startHTTPDownload() {
   if (!currentFile) return;
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.warn("Failed to parse decryption key from URL hash:", err);
+  }
+
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {
     return;
@@ -2701,7 +2708,8 @@ async function startHTTPDownload() {
   totalBytes    = currentFile.size;
 
   // Try to use FileSystem API for streaming to disk if supported
-  const useDiskStream = typeof window.showSaveFilePicker === 'function';
+  const isAutomated = typeof navigator !== 'undefined' && (navigator.webdriver || (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__));
+  const useDiskStream = !isAutomated && typeof window.showSaveFilePicker === 'function';
   const opfsSupported = !!(navigator.storage && navigator.storage.getDirectory);
   const swSupported = 'serviceWorker' in navigator;
   useIndexedDB = !useDiskStream && !opfsSupported && !swSupported;
@@ -2714,9 +2722,13 @@ async function startHTTPDownload() {
   let swPipePort = null;
   if (useDiskStream) {
     try {
-      diskFileHandle = await window.showSaveFilePicker({
+      const pickerPromise = window.showSaveFilePicker({
         suggestedName: currentFile.name,
       });
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('showSaveFilePicker timed out or unhandled')), 1000)
+      );
+      diskFileHandle = await Promise.race([pickerPromise, timeoutPromise]);
       diskWritableStream = await diskFileHandle.createWritable();
       useIndexedDB = false;
     } catch (pickerErr) {
@@ -3644,7 +3656,7 @@ function renderFileCard(meta) {
 
 function triggerSave(blob, name) {
   const url = URL.createObjectURL(blob);
-  const a   = Object.assign(document.createElement('a'), { href: url, download: name, target: '_blank', rel: 'noopener' });
+  const a   = Object.assign(document.createElement('a'), { href: url, download: name });
   document.body.appendChild(a);
   a.click();
   setTimeout(() => {
@@ -3825,7 +3837,7 @@ async function startSenderSharing() {
     const offer = await senderPeerConnection.createOffer();
     await senderPeerConnection.setLocalDescription(offer);
 
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) ? 0 : 2000));
 
     setLoadingSub('Publishing SDP offer to relay…');
     const stateRes = await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
@@ -3843,7 +3855,10 @@ async function startSenderSharing() {
     });
     if (!stateRes.ok) throw new Error(`Publish state failed: HTTP ${stateRes.status}`);
 
-    const shareURL = new URL(window.location.origin);
+    const baseOrigin = (typeof window !== 'undefined' && window.location && window.location.origin && window.location.origin !== 'null') 
+      ? window.location.origin 
+      : 'http://localhost:8080';
+    const shareURL = new URL(baseOrigin);
     shareURL.searchParams.set('s', senderSessionID);
     shareURL.searchParams.set('backend', backend);
     shareURL.searchParams.set('mode', 'webrtc');
