@@ -76,6 +76,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       // WebRTC mode starts at loading/webrtc -> downloading -> done
       await expect(page.locator('#state-done')).toBeVisible({ timeout: 45000 });
       await expect(page.locator('#done-title')).toHaveText(/Transfer complete|File Shared/i);
+      await page.screenshot({ path: '/tmp/webrtc_transfer_done.png' });
 
       const download = await downloadPromise;
       const downloadPath = await download.path();
