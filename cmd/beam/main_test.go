@@ -39,6 +39,13 @@ func TestParseFlags(t *testing.T) {
 	if discoveryTimeout != 15*1000*1000*1000 { // 15 seconds
 		t.Fatalf("expected discovery timeout 15s, got %v", discoveryTimeout)
 	}
+
+	if !reflect.DeepEqual(parsedTurnServers, []string{"turn:1"}) {
+		t.Fatalf("expected parsedTurnServers ['turn:1'], got %v", parsedTurnServers)
+	}
+	if parsedTurnUsername != "user" || parsedTurnCredential != "pass" {
+		t.Fatalf("expected parsed turn auth user=user pass=pass, got user=%s pass=%s", parsedTurnUsername, parsedTurnCredential)
+	}
 }
 
 func TestBufferSizeClamping(t *testing.T) {
