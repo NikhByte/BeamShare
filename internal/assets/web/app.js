@@ -2291,6 +2291,46 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
 }
 
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
+async function uploadFileP2P(file, dc = webrtcDataChannel) {
+  if (!dc || dc.readyState !== 'open') {
+    throw new Error("Data channel is not open");
+  }
+
+  dc.send("UPLOAD_META:" + file.name + ":" + file.size);
+  const dlLabelEl = document.getElementById('dl-label');
+  if (dlLabelEl) dlLabelEl.textContent = "Uploading to Laptop…";
+  setState('downloading');
+  startTime = Date.now();
+  receivedBytes = 0;
+  updateProgress(0);
+
+  const chunkSize = 65536;
+  let offset = 0;
+  const total = file.size;
+
+  while (offset < total) {
+    const chunkBlob = file.slice(offset, offset + chunkSize);
+    const chunkBuffer = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(chunkBlob);
+    });
+
+    await waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    dc.send(chunkBuffer);
+    offset += chunkBuffer.byteLength;
+
+    updateProgress(offset / total);
+    updateDLStats(offset, total);
+    updateSpeed(offset);
+  }
+
+  await waitForDataChannelBuffer(dc, 0, 0);
+  dc.send("UPLOAD_EOF");
+  showDone(file.name, file.size, "WebRTC P2P Upload");
+}
+
 async function handleUploadFile(e) {
   const file = e.target.files[0];
   if (!file) return;
@@ -2701,7 +2741,7 @@ function setupSenderDataChannel() {
   };
 }
 
-async function streamFileToDataChannel(initialOffset) {
+async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
   senderPaused = false;
   const chunkSize = 65536;
   let offset = initialOffset;
@@ -2712,7 +2752,7 @@ async function streamFileToDataChannel(initialOffset) {
   const statsEl = document.getElementById('send-stats');
 
   while (offset < total && !senderAborted) {
-    if (senderDataChannel.readyState !== 'open') {
+    if (!dc || dc.readyState !== 'open') {
       throw new Error("Data channel is no longer open");
     }
 
@@ -2751,7 +2791,7 @@ async function streamFileToDataChannel(initialOffset) {
       payload = chunkBuffer;
     }
 
-    senderDataChannel.send(payload);
+    dc.send(payload);
     offset += chunkBuffer.byteLength;
 
     const progress = offset / total;
