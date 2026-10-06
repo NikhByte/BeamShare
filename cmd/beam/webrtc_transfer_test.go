@@ -198,6 +198,11 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 
 					n, errRead := file.Read(buffer)
 					if n > 0 {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
 						chunkCopy := make([]byte, n)
 						copy(chunkCopy, buffer[:n])
 						errSend := dc.Send(chunkCopy)
