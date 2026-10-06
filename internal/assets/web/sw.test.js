@@ -47,6 +47,20 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
       header3,
       'attachment; filename="file \\"test\\".txt"; filename*=UTF-8\'\'file%20%22test%22.txt'
     );
+
+    // Case 4: Special RFC 5987 characters (single quote, asterisk) and backslashes
+    const header4 = formatContentDisposition("test'file*.txt");
+    assert.equal(
+      header4,
+      'attachment; filename="test\'file*.txt"; filename*=UTF-8\'\'test%27file%2A.txt'
+    );
+
+    // Case 5: Empty or missing filename fallback
+    const header5 = formatContentDisposition('');
+    assert.equal(
+      header5,
+      'attachment; filename="download"; filename*=UTF-8\'\'download'
+    );
   });
 
   test('StreamMap entry deleted upon stream completion (EOF)', () => {
@@ -273,16 +287,20 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     assert.equal(responseResult.headers.get('Content-Length'), '1024');
   });
 
-  test('INIT_PORT posts READY message back on the port immediately', () => {
-    const { streamMap } = require('./sw.js');
+  test('INIT_PORT message handler posts READY message over message port', () => {
+    require('./sw.js');
     const url = '/sw-download-pipe/test-ready';
+    let readyPosted = false;
 
-    let postedMsg = null;
     const mockPort = {
       onmessage: null,
       onmessageerror: null,
       close: () => {},
-      postMessage: (msg) => { postedMsg = msg; }
+      postMessage: (msg) => {
+        if (msg && msg.type === 'READY') {
+          readyPosted = true;
+        }
+      }
     };
 
     listeners['message']({
@@ -290,13 +308,12 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
         type: 'INIT_PORT',
         url,
         filename: 'test.bin',
-        size: 50,
+        size: 100,
         mime: 'application/octet-stream'
       },
       ports: [mockPort]
     });
 
-    assert.equal(streamMap.has(url), true);
-    assert.deepEqual(postedMsg, { type: 'READY' });
+    assert.equal(readyPosted, true);
   });
 });

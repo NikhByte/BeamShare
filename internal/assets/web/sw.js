@@ -27,6 +27,15 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'CLAIM_CLIENTS') {
+    if (event.waitUntil) {
+      event.waitUntil(self.clients.claim());
+    } else {
+      self.clients.claim();
+    }
+    return;
+  }
+
   if (event.data && event.data.type === 'INIT_PORT') {
     const { url, filename, size, mime } = event.data;
     const port = event.ports && event.ports[0];
@@ -121,8 +130,8 @@ self.addEventListener('fetch', (event) => {
 
   // Intercept synthetic download URLs used by the service worker pipe
   if (url.pathname.startsWith('/sw-download-pipe/')) {
-    if (streamMap.has(url.pathname)) {
-      const entry = streamMap.get(url.pathname);
+    let entry = streamMap.get(url.pathname);
+    if (entry) {
       const { stream, filename, size, mime, ttlTimer } = entry;
       
       streamMap.delete(url.pathname); // Only download once per URL
@@ -143,20 +152,20 @@ self.addEventListener('fetch', (event) => {
       event.respondWith(new Response(stream, { headers }));
     } else {
       event.respondWith((async () => {
-        // In WebKit/Safari, fetch event can arrive before SW message event is dispatched. Wait briefly for streamMap entry.
-        const startTime = Date.now();
-        while (!streamMap.has(url.pathname) && Date.now() - startTime < 1000) {
-          await new Promise(resolve => setTimeout(resolve, 10));
+        let e;
+        for (let i = 0; i < 20; i++) {
+          await new Promise(r => setTimeout(r, 100));
+          e = streamMap.get(url.pathname);
+          if (e) break;
         }
 
-        if (streamMap.has(url.pathname)) {
-          const entry = streamMap.get(url.pathname);
-          const { stream, filename, size, mime, ttlTimer } = entry;
+        if (e) {
+          const { stream, filename, size, mime, ttlTimer } = e;
           
-          streamMap.delete(url.pathname);
+          streamMap.delete(url.pathname); // Only download once per URL
           if (ttlTimer) {
             clearTimeout(ttlTimer);
-            entry.ttlTimer = null;
+            e.ttlTimer = null;
           }
           
           const headers = new Headers({
@@ -169,9 +178,9 @@ self.addEventListener('fetch', (event) => {
           }
 
           return new Response(stream, { headers });
+        } else {
+          return new Response('Stream not found or already downloaded.', { status: 404 });
         }
-
-        return new Response('Stream not found or already downloaded.', { status: 404 });
       })());
     }
   }
