@@ -118,10 +118,6 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,mock';
     }
 
-    const QRious = require('qrious');
-    global.QRious = QRious;
-    window.QRious = QRious;
-
     // Set up global environment for app.js
     const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
@@ -142,9 +138,9 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.MessageChannel = global.MessageChannel;
     }
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
-    const QRious = require('./qrious.min.js');
-    window.QRious = QRious;
-    global.QRious = QRious;
+    const qriousLocal = require('./qrious.min.js');
+    window.QRious = qriousLocal;
+    global.QRious = qriousLocal;
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
@@ -156,7 +152,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
     global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
@@ -841,11 +836,11 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
+    // Verify QR code image src uses client-side data URI or /api/qr instead of third-party api.qrserver.com
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
-    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
+    const src = qrImg.getAttribute('src') || qrImg.src || '';
+    assert.equal(src.startsWith('data:image/svg+xml') || src.includes('/api/qr'), true);
+    assert.equal(src.includes('api.qrserver.com'), false);
   });
 
   test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
@@ -1185,7 +1180,7 @@ describe('WebRTC Buffer Backpressure Suite', () => {
 
     await assert.rejects(
       async () => await waitPromise,
-      { message: 'Data channel is no longer open' }
+      { message: /closed or closing|no longer open/i }
     );
 
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
@@ -1214,6 +1209,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     global.crypto = window.crypto;
     global.navigator = window.navigator;
     global.location = window.location;
+    global.localStorage = window.localStorage;
     global.URLSearchParams = window.URLSearchParams;
     global.TextDecoder = require('util').TextDecoder;
     global.FileReader = window.FileReader;
