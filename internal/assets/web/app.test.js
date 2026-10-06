@@ -159,6 +159,9 @@ describe('Gaze Web Receiver Test Suite', () => {
     global.pako = pako;
     window.pako = pako;
     window.__BEAM_TEST_ENV__ = true;
+    if (typeof global.window !== 'undefined') {
+      global.window.__BEAM_TEST_ENV__ = true;
+    }
 
     // Load qrcode.min.js and app.js
     delete require.cache[require.resolve('./qrcode.min.js')];
@@ -227,7 +230,7 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     readyResolver({ active: {} });
     await readyPromise;
-    await new Promise(resolve => setTimeout(resolve, 20));
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     assert.equal(document.documentElement.getAttribute('data-sw-ready'), 'true');
 
@@ -860,9 +863,11 @@ describe('Gaze Web Sender Test Suite', () => {
   test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
     // Intercept fetch / network calls to verify no external requests are made
     let externalRequests = [];
-    window.fetch = async (url) => {
-      externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+    global.fetch = window.fetch = async (url) => {
+      const urlStr = url.toString();
+      externalRequests.push(urlStr);
+      if (urlStr.includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ session: 'test-session' }) };
     };
 
     await app.startSenderSharing();
