@@ -325,3 +325,22 @@ func TestServer_SeekingReaderCheckSessionContextCancellation(t *testing.T) {
 	assert.Equal(t, 0, n)
 	assert.ErrorIs(t, err, context.Canceled)
 }
+
+func TestSession_ClearDownloadQueue(t *testing.T) {
+	sess := &Session{
+		ID:             "test-clear-sess",
+		downloadNotify: make(chan struct{}, 1),
+	}
+
+	sess.EnqueueDownload(DownloadRequest{Offset: 10})
+	assert.Equal(t, 1, sess.DownloadQueueLen())
+
+	sess.ClearDownloadQueue()
+
+	assert.Equal(t, 0, sess.DownloadQueueLen())
+	select {
+	case <-sess.downloadNotify:
+		t.Fatal("downloadNotify channel should be completely drained after ClearDownloadQueue")
+	default:
+	}
+}
