@@ -537,4 +537,17 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('getSessionToken and apiPath include token parameter in API paths', () => {
+    // Test with GAZE_SESSION_TOKEN global
+    window.GAZE_SESSION_TOKEN = 'test-token-12345';
+    assert.equal(app.getSessionToken(), 'test-token-12345');
+    const pathWithToken = app.apiPath('/api/meta');
+    assert.ok(pathWithToken.includes('token=test-token-12345'), 'apiPath should append token parameter');
+
+    const pathWithMultipleParams = app.apiPath('/api/qr?url=http%3A%2F%2Ftest');
+    assert.ok(pathWithMultipleParams.includes('&token=test-token-12345'), 'apiPath should append &token when ? exists');
+
+    delete window.GAZE_SESSION_TOKEN;
+  });
 });
