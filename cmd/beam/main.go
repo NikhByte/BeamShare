@@ -733,7 +733,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		} else {
 			qrURL = localURL
 			if session != nil {
-				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
 			}
 		}
 	}

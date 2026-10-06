@@ -5,11 +5,15 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +26,7 @@ import (
 
 // Server holds the state for one Beam session.
 type Server struct {
+	token        string
 	filePath     string
 	fileName     string
 	fileSize     int64
@@ -71,8 +76,10 @@ func New(filePath string, bufferSize int) (*Server, error) {
 	}
 
 	mux := http.NewServeMux()
+	token := generateSessionToken()
 
 	s := &Server{
+		token:          token,
 		filePath:       filePath,
 		fileName:       fileName,
 		fileSize:       fileSize,
@@ -104,13 +111,165 @@ func New(filePath string, bufferSize int) (*Server, error) {
 
 	s.srv = &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
-		Handler:      mux,
+		Handler:      s.Handler(),
 		ReadTimeout:  0, // disable read timeout for large uploads
 		WriteTimeout: 0, // disable write timeout for large downloads
 		IdleTimeout:  120 * time.Second,
 	}
 
 	return s, nil
+}
+
+func generateSessionToken() string {
+	b := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		panic("crypto/rand unavailable: " + err.Error())
+	}
+	return hex.EncodeToString(b)
+}
+
+// Token returns the session token for this server.
+func (s *Server) Token() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.token
+}
+
+// SetToken overrides the session token.
+func (s *Server) SetToken(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.token = token
+}
+
+func extractToken(r *http.Request) string {
+	if tok := r.URL.Query().Get("token"); tok != "" {
+		return tok
+	}
+	if tok := r.URL.Query().Get("s"); tok != "" {
+		return tok
+	}
+	if tok := r.Header.Get("X-Beam-Token"); tok != "" {
+		return tok
+	}
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		if strings.HasPrefix(auth, "Bearer ") {
+			return strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		}
+	}
+	return ""
+}
+
+func (s *Server) verifyToken(rawToken string) bool {
+	if rawToken == "" {
+		return false
+	}
+	s.mu.Lock()
+	tok := s.token
+	s.mu.Unlock()
+
+	if tok == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(rawToken), []byte(tok)) == 1
+}
+
+func (s *Server) isAllowedOrigin(origin string, hasValidToken bool) bool {
+	if origin == "" {
+		return true
+	}
+	if hasValidToken {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+
+	hostLower := strings.ToLower(host)
+	if hostLower == "localhost" || hostLower == "127.0.0.1" || hostLower == "::1" || hostLower == "[::1]" || strings.HasSuffix(hostLower, ".local") {
+		return true
+	}
+
+	if hostLower == GetLocalIP() {
+		return true
+	}
+
+	ip := net.ParseIP(hostLower)
+	if ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return true
+		}
+	}
+
+	if hostLower == "beam-share.vercel.app" || hostLower == "beamshare.onrender.com" {
+		return true
+	}
+
+	if recURL := os.Getenv("BEAM_RECEIVER_URL"); recURL != "" {
+		if recParsed, err := url.Parse(recURL); err == nil && recParsed.Hostname() == hostLower {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Handler wraps the underlying ServeMux with token auth and CORS/PNA middleware.
+func (s *Server) Handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only protect API endpoints starting with /api/
+		if !strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api" {
+			s.mux.ServeHTTP(w, r)
+			return
+		}
+
+		rawToken := extractToken(r)
+		hasValidToken := s.verifyToken(rawToken)
+		origin := r.Header.Get("Origin")
+		allowedOrigin := s.isAllowedOrigin(origin, hasValidToken)
+
+		if r.Method == http.MethodOptions {
+			if !hasValidToken || !allowedOrigin {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			if origin != "" {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+			} else {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range, Authorization, X-Beam-Token, X-Offset")
+			w.Header().Set("Access-Control-Allow-Private-Network", "true")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		if !hasValidToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		if !allowedOrigin {
+			http.Error(w, "Unauthorized origin", http.StatusUnauthorized)
+			return
+		}
+
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition, Accept-Ranges")
+
+		s.mux.ServeHTTP(w, r)
+	})
 }
 
 // WriteLive broadcasts new input to all connected SSE clients.
@@ -156,8 +315,14 @@ func (s *Server) GetLiveBacklog() []byte {
 // Mux returns the underlying ServeMux.
 func (s *Server) Mux() *http.ServeMux { return s.mux }
 
-// LocalURL returns the http://lan-ip:port URL for this session.
+// LocalURL returns the http://lan-ip:port/?token=... URL for this session.
 func (s *Server) LocalURL() string {
+	s.mu.Lock()
+	tok := s.token
+	s.mu.Unlock()
+	if tok != "" {
+		return fmt.Sprintf("http://%s:%d/?token=%s", GetLocalIP(), s.port, tok)
+	}
 	return fmt.Sprintf("http://%s:%d", GetLocalIP(), s.port)
 }
 
