@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/beamshare/beam/internal/assets"
-	"github.com/beamshare/beam/internal/fileutil"
 	qrcode "github.com/skip2/go-qrcode"
 )
 

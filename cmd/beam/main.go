@@ -19,7 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/beamshare/beam/internal/fileutil"
 	"github.com/beamshare/beam/internal/mdns"
 	"github.com/beamshare/beam/internal/p2p"
 	"github.com/beamshare/beam/internal/relay"
