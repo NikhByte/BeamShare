@@ -747,8 +747,10 @@ describe('Gaze Web Sender Test Suite', () => {
   let window;
   let document;
   let app;
+  let fetchedURLs = [];
 
   beforeEach(() => {
+    fetchedURLs = [];
     dom = new JSDOM(htmlContent, {
       url: 'http://localhost:8080/'
     });
@@ -858,11 +860,12 @@ describe('Gaze Web Sender Test Suite', () => {
   });
 
   test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
+    app.handleSenderFileSelect({ name: 'test.txt', size: 1024, type: 'text/plain' });
     // Intercept fetch / network calls to verify no external requests are made
     let externalRequests = [];
     window.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      return { ok: true, json: async () => ({ session: 'test-session' }) };
     };
 
     await app.startSenderSharing();
