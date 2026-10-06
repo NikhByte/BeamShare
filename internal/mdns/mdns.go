@@ -8,6 +8,7 @@
 package mdns
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
