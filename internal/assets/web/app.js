@@ -4266,6 +4266,33 @@ if (typeof window !== 'undefined') {
   });
 }
 
+// ── Local Client-Side QR Generation ───────────────────────────────────────────
+function generateQRCodeDataURL(text, options) {
+  if (typeof QRCode !== 'undefined' && QRCode.generateQRCodeDataURL) {
+    return QRCode.generateQRCodeDataURL(text, options);
+  }
+  if (typeof require === 'function') {
+    try {
+      const qrcodeLib = require('./qrcode.min.js');
+      if (qrcodeLib && qrcodeLib.generateQRCodeDataURL) {
+        return qrcodeLib.generateQRCodeDataURL(text, options);
+      }
+    } catch (e) {}
+  }
+  throw new Error("Client-side QR generator unavailable");
+}
+
+function renderQRCode(elementOrId, url) {
+  const img = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
+  if (!img) return;
+  try {
+    const dataUrl = generateQRCodeDataURL(url);
+    img.src = dataUrl;
+  } catch (err) {
+    console.error("Failed to generate QR code client-side");
+  }
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     waitForBufferedAmountLow,
