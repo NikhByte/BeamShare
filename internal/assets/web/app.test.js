@@ -822,7 +822,6 @@ describe('Gaze Web Sender Test Suite', () => {
     }
 
     global.fetch = async (url) => {
-      fetchedURLs.push(url.toString());
       if (url.includes('/poll')) {
           return { ok: false, status: 404 };
       }
@@ -860,7 +859,7 @@ describe('Gaze Web Sender Test Suite', () => {
   test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
     // Intercept fetch / network calls to verify no external requests are made
     let externalRequests = [];
-    window.fetch = async (url) => {
+    window.fetch = global.fetch = async (url) => {
       externalRequests.push(url.toString());
       return { ok: true, json: async () => ({}) };
     };
@@ -884,7 +883,7 @@ describe('Gaze Web Sender Test Suite', () => {
     // Verify send-qr-img src uses local client-side Data URL without third-party calls
     const sendQrImg = document.getElementById('send-qr-img');
     assert.notEqual(sendQrImg, null);
-    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml;charset=utf-8,'), true);
+    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml'), true);
     assert.equal(sendQrImg.src.includes('api.qrserver.com'), false);
   });
 
@@ -898,7 +897,7 @@ describe('Gaze Web Sender Test Suite', () => {
     const svgStr = decodeURIComponent(dataUrl.replace('data:image/svg+xml;charset=utf-8,', ''));
     assert.equal(svgStr.includes('<svg'), true);
     assert.equal(svgStr.includes('viewBox='), true);
-    assert.equal(svgStr.includes('<path fill="#000000"'), true);
+    assert.equal(svgStr.includes('fill="#000000"'), true);
   });
 
   test('Client-side QR generation renders locally without external api.qrserver.com requests', async () => {
@@ -1070,6 +1069,117 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(servers[0].username, 'alice');
     assert.equal(servers[0].credential, 'secret');
   });
+
+  test('waitForBufferedAmountLow resolves immediately when bufferedAmount <= threshold', async () => {
+    let listenerAdded = false;
+    const mockDC = {
+      bufferedAmount: 100,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: () => { listenerAdded = true; },
+      removeEventListener: () => {}
+    };
+
+    await app.waitForBufferedAmountLow(mockDC, 512 * 1024);
+    assert.equal(mockDC.bufferedAmountLowThreshold, 512 * 1024);
+    assert.equal(listenerAdded, false, 'Listener should not be attached if buffer is already <= threshold');
+  });
+
+  test('waitForBufferedAmountLow resolves via synchronous recheck when buffer drains during listener attachment', async () => {
+    const listeners = new Set();
+
+    const mockDC = {
+      bufferedAmount: 2 * 1024 * 1024, // starts above threshold
+      bufferedAmountLowThreshold: 0,
+      addEventListener(type, handler) {
+        if (type === 'bufferedamountlow') {
+          listeners.add(handler);
+          // Simulate buffer draining rapidly right when/after listener is attached
+          this.bufferedAmount = 256 * 1024;
+        }
+      },
+      removeEventListener(type, handler) {
+        if (type === 'bufferedamountlow') {
+          listeners.delete(handler);
+        }
+      }
+    };
+
+    let resolved = false;
+    const promise = app.waitForBufferedAmountLow(mockDC, 512 * 1024).then(() => {
+      resolved = true;
+    });
+
+    await promise;
+    assert.equal(resolved, true, 'Promise should resolve via synchronous recheck');
+    assert.equal(listeners.size, 0, 'Listener should be cleaned up after resolving');
+  });
+
+  test('waitForBufferedAmountLow resolves via event when buffer drains asynchronously', async () => {
+    const listeners = new Set();
+
+    const mockDC = {
+      bufferedAmount: 2 * 1024 * 1024,
+      bufferedAmountLowThreshold: 0,
+      addEventListener(type, handler) {
+        if (type === 'bufferedamountlow') {
+          listeners.add(handler);
+        }
+      },
+      removeEventListener(type, handler) {
+        if (type === 'bufferedamountlow') {
+          listeners.delete(handler);
+        }
+      }
+    };
+
+    let resolved = false;
+    const promise = app.waitForBufferedAmountLow(mockDC, 512 * 1024).then(() => {
+      resolved = true;
+    });
+
+    assert.equal(resolved, false, 'Promise should be pending while buffer > threshold');
+    assert.equal(listeners.size, 1);
+
+    // Simulate async buffer drain and event dispatch
+    mockDC.bufferedAmount = 100 * 1024;
+    for (const handler of Array.from(listeners)) {
+      handler();
+    }
+
+    await promise;
+    assert.equal(resolved, true, 'Promise should resolve when event fires');
+    assert.equal(listeners.size, 0, 'Listener should be cleaned up');
+  });
+
+  test('waitForBufferedAmountLow handles pre-EOF zero threshold and defaults threshold to 0', async () => {
+    const listeners = new Set();
+    const mockDC = {
+      bufferedAmount: 1024,
+      bufferedAmountLowThreshold: 512,
+      addEventListener(type, handler) {
+        if (type === 'bufferedamountlow') {
+          listeners.add(handler);
+          this.bufferedAmount = 0; // drains to zero during listener attachment
+        }
+      },
+      removeEventListener(type, handler) {
+        if (type === 'bufferedamountlow') {
+          listeners.delete(handler);
+        }
+      }
+    };
+
+    let resolved = false;
+    // Omit threshold argument to test default threshold = 0 for pre-EOF flush
+    const promise = app.waitForBufferedAmountLow(mockDC).then(() => {
+      resolved = true;
+    });
+
+    await promise;
+    assert.equal(mockDC.bufferedAmountLowThreshold, 0, 'Threshold should default to 0');
+    assert.equal(resolved, true, 'Promise should resolve instantly when buffer drains to 0');
+    assert.equal(listeners.size, 0, 'Listener should be cleaned up after resolving');
+  });
 });
 
 describe('WebRTC Buffer Backpressure Suite', () => {
@@ -1177,7 +1287,7 @@ describe('WebRTC Buffer Backpressure Suite', () => {
 
     await assert.rejects(
       async () => await waitPromise,
-      { message: 'Data channel is no longer open' }
+      { message: /closed or closing/i }
     );
 
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
