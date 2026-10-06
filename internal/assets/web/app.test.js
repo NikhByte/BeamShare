@@ -118,10 +118,6 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,mock';
     }
 
-    const QRious = require('qrious');
-    global.QRious = QRious;
-    window.QRious = QRious;
-
     // Set up global environment for app.js
     const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
@@ -153,9 +149,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
