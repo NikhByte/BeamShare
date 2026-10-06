@@ -824,6 +824,18 @@ async function getSWPipe(fileMeta) {
   if (!('serviceWorker' in navigator)) return null;
 
   try {
+    if (!navigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        const onController = () => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onController);
+          resolve();
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', onController);
+        setTimeout(onController, 1000);
+      });
+    }
+    if (!navigator.serviceWorker.controller) return null;
+
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 1500));
     const reg = await Promise.race([swReady, timeout]);
@@ -834,6 +846,16 @@ async function getSWPipe(fileMeta) {
     const channel = new MessageChannel();
     const port = channel.port1;
 
+    const readyPromise = new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 1000);
+      port.onmessage = (e) => {
+        if (e.data && e.data.type === 'READY') {
+          clearTimeout(timer);
+          resolve(true);
+        }
+      };
+    });
+
     sw.postMessage({
       type: 'INIT_PORT',
       url: swUrl,
@@ -841,6 +863,11 @@ async function getSWPipe(fileMeta) {
       size: fileMeta.size,
       mime: fileMeta.mime
     }, [channel.port2]);
+
+    const isReady = await readyPromise;
+    if (!isReady) return null;
+
+    port.onmessage = null;
 
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
