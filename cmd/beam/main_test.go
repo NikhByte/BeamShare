@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/beamshare/beam/internal/server"
-	"github.com/pion/webrtc/v3"
 )
 
 func TestParseFlags(t *testing.T) {
