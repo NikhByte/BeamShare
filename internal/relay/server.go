@@ -95,7 +95,10 @@ func (s *Session) DownloadQueueLen() int {
 }
 
 func (s *Session) ClosePipes(err error) {
-	s.ClosePipesIfMatch(nil, nil, err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closePipesIfMatchLocked(nil, nil, err)
+	s.closeUploadPipesIfMatchLocked(nil, nil, err)
 }
 
 func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err error) {
@@ -193,6 +196,52 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 	}
 }
 
+func (s *Session) CloseUploadPipes(err error) {
+	s.CloseUploadPipesIfMatch(nil, nil, err)
+}
+
+func (s *Session) CloseUploadPipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeUploadPipesIfMatchLocked(pr, pw, err)
+}
+
+func (s *Session) closeUploadPipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
+	if pr == nil || s.UploadPipeR == pr {
+		if s.UploadPipeW != nil {
+			if err != nil {
+				s.UploadPipeW.CloseWithError(err)
+			} else {
+				s.UploadPipeW.Close()
+			}
+			s.UploadPipeW = nil
+		}
+		if s.UploadPipeR != nil {
+			if err != nil {
+				s.UploadPipeR.CloseWithError(err)
+			} else {
+				s.UploadPipeR.Close()
+			}
+			s.UploadPipeR = nil
+		}
+	} else {
+		if pw != nil {
+			if err != nil {
+				pw.CloseWithError(err)
+			} else {
+				pw.Close()
+			}
+		}
+		if pr != nil {
+			if err != nil {
+				pr.CloseWithError(err)
+			} else {
+				pr.Close()
+			}
+		}
+	}
+}
+
 func (s *Session) SetPipes(pr *io.PipeReader, pw *io.PipeWriter) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -204,6 +253,19 @@ func (s *Session) IsPipeReady() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.DataPipeR != nil && s.DataPipeW != nil
+}
+
+func (s *Session) SetUploadPipes(pr *io.PipeReader, pw *io.PipeWriter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.UploadPipeR = pr
+	s.UploadPipeW = pw
+}
+
+func (s *Session) IsUploadPipeReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.UploadPipeR != nil && s.UploadPipeW != nil
 }
 
 type failedAttempt struct {
@@ -1200,53 +1262,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 			copyDone := make(chan error, 1)
 			go func() {
-				type chunk struct {
-					data []byte
-					err  error
-				}
-				chunks := make(chan chunk, 16)
-
-				go func() {
-					defer close(chunks)
-					for {
-						buf := make([]byte, 32*1024)
-						n, readErr := part.Read(buf)
-						if n > 0 {
-							cData := make([]byte, n)
-							copy(cData, buf[:n])
-							chunks <- chunk{data: cData}
-						}
-						if readErr != nil {
-							if readErr != io.EOF {
-								chunks <- chunk{err: readErr}
-							}
-							break
-						}
-					}
-				}()
-
-				var writeErr error
-				for c := range chunks {
-					if c.err != nil {
-						writeErr = c.err
-						break
-					}
-					if len(c.data) > 0 {
-						_, err := pw.Write(c.data)
-						if err != nil {
-							writeErr = err
-							break
-						}
-					}
-				}
-
-				if writeErr != nil {
-					pw.CloseWithError(writeErr)
+				defer part.Close()
+				_, cErr := io.Copy(pw, part)
+				if cErr != nil {
+					pw.CloseWithError(cErr)
 				} else {
 					pw.Close()
 				}
-				part.Close()
-				copyDone <- writeErr
+				copyDone <- cErr
 			}()
 
 			select {
@@ -1254,6 +1277,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			case <-r.Context().Done():
 				uploadErr = fmt.Errorf("upload context cancelled: %w", r.Context().Err())
 				sess.ClosePipesIfMatch(pr, pw, uploadErr)
+				<-copyDone
 			}
 
 			if uploadErr != nil {
@@ -1305,5 +1329,6 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	case <-r.Context().Done():
 		pullErr = fmt.Errorf("pull context cancelled: %w", r.Context().Err())
 		sess.ClosePipesIfMatch(pr, pw, pullErr)
+		<-copyDone
 	}
 }
