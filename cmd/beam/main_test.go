@@ -1,15 +1,23 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/beamshare/beam/internal/server"
+	"github.com/beamshare/beam/internal/signaling"
 	"github.com/pion/webrtc/v3"
 )
 
@@ -40,6 +48,13 @@ func TestParseFlags(t *testing.T) {
 
 	if discoveryTimeout != 15*1000*1000*1000 { // 15 seconds
 		t.Fatalf("expected discovery timeout 15s, got %v", discoveryTimeout)
+	}
+
+	if !reflect.DeepEqual(parsedTurnServers, []string{"turn:1"}) {
+		t.Fatalf("expected parsedTurnServers ['turn:1'], got %v", parsedTurnServers)
+	}
+	if parsedTurnUsername != "user" || parsedTurnCredential != "pass" {
+		t.Fatalf("expected parsed turn auth user=user pass=pass, got user=%s pass=%s", parsedTurnUsername, parsedTurnCredential)
 	}
 }
 
@@ -115,93 +130,305 @@ func TestDownloadFile_Relay(t *testing.T) {
 	}
 }
 
-func TestWaitDataChannelBuffer(t *testing.T) {
-	ch := make(chan struct{}, 1)
-
-	// Test 1: nil data channel returns error
-	err := waitDataChannelBuffer(nil, ch, 100)
-	if err == nil {
-		t.Fatalf("expected error for nil data channel, got nil")
+func TestDownloadFile_PathTraversalSanitization(t *testing.T) {
+	traversalCases := []struct {
+		rawMetaName      string
+		expectedFileName string
+	}{
+		{"../../etc/passwd", "received_passwd"},
+		{"..\\..\\evil.bat", "received_evil.bat"},
+		{"\x00../malicious.sh", "received_malicious.sh"},
+		{"....", "received_download.bin"},
 	}
 
-	// Test 2: connected pair where buffer is 0 <= 1000 returns immediately
-	api := webrtc.NewAPI()
-	pc1, err := api.NewPeerConnection(webrtc.Configuration{})
+	for _, tc := range traversalCases {
+		t.Run(tc.rawMetaName, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+				meta := server.FileMeta{
+					Name: tc.rawMetaName,
+					Size: 10,
+				}
+				json.NewEncoder(w).Encode(meta)
+			})
+			mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte("0123456789"))
+			})
+
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
+
+			defer os.Remove(tc.expectedFileName)
+
+			err := downloadFile(ts.URL)
+			if err != nil {
+				t.Fatalf("downloadFile failed for %s: %v", tc.rawMetaName, err)
+			}
+
+			if _, err := os.Stat(tc.expectedFileName); os.IsNotExist(err) {
+				t.Fatalf("expected file %s to exist, but was not found", tc.expectedFileName)
+			}
+		})
+	}
+}
+
+func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "beam_test_*.bin")
 	if err != nil {
-		t.Fatalf("failed to create pc1: %v", err)
+		t.Fatalf("failed to create temp file: %v", err)
 	}
-	defer pc1.Close()
+	defer os.Remove(tmpFile.Name())
 
-	pc2, err := api.NewPeerConnection(webrtc.Configuration{})
+	data := make([]byte, 512*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	tmpFile.Write(data)
+	tmpFile.Close()
+
+	api := signaling.NewWebRTCAPI()
+	pcSender, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
-		t.Fatalf("failed to create pc2: %v", err)
+		t.Fatalf("failed to create pcSender: %v", err)
 	}
-	defer pc2.Close()
+	defer pcSender.Close()
 
-	dc, err := pc1.CreateDataChannel("test", nil)
+	pcReceiver, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
-		t.Fatalf("failed to create dc: %v", err)
+		t.Fatalf("failed to create pcReceiver: %v", err)
 	}
+	defer pcReceiver.Close()
 
-	dcOpen := make(chan struct{})
-	dc.OnOpen(func() {
-		close(dcOpen)
-	})
-
-	// Wire ICE candidates between pc1 and pc2
-	pc1.OnICECandidate(func(c *webrtc.ICECandidate) {
+	pcSender.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
-			_ = pc2.AddICECandidate(c.ToJSON())
+			pcReceiver.AddICECandidate(c.ToJSON())
 		}
 	})
-	pc2.OnICECandidate(func(c *webrtc.ICECandidate) {
+	pcReceiver.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
-			_ = pc1.AddICECandidate(c.ToJSON())
+			pcSender.AddICECandidate(c.ToJSON())
 		}
 	})
 
-	// Perform ICE handshake
-	offer, err := pc1.CreateOffer(nil)
-	if err != nil {
-		t.Fatalf("failed offer: %v", err)
-	}
-	pc1.SetLocalDescription(offer)
-	pc2.SetRemoteDescription(offer)
+	var receiverDC *webrtc.DataChannel
+	dcReady := make(chan struct{})
 
-	answer, err := pc2.CreateAnswer(nil)
+	var receivedChunks [][]byte
+	var receivedChunksMu sync.Mutex
+	eofReceived := make(chan struct{})
+
+	var receivedBytesAfterMeta int
+	pcReceiver.OnDataChannel(func(dc *webrtc.DataChannel) {
+		receiverDC = dc
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			if msg.IsString {
+				dataStr := string(msg.Data)
+				if strings.HasPrefix(dataStr, "META:") {
+					receivedChunksMu.Lock()
+					receivedBytesAfterMeta = 0
+					receivedChunksMu.Unlock()
+				} else if dataStr == "EOF" {
+					close(eofReceived)
+				}
+			} else {
+				receivedChunksMu.Lock()
+				c := make([]byte, len(msg.Data))
+				copy(c, msg.Data)
+				receivedChunks = append(receivedChunks, c)
+				receivedBytesAfterMeta += len(msg.Data)
+				receivedChunksMu.Unlock()
+			}
+		})
+		dc.OnOpen(func() {
+			close(dcReady)
+		})
+	})
+
+	ordered := true
+	dcSender, err := pcSender.CreateDataChannel("beam-file", &webrtc.DataChannelInit{
+		Ordered: &ordered,
+	})
 	if err != nil {
-		t.Fatalf("failed answer: %v", err)
+		t.Fatalf("failed to create data channel: %v", err)
 	}
-	pc2.SetLocalDescription(answer)
-	pc1.SetRemoteDescription(answer)
+
+	offer, err := pcSender.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("failed to create offer: %v", err)
+	}
+	if err := pcSender.SetLocalDescription(offer); err != nil {
+		t.Fatalf("failed to set local sdp: %v", err)
+	}
+
+	<-webrtc.GatheringCompletePromise(pcSender)
+
+	if err := pcReceiver.SetRemoteDescription(*pcSender.LocalDescription()); err != nil {
+		t.Fatalf("failed to set remote sdp: %v", err)
+	}
+
+	answer, err := pcReceiver.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("failed to create answer: %v", err)
+	}
+	if err := pcReceiver.SetLocalDescription(answer); err != nil {
+		t.Fatalf("failed to set local answer: %v", err)
+	}
+
+	<-webrtc.GatheringCompletePromise(pcReceiver)
+
+	if err := pcSender.SetRemoteDescription(*pcReceiver.LocalDescription()); err != nil {
+		t.Fatalf("failed to set remote answer: %v", err)
+	}
 
 	select {
-	case <-dcOpen:
+	case <-dcReady:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("timeout waiting for data channel to open")
 	}
 
-	// Immediate return when BufferedAmount() <= target (0 <= 100)
-	err = waitDataChannelBuffer(dc, ch, 100)
-	if err != nil {
-		t.Fatalf("expected nil for buffer <= target, got %v", err)
-	}
-
-	// Test channel / ticker signal unblock
-	go func() {
-		time.Sleep(30 * time.Millisecond)
-		ch <- struct{}{}
-	}()
-	err = waitDataChannelBuffer(dc, ch, 100)
-	if err != nil {
-		t.Fatalf("expected nil on signal unblock, got %v", err)
-	}
-
-	// Test channel close during wait or beforehand
-	pc1.Close()
 	time.Sleep(50 * time.Millisecond)
-	err = waitDataChannelBuffer(dc, ch, 100)
-	if err == nil {
-		t.Fatalf("expected error for closed data channel, got nil")
+
+	mainCtx, mainCancel := context.WithCancel(context.Background())
+	defer mainCancel()
+
+	filePath := tmpFile.Name()
+	fileName := filepath.Base(filePath)
+	fileSize := int64(len(data))
+
+	var streamMu sync.Mutex
+	var streamCancel context.CancelFunc
+
+	dcSender.OnMessage(func(msg webrtc.DataChannelMessage) {
+		if !msg.IsString {
+			return
+		}
+		dataStr := string(msg.Data)
+		if strings.HasPrefix(dataStr, "OFFSET:") {
+			parts := strings.SplitN(dataStr, ":", 2)
+			var offset int64
+			if len(parts) == 2 {
+				offset, _ = strconv.ParseInt(parts[1], 10, 64)
+			}
+
+			streamMu.Lock()
+			if streamCancel != nil {
+				streamCancel()
+			}
+			var streamCtx context.Context
+			streamCtx, streamCancel = context.WithCancel(mainCtx)
+			streamMu.Unlock()
+
+			go func(ctx context.Context, reqOffset int64) {
+				file, err := os.Open(filePath)
+				if err != nil {
+					return
+				}
+				defer file.Close()
+
+				if reqOffset > 0 {
+					_, err = file.Seek(reqOffset, io.SeekStart)
+					if err != nil {
+						return
+					}
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
+				dcSender.SendText(metaHeader)
+
+				bufferedAmountLowChan := make(chan struct{}, 1)
+				dcSender.SetBufferedAmountLowThreshold(512 * 1024)
+				dcSender.OnBufferedAmountLow(func() {
+					select {
+					case bufferedAmountLowChan <- struct{}{}:
+					default:
+					}
+				})
+
+				buffer := make([]byte, 16*1024)
+				totalSent := reqOffset
+
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+
+					if dcSender.BufferedAmount() > 1024*1024 {
+						for dcSender.BufferedAmount() > 512*1024 {
+							select {
+							case <-ctx.Done():
+								return
+							case <-bufferedAmountLowChan:
+							case <-time.After(10 * time.Millisecond):
+							}
+						}
+					}
+
+					n, err := file.Read(buffer)
+					if n > 0 {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
+
+						chunk := make([]byte, n)
+						copy(chunk, buffer[:n])
+
+						errSend := dcSender.Send(chunk)
+						if errSend != nil {
+							return
+						}
+						totalSent += int64(n)
+					}
+					if err != nil {
+						break
+					}
+				}
+
+				dcSender.SetBufferedAmountLowThreshold(0)
+				for dcSender.BufferedAmount() > 0 {
+					select {
+					case <-ctx.Done():
+						return
+					case <-bufferedAmountLowChan:
+					case <-time.After(10 * time.Millisecond):
+					}
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				dcSender.SendText("EOF")
+			}(streamCtx, offset)
+		}
+	})
+
+	receiverDC.SendText("OFFSET:0")
+	time.Sleep(5 * time.Millisecond)
+	receiverDC.SendText("OFFSET:1024")
+
+	select {
+	case <-eofReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for EOF")
+	}
+
+	receivedChunksMu.Lock()
+	defer receivedChunksMu.Unlock()
+
+	expectedLen := len(data) - 1024
+	if receivedBytesAfterMeta != expectedLen {
+		t.Fatalf("expected received bytes after meta %d, got %d", expectedLen, receivedBytesAfterMeta)
 	}
 }
