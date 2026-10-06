@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/beamshare/beam/internal/mdns"
+	"github.com/beamshare/beam/internal/p2p"
 	"github.com/beamshare/beam/internal/relay"
 	"github.com/beamshare/beam/internal/server"
 	"github.com/beamshare/beam/internal/signaling"
@@ -360,6 +361,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 	// ── Phase 3: WebRTC signaling session ─────────────────────────────────────
 	fmt.Printf("  %s\n", dimStr("Setting up WebRTC session…"))
+	streamSender := p2p.NewStreamSender()
 	session, err := signaling.NewSession(iceServers, discoveryTimeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  warn: WebRTC unavailable (%v) — HTTP-only mode\n", err)
@@ -501,9 +503,19 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 			// Hook up data channel handler
 			session.OnOpen = func(dc *webrtc.DataChannel) {
 				pauseCtrl := newPauseController()
+				var (
+					streamMu     sync.Mutex
+					streamCancel context.CancelFunc
+				)
 
 				dc.OnClose(func() {
 					pauseCtrl.Close()
+					streamMu.Lock()
+					if streamCancel != nil {
+						streamCancel()
+						streamCancel = nil
+					}
+					streamMu.Unlock()
 				})
 
 				// Upload state variables for incoming files from receiver
@@ -514,7 +526,19 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					uploaded   int64
 					uploadStat time.Time
 				)
-				var streamActive atomic.Bool
+				var isStreaming atomic.Bool
+
+				var senderMu sync.Mutex
+				var activeCancel context.CancelFunc
+
+				dc.OnClose(func() {
+					senderMu.Lock()
+					if activeCancel != nil {
+						activeCancel()
+						activeCancel = nil
+					}
+					senderMu.Unlock()
+				})
 
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
@@ -561,14 +585,25 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if isLive {
 								return
 							}
+							if !isStreaming.CompareAndSwap(false, true) {
+								return
+							}
 							parts := strings.SplitN(dataStr, ":", 2)
 							var offset int64
 							if len(parts) == 2 {
 								offset, _ = strconv.ParseInt(parts[1], 10, 64)
 							}
+							streamMu.Lock()
+							if streamCancel != nil {
+								streamCancel()
+							}
+							var streamCtx context.Context
+							streamCtx, streamCancel = context.WithCancel(mainCtx)
+							streamMu.Unlock()
+
 							// File sender goroutine (Direct-to-Disk + Backpressure + Pause/Resume Flow Control)
-							go func() {
-								defer streamActive.Store(false)
+							go func(ctx context.Context, reqOffset int64) {
+								defer isStreaming.Store(false)
 
 								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
 								file, err := os.Open(filePath)
@@ -579,12 +614,18 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								defer file.Close()
 								defer pauseCtrl.Close()
 
-								if offset > 0 {
-									_, err = file.Seek(offset, io.SeekStart)
+								if reqOffset > 0 {
+									_, err = file.Seek(reqOffset, io.SeekStart)
 									if err != nil {
 										fmt.Printf("  Error seeking file: %v\n", err)
 										return
 									}
+								}
+
+								select {
+								case <-ctx.Done():
+									return
+								default:
 								}
 
 								// Send META header
@@ -618,6 +659,8 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 											return nil
 										}
 										select {
+										case <-ctx.Done():
+											return ctx.Err()
 										case <-bufferedAmountLowChan:
 											if uint64(dc.BufferedAmount()) <= targetThreshold {
 												return nil
@@ -631,10 +674,16 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								}
 
 								buffer := make([]byte, 64*1024) // 64KB chunk size
-								totalSent := offset
+								totalSent := reqOffset
 								start := time.Now()
 
 								for {
+									select {
+									case <-ctx.Done():
+										return
+									default:
+									}
+
 									if !pauseCtrl.WaitIfPaused() {
 										return
 									}
@@ -653,6 +702,12 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 									n, errRead := file.Read(buffer)
 									if n > 0 {
+										select {
+										case <-ctx.Done():
+											return
+										default:
+										}
+
 										// Isolated heap slice allocation per chunk send
 										chunk := make([]byte, n)
 										copy(chunk, buffer[:n])
@@ -680,16 +735,23 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 										return
 									}
 								}
+
+								select {
+								case <-ctx.Done():
+									return
+								default:
+								}
+
 								dc.SendText("EOF")
 
 								elapsed := time.Since(start)
-								sentInSession := totalSent - offset
+								sentInSession := totalSent - reqOffset
 								fmt.Printf("\n  ✅ P2P Transfer Complete! Sent %s in %.1fs (avg %s)\n",
 									ui.FormatBytes(sentInSession),
 									elapsed.Seconds(),
 									ui.FormatSpeed(sentInSession, elapsed),
 								)
-							}()
+							}(streamCtx, offset)
 						}
 					} else {
 						if uploadFile != nil {
@@ -751,9 +813,17 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 					// Broadcast to WebRTC data channels
 					channelsMu.Lock()
+					var validChannels []*webrtc.DataChannel
 					for _, dc := range activeChannels {
-						dc.SendText(string(chunk))
+						if dc.ReadyState() != webrtc.DataChannelStateOpen {
+							continue
+						}
+						if err := dc.SendText(string(chunk)); err != nil {
+							continue
+						}
+						validChannels = append(validChannels, dc)
 					}
+					activeChannels = validChannels
 					channelsMu.Unlock()
 				}
 				if err != nil {
@@ -763,8 +833,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					channelsMu.Lock()
 					liveFinished = true
 					for _, dc := range activeChannels {
-						dc.SendText("EOF")
-						dc.Close()
+						if dc.ReadyState() == webrtc.DataChannelStateOpen {
+							dc.SendText("EOF")
+							dc.Close()
+						}
 					}
 					activeChannels = nil
 					channelsMu.Unlock()
@@ -891,6 +963,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	go func() {
 		<-quit
 		fmt.Println("\n  beam: shutting down…")
+		streamSender.Stop()
 		mainCancel()
 		broadcaster.Stop()
 		if session != nil {
@@ -952,6 +1025,41 @@ func printHelp() {
 
 func dimStr(s string) string   { return "\033[2m" + s + "\033[0m" }
 func greenStr(s string) string { return "\033[32m" + s + "\033[0m" }
+
+func extractKeyFromURL(u *url.URL) string {
+	if k := u.Query().Get("k"); k != "" {
+		return k
+	}
+	frag := u.Fragment
+	if frag == "" {
+		return ""
+	}
+	if strings.HasPrefix(frag, "k=") {
+		return frag[2:]
+	}
+	if vals, err := url.ParseQuery(frag); err == nil {
+		if k := vals.Get("k"); k != "" {
+			return k
+		}
+	}
+	return ""
+}
+
+func decodeBase64Key(k string) ([]byte, error) {
+	if b, err := base64.URLEncoding.DecodeString(k); err == nil {
+		return b, nil
+	}
+	if b, err := base64.RawURLEncoding.DecodeString(k); err == nil {
+		return b, nil
+	}
+	if b, err := base64.StdEncoding.DecodeString(k); err == nil {
+		return b, nil
+	}
+	if b, err := base64.RawStdEncoding.DecodeString(k); err == nil {
+		return b, nil
+	}
+	return nil, fmt.Errorf("failed to decode base64 key")
+}
 func runReceive(code string) {
 	err := downloadFile(code)
 	if err != nil {
@@ -976,9 +1084,18 @@ func downloadFile(code string) error {
 	backend = strings.TrimRight(backend, "/")
 
 	s := u.Query().Get("s")
-	k := u.Fragment
-	if strings.HasPrefix(k, "k=") {
-		k = k[2:]
+	k := extractKeyFromURL(u)
+
+	var keyBytes []byte
+	if k != "" {
+		var err error
+		keyBytes, err = decodeBase64Key(k)
+		if err != nil {
+			return fmt.Errorf("invalid key: %w", err)
+		}
+		if len(keyBytes) != 32 {
+			return fmt.Errorf("invalid key length: key must be exactly 32 bytes, got %d bytes", len(keyBytes))
+		}
 	}
 
 	metaURL := backend + "/api/meta"
@@ -1021,13 +1138,26 @@ func downloadFile(code string) error {
 	var r io.Reader = respDL.Body
 	if k != "" {
 		keyBytes, err := base64.URLEncoding.DecodeString(k)
-		if err == nil && len(keyBytes) == 32 {
-			r, err = relay.NewDecryptingReader(respDL.Body, keyBytes)
-			if err != nil {
-				return fmt.Errorf("failed to initialize decryptor: %w", err)
-			}
-			fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
+		if err != nil {
+			keyBytes, err = base64.StdEncoding.DecodeString(k)
 		}
+		if err != nil {
+			keyBytes, err = base64.RawURLEncoding.DecodeString(k)
+		}
+		if err != nil {
+			keyBytes, err = base64.RawStdEncoding.DecodeString(k)
+		}
+		if err != nil {
+			return fmt.Errorf("invalid decryption key encoding: %w", err)
+		}
+		if len(keyBytes) != 32 {
+			return fmt.Errorf("invalid decryption key length: expected 32 bytes, got %d", len(keyBytes))
+		}
+		r, err = relay.NewDecryptingReader(respDL.Body, keyBytes)
+		if err != nil {
+			return fmt.Errorf("failed to initialize decryptor: %w", err)
+		}
+		fmt.Printf("  %s\n", greenStr("End-to-End Encryption Enabled"))
 	}
 
 	cleanBase := server.SanitizeFilename(meta.Name, "download.bin")

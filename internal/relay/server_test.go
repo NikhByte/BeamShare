@@ -2,7 +2,9 @@ package relay
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -226,4 +228,100 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 	}
 
 	assert.True(t, rateLimited, "Brute force session enumeration should trigger HTTP 429 Too Many Requests")
+}
+
+func TestServer_LongPollUnblocksOnSessionExpiration(t *testing.T) {
+	srv := NewServerWithConfig(50*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	client := newTestHTTPClient()
+
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer reqCancel()
+
+	// Register session
+	regReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, ts.URL+"/relay/register", nil)
+	require.NoError(t, err)
+
+	resp, err := client.Do(regReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var regData map[string]string
+	require.NoError(t, reqCtx.Err())
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&regData))
+	resp.Body.Close()
+
+	sessID := regData["session"]
+	require.NotEmpty(t, sessID)
+
+	sess := srv.GetSession(sessID)
+	require.NotNil(t, sess)
+	require.NotNil(t, sess.ctx, "Session must maintain a context.Context created at initialization")
+	require.NotNil(t, sess.cancel, "Session must maintain a CancelCauseFunc created at initialization")
+
+	// Start long-poll in a goroutine
+	pollRespCh := make(chan *http.Response, 1)
+	pollErrCh := make(chan error, 1)
+
+	go func() {
+		pollReq, pollErr := http.NewRequestWithContext(reqCtx, http.MethodGet, fmt.Sprintf("%s/relay/poll?session=%s", ts.URL, sessID), nil)
+		if pollErr != nil {
+			pollErrCh <- pollErr
+			return
+		}
+		pResp, pErr := client.Do(pollReq)
+		if pErr != nil {
+			pollErrCh <- pErr
+			return
+		}
+		pollRespCh <- pResp
+	}()
+
+	// Ensure long-poll has started and is waiting
+	time.Sleep(20 * time.Millisecond)
+
+	// Wait for session to expire via sweeper
+	select {
+	case pResp := <-pollRespCh:
+		defer pResp.Body.Close()
+		assert.Equal(t, http.StatusNotFound, pResp.StatusCode, "Long poll should respond with HTTP 404 upon session expiration")
+	case pErr := <-pollErrCh:
+		t.Fatalf("Unexpected error during long-poll: %v", pErr)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Long poll did not unblock within timeout after session expiration")
+	}
+
+	assert.Nil(t, srv.GetSession(sessID), "Session should be removed from server after expiration")
+}
+
+func TestServer_SeekingReaderCheckSessionContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	sess := &Session{
+		ID:     "test-sr-sess",
+		ctx:    ctx,
+		cancel: cancel,
+	}
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	sr := &seekingReader{
+		pr:   pr,
+		sess: sess,
+		ctx:  context.Background(),
+	}
+
+	// Cancel session context
+	cancel(fmt.Errorf("session expired"))
+
+	// Read should return session context cancellation error
+	buf := make([]byte, 10)
+	n, err := sr.Read(buf)
+	assert.Equal(t, 0, n)
+	assert.ErrorIs(t, err, context.Canceled)
 }
