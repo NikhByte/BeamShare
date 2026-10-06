@@ -128,14 +128,18 @@ func (dr *DecryptingReader) Read(p []byte) (int, error) {
 		return 0, ErrFrameTooLarge
 	}
 
-	frameData := make([]byte, length)
-	if _, err := io.ReadFull(dr.r, frameData); err != nil {
-		return 0, err
+	if length > MaxFrameSize {
+		return 0, ErrFrameTooLarge
 	}
 
 	nonceSize := dr.gcm.NonceSize()
-	if len(frameData) < nonceSize {
+	if int(length) < nonceSize {
 		return 0, io.ErrUnexpectedEOF
+	}
+
+	frameData := make([]byte, length)
+	if _, err := io.ReadFull(dr.r, frameData); err != nil {
+		return 0, err
 	}
 
 	nonce := frameData[:nonceSize]
