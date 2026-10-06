@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-
 	"reflect"
 	"testing"
+
 	"github.com/beamshare/beam/internal/server"
 )
 
@@ -38,6 +38,13 @@ func TestParseFlags(t *testing.T) {
 
 	if discoveryTimeout != 15*1000*1000*1000 { // 15 seconds
 		t.Fatalf("expected discovery timeout 15s, got %v", discoveryTimeout)
+	}
+
+	if !reflect.DeepEqual(parsedTurnServers, []string{"turn:1"}) {
+		t.Fatalf("expected parsedTurnServers ['turn:1'], got %v", parsedTurnServers)
+	}
+	if parsedTurnUsername != "user" || parsedTurnCredential != "pass" {
+		t.Fatalf("expected parsed turn auth user=user pass=pass, got user=%s pass=%s", parsedTurnUsername, parsedTurnCredential)
 	}
 }
 
@@ -110,5 +117,47 @@ func TestDownloadFile_Relay(t *testing.T) {
 	err := downloadFile(urlWithSession)
 	if err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
+	}
+}
+
+func TestDownloadFile_PathTraversalSanitization(t *testing.T) {
+	traversalCases := []struct {
+		rawMetaName      string
+		expectedFileName string
+	}{
+		{"../../etc/passwd", "received_passwd"},
+		{"..\\..\\evil.bat", "received_evil.bat"},
+		{"\x00../malicious.sh", "received_malicious.sh"},
+		{"....", "received_download.bin"},
+	}
+
+	for _, tc := range traversalCases {
+		t.Run(tc.rawMetaName, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+				meta := server.FileMeta{
+					Name: tc.rawMetaName,
+					Size: 10,
+				}
+				json.NewEncoder(w).Encode(meta)
+			})
+			mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte("0123456789"))
+			})
+
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
+
+			defer os.Remove(tc.expectedFileName)
+
+			err := downloadFile(ts.URL)
+			if err != nil {
+				t.Fatalf("downloadFile failed for %s: %v", tc.rawMetaName, err)
+			}
+
+			if _, err := os.Stat(tc.expectedFileName); os.IsNotExist(err) {
+				t.Fatalf("expected file %s to exist, but was not found", tc.expectedFileName)
+			}
+		})
 	}
 }
