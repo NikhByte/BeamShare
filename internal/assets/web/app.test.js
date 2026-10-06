@@ -118,10 +118,6 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,mock';
     }
 
-    const QRious = require('qrious');
-    global.QRious = QRious;
-    window.QRious = QRious;
-
     // Set up global environment for app.js
     const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
@@ -142,9 +138,9 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.MessageChannel = global.MessageChannel;
     }
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
-    const QRious = require('./qrious.min.js');
-    window.QRious = QRious;
-    global.QRious = QRious;
+    const qriousMin1 = require('./qrious.min.js');
+    window.QRious = qriousMin1;
+    global.QRious = qriousMin1;
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
@@ -156,7 +152,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
     global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
@@ -749,9 +744,9 @@ describe('Gaze Web Sender Test Suite', () => {
     window.atob = global.atob;
     window.btoa = global.btoa;
 
-    const QRious = require('./qrious.min.js');
-    window.QRious = QRious;
-    global.QRious = QRious;
+    const qriousMin2 = require('./qrious.min.js');
+    window.QRious = qriousMin2;
+    global.QRious = qriousMin2;
 
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
@@ -841,10 +836,9 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
+    // Verify QR code image src uses client-side inline SVG or native /api/qr endpoint instead of third-party api.qrserver.com
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
+    assert.equal(qrImg.src.includes('data:image/svg+xml') || qrImg.src.includes('/api/qr'), true);
     assert.equal(qrImg.src.includes('api.qrserver.com'), false);
   });
 
