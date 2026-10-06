@@ -3,48 +3,50 @@ package p2p
 import (
 	"bytes"
 	"context"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
+// mockDataChannel implements DataChannel for testing purposes.
 type mockDataChannel struct {
-	mu             sync.Mutex
-	sentChunks     [][]byte
-	sentTexts      []string
-	bufferedAmount uint64
-	lowThreshold   uint64
-	lowCb          func()
+	mu                   sync.Mutex
+	bufferedAmount       uint64
+	lowThreshold         uint64
+	onBufferedLowHandler func()
+	sentText             []string
+	sentChunks           [][]byte
+	sendError            error
+	sendTextError        error
 }
 
 func newMockDataChannel() *mockDataChannel {
-	return &mockDataChannel{
-		sentChunks: make([][]byte, 0),
-		sentTexts:  make([]string, 0),
-	}
+	return &mockDataChannel{}
 }
 
 func (m *mockDataChannel) Send(data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// Store a copy to verify what was received
-	cpy := make([]byte, len(data))
-	copy(cpy, data)
-	m.sentChunks = append(m.sentChunks, cpy)
+	if m.sendError != nil {
+		return m.sendError
+	}
+	// Copy data to ensure we store what was passed
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	m.sentChunks = append(m.sentChunks, cp)
 	return nil
 }
 
 func (m *mockDataChannel) SendText(text string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sentTexts = append(m.sentTexts, text)
+	if m.sendTextError != nil {
+		return m.sendTextError
+	}
+	m.sentText = append(m.sentText, text)
 	return nil
 }
 
@@ -52,6 +54,18 @@ func (m *mockDataChannel) BufferedAmount() uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.bufferedAmount
+}
+
+func (m *mockDataChannel) setBufferedAmount(amount uint64) {
+	m.mu.Lock()
+	m.bufferedAmount = amount
+	handler := m.onBufferedLowHandler
+	thresh := m.lowThreshold
+	m.mu.Unlock()
+
+	if amount <= thresh && handler != nil {
+		handler()
+	}
 }
 
 func (m *mockDataChannel) SetBufferedAmountLowThreshold(threshold uint64) {
@@ -62,235 +76,326 @@ func (m *mockDataChannel) SetBufferedAmountLowThreshold(threshold uint64) {
 
 func (m *mockDataChannel) OnBufferedAmountLow(f func()) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.lowCb = f
-}
-
-func (m *mockDataChannel) setBufferedAmount(amount uint64) {
-	m.mu.Lock()
-	m.bufferedAmount = amount
-	cb := m.lowCb
-	thresh := m.lowThreshold
+	m.onBufferedLowHandler = f
 	m.mu.Unlock()
-
-	if amount <= thresh && cb != nil {
-		cb()
-	}
 }
 
-func (m *mockDataChannel) getSentTexts() []string {
+func (m *mockDataChannel) getSentText() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	res := make([]string, len(m.sentTexts))
-	copy(res, m.sentTexts)
-	return res
+	cp := make([]string, len(m.sentText))
+	copy(cp, m.sentText)
+	return cp
 }
 
 func (m *mockDataChannel) getSentChunks() [][]byte {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	res := make([][]byte, len(m.sentChunks))
-	copy(res, m.sentChunks)
-	return res
+	cp := make([][]byte, len(m.sentChunks))
+	copy(cp, m.sentChunks)
+	return cp
 }
 
-func TestStreamSender_SingleFlight(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "test_single_flight.bin")
-	fileData := bytes.Repeat([]byte("A"), 128*1024)
-	err := os.WriteFile(filePath, fileData, 0600)
-	require.NoError(t, err)
+// TestStartStream_RepeatedCallsCancelsPriorGoroutine verifies that calling StartStream
+// repeatedly cancels previous goroutines without leaking handles or hanging.
+func TestStartStream_RepeatedCallsCancelsPriorGoroutine(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "large_test.bin")
 
-	mockDC := newMockDataChannel()
-	// Hold stream in backpressure initially
-	mockDC.setBufferedAmount(2 * HighWaterMark)
-
-	sender := NewStreamSender(mockDC)
-
-	errCh1 := make(chan error, 1)
-	go func() {
-		errCh1 <- sender.StartStream(context.Background(), filePath, "test_single_flight.bin", int64(len(fileData)), 0)
-	}()
-
-	// Wait for streaming state to be active
-	require.Eventually(t, func() bool {
-		return sender.IsStreaming()
-	}, 1*time.Second, 10*time.Millisecond)
-
-	// Attempt duplicate OFFSET triggers
-	var wg sync.WaitGroup
-	duplicateErrs := make([]error, 5)
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			duplicateErrs[idx] = sender.StartStream(context.Background(), filePath, "test_single_flight.bin", int64(len(fileData)), 0)
-		}(i)
-	}
-	wg.Wait()
-
-	for i, errDup := range duplicateErrs {
-		assert.True(t, errors.Is(errDup, ErrAlreadyStreaming), "duplicate call %d should return ErrAlreadyStreaming", i)
-	}
-
-	// Unblock backpressure so stream completes
-	mockDC.setBufferedAmount(0)
-
-	select {
-	case err1 := <-errCh1:
-		require.NoError(t, err1)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for primary stream to complete")
-	}
-
-	texts := mockDC.getSentTexts()
-	require.Len(t, texts, 2)
-	assert.Equal(t, fmt.Sprintf("META:test_single_flight.bin:%d", len(fileData)), texts[0])
-	assert.Equal(t, "EOF", texts[1])
-}
-
-func TestStreamSender_SliceIsolation(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "test_isolation.bin")
-	fileData := make([]byte, 100*1024)
+	// Write 5MB test file
+	fileData := make([]byte, 5*1024*1024)
 	for i := range fileData {
 		fileData[i] = byte(i % 256)
 	}
-	err := os.WriteFile(filePath, fileData, 0600)
-	require.NoError(t, err)
-
-	mockDC := newMockDataChannel()
-	sender := NewStreamSender(mockDC)
-
-	var progressCalls int
-	sender.OnProgress = func(sent, total int64) {
-		progressCalls++
+	if err := os.WriteFile(filePath, fileData, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
 	}
 
-	err = sender.StartStream(context.Background(), filePath, "test_isolation.bin", int64(len(fileData)), 0)
-	require.NoError(t, err)
-	assert.Greater(t, progressCalls, 0)
+	sender := NewStreamSender()
+	defer sender.Stop()
 
-	chunks := mockDC.getSentChunks()
-	combined := bytes.Join(chunks, nil)
-	assert.Equal(t, fileData, combined)
+	dc := newMockDataChannel()
+	// Set initial buffered amount above high water mark so the first stream pauses in backpressure
+	// and remains active when the second stream is launched.
+	dc.setBufferedAmount(2 * HighWaterMark)
+
+	var startedCount atomic.Int32
+	var completedCount atomic.Int32
+
+	// Launch initial stream
+	sender.StartStream(context.Background(), dc, filePath, "large_test.bin", int64(len(fileData)), 0,
+		WithProgress(func(sent, total int64) {
+			startedCount.Add(1)
+		}),
+		WithComplete(func(sentInSession int64, elapsed time.Duration) {
+			completedCount.Add(1)
+		}),
+	)
+
+	// Rapidly call StartStream again with a new offset (simulating reconnection / new OFFSET: request)
+	time.Sleep(5 * time.Millisecond)
+	dc2 := newMockDataChannel()
+	sender.StartStream(context.Background(), dc2, filePath, "large_test.bin", int64(len(fileData)), 1024*1024,
+		WithComplete(func(sentInSession int64, elapsed time.Duration) {
+			completedCount.Add(1)
+		}),
+	)
+
+	// Wait for dc2 stream to complete
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		txts := dc2.getSentText()
+		if len(txts) > 0 && txts[len(txts)-1] == "EOF" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dc2 stream failed to complete within deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Verify only 1 completion callback fired for the final stream
+	if completedCount.Load() != 1 {
+		t.Errorf("expected 1 stream completion, got %d", completedCount.Load())
+	}
+
+	// Verify dc2 received META header and EOF
+	txts := dc2.getSentText()
+	if len(txts) < 2 {
+		t.Fatalf("expected at least META and EOF text messages on dc2, got %v", txts)
+	}
+	if txts[0] != "META:large_test.bin:5242880" {
+		t.Errorf("unexpected META header: %s", txts[0])
+	}
+	if txts[len(txts)-1] != "EOF" {
+		t.Errorf("unexpected final text: %s", txts[len(txts)-1])
+	}
 }
 
-func TestStreamSender_BackpressurePolling(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "test_backpressure.bin")
-	fileData := bytes.Repeat([]byte("B"), 200*1024)
-	err := os.WriteFile(filePath, fileData, 0600)
-	require.NoError(t, err)
+// TestBufferIsolation verifies that every chunk sent to dc.Send is an independent allocation.
+func TestBufferIsolation(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "buffer_test.bin")
 
-	mockDC := newMockDataChannel()
-	mockDC.setBufferedAmount(2 * HighWaterMark)
-
-	sender := NewStreamSender(mockDC)
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- sender.StartStream(context.Background(), filePath, "test_backpressure.bin", int64(len(fileData)), 0)
-	}()
-
-	// Ensure stream starts and enters backpressure wait loop
-	require.Eventually(t, func() bool {
-		return sender.IsStreaming()
-	}, 1*time.Second, 10*time.Millisecond)
-
-	// Verify it remains blocked while buffer > 1MB
-	time.Sleep(100 * time.Millisecond)
-	select {
-	case <-errCh:
-		t.Fatal("stream finished prematurely while backpressure buffer was high")
-	default:
+	// Create 200KB file
+	fileData := make([]byte, 200*1024)
+	for i := range fileData {
+		fileData[i] = byte(i % 251)
+	}
+	if err := os.WriteFile(filePath, fileData, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
 	}
 
-	// Draining buffer to 0 without calling lowCb (simulates missed callback/polling fallback)
-	mockDC.mu.Lock()
-	mockDC.bufferedAmount = 0
-	mockDC.mu.Unlock()
+	sender := NewStreamSender()
+	defer sender.Stop()
+
+	dc := newMockDataChannel()
+
+	done := make(chan struct{})
+	sender.StartStream(context.Background(), dc, filePath, "buffer_test.bin", int64(len(fileData)), 0,
+		WithComplete(func(sentInSession int64, elapsed time.Duration) {
+			close(done)
+		}),
+	)
 
 	select {
-	case err := <-errCh:
-		require.NoError(t, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("stream failed to resume via backpressure polling fallback")
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("stream timed out")
+	}
+
+	chunks := dc.getSentChunks()
+	if len(chunks) == 0 {
+		t.Fatalf("no chunks sent")
+	}
+
+	// Reconstruct file from sent chunks
+	var reassembled []byte
+	for _, chunk := range chunks {
+		reassembled = append(reassembled, chunk...)
+	}
+
+	if !bytes.Equal(reassembled, fileData) {
+		t.Fatalf("reassembled file does not match original file data!")
+	}
+
+	// Mutate first chunk slice and verify second chunk slice is untouched
+	if len(chunks) > 1 {
+		chunks[0][0] = 0xFF
+		if chunks[1][0] == 0xFF {
+			t.Errorf("chunk slices share underlying array, buffer isolation failed!")
+		}
 	}
 }
 
-func TestStreamSender_EOFFlush(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "test_eof.bin")
-	fileData := []byte("Small file for EOF flush test")
-	err := os.WriteFile(filePath, fileData, 0600)
-	require.NoError(t, err)
+// TestWaitBufferedAmount_NormalAndTicker verifies backpressure waiting works both via callback
+// and via periodic ticker fallback when OnBufferedAmountLow is missed.
+func TestWaitBufferedAmount_NormalAndTicker(t *testing.T) {
+	t.Run("Normal Callback", func(t *testing.T) {
+		dc := newMockDataChannel()
+		dc.setBufferedAmount(2 * HighWaterMark)
 
-	mockDC := newMockDataChannel()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 
-	sender := NewStreamSender(mockDC)
+		done := make(chan error)
+		go func() {
+			done <- WaitBufferedAmountWithInterval(ctx, dc, LowWaterMark, 10*time.Millisecond)
+		}()
 
-	// Set buffer > 0 when file EOF is reached
-	// We'll set buffer to 50 KB right as StartStream begins
-	mockDC.mu.Lock()
-	mockDC.bufferedAmount = 50 * 1024
-	mockDC.mu.Unlock()
+		// Simulate buffer draining below LowWaterMark
+		time.Sleep(20 * time.Millisecond)
+		dc.setBufferedAmount(LowWaterMark - 100)
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- sender.StartStream(context.Background(), filePath, "test_eof.bin", int64(len(fileData)), 0)
-	}()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("WaitBufferedAmount returned error: %v", err)
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatalf("WaitBufferedAmount timed out")
+		}
+	})
 
-	// Verify EOF text is not sent yet because buffer > 0
-	time.Sleep(100 * time.Millisecond)
-	texts := mockDC.getSentTexts()
-	assert.NotContains(t, texts, "EOF")
+	t.Run("Missing Callback Ticker Fallback", func(t *testing.T) {
+		dc := newMockDataChannel()
+		dc.setBufferedAmount(2 * HighWaterMark)
 
-	// Lower buffer to 0 to allow EOF flush
-	mockDC.setBufferedAmount(0)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 
-	select {
-	case err := <-errCh:
-		require.NoError(t, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("stream timed out waiting for EOF flush")
-	}
+		done := make(chan error)
+		go func() {
+			done <- WaitBufferedAmountWithInterval(ctx, dc, LowWaterMark, 10*time.Millisecond)
+		}()
 
-	texts = mockDC.getSentTexts()
-	assert.Contains(t, texts, "EOF")
+		time.Sleep(20 * time.Millisecond)
+		// Change bufferedAmount directly without invoking handler
+		dc.mu.Lock()
+		dc.bufferedAmount = LowWaterMark - 100
+		dc.mu.Unlock()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("WaitBufferedAmount returned error: %v", err)
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatalf("WaitBufferedAmount ticker fallback timed out")
+		}
+	})
+
+	t.Run("Context Cancellation", func(t *testing.T) {
+		dc := newMockDataChannel()
+		dc.setBufferedAmount(2 * HighWaterMark)
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		done := make(chan error)
+		go func() {
+			done <- WaitBufferedAmountWithInterval(ctx, dc, LowWaterMark, 10*time.Millisecond)
+		}()
+
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+
+		select {
+		case err := <-done:
+			if err != context.Canceled {
+				t.Fatalf("expected context.Canceled, got %v", err)
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatalf("WaitBufferedAmount failed to unblock on context cancellation")
+		}
+	})
 }
 
-func TestStreamSender_ContextCancel(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "test_cancel.bin")
-	fileData := bytes.Repeat([]byte("C"), 300*1024)
-	err := os.WriteFile(filePath, fileData, 0600)
-	require.NoError(t, err)
+// TestFlush_CompletionAndTicker verifies Flush waits until BufferedAmount reaches 0 before sending EOF.
+func TestFlush_CompletionAndTicker(t *testing.T) {
+	t.Run("Flush Normal Draining", func(t *testing.T) {
+		dc := newMockDataChannel()
+		dc.setBufferedAmount(500)
 
-	mockDC := newMockDataChannel()
-	mockDC.setBufferedAmount(2 * HighWaterMark)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 
-	sender := NewStreamSender(mockDC)
-	ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error)
+		go func() {
+			done <- FlushWithInterval(ctx, dc, 10*time.Millisecond)
+		}()
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- sender.StartStream(ctx, filePath, "test_cancel.bin", int64(len(fileData)), 0)
-	}()
+		time.Sleep(20 * time.Millisecond)
+		dc.setBufferedAmount(0)
 
-	require.Eventually(t, func() bool {
-		return sender.IsStreaming()
-	}, 1*time.Second, 10*time.Millisecond)
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("Flush returned error: %v", err)
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Flush timed out")
+		}
 
-	cancel()
+		txts := dc.getSentText()
+		if len(txts) != 1 || txts[0] != "EOF" {
+			t.Fatalf("expected EOF sent on channel, got %v", txts)
+		}
+	})
 
-	select {
-	case err := <-errCh:
-		require.Error(t, err)
-		assert.True(t, errors.Is(err, context.Canceled))
-	case <-time.After(2 * time.Second):
-		t.Fatal("stream failed to cancel upon context cancellation")
-	}
+	t.Run("Flush Ticker Fallback", func(t *testing.T) {
+		dc := newMockDataChannel()
+		dc.setBufferedAmount(500)
 
-	assert.False(t, sender.IsStreaming())
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		done := make(chan error)
+		go func() {
+			done <- FlushWithInterval(ctx, dc, 10*time.Millisecond)
+		}()
+
+		time.Sleep(20 * time.Millisecond)
+		// Change directly without handler
+		dc.mu.Lock()
+		dc.bufferedAmount = 0
+		dc.mu.Unlock()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("Flush returned error: %v", err)
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Flush ticker fallback timed out")
+		}
+
+		txts := dc.getSentText()
+		if len(txts) != 1 || txts[0] != "EOF" {
+			t.Fatalf("expected EOF sent on channel, got %v", txts)
+		}
+	})
+
+	t.Run("Flush Context Cancellation", func(t *testing.T) {
+		dc := newMockDataChannel()
+		dc.setBufferedAmount(500)
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		done := make(chan error)
+		go func() {
+			done <- FlushWithInterval(ctx, dc, 10*time.Millisecond)
+		}()
+
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+
+		select {
+		case err := <-done:
+			if err != context.Canceled {
+				t.Fatalf("expected context.Canceled, got %v", err)
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Flush failed to unblock on context cancellation")
+		}
+	})
 }

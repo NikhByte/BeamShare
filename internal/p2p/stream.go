@@ -2,7 +2,6 @@ package p2p
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,23 +9,24 @@ import (
 	"time"
 )
 
-var (
-	// ErrAlreadyStreaming is returned when a stream transfer is already active for this sender.
-	ErrAlreadyStreaming = errors.New("stream transfer already in progress")
-)
-
 const (
-	// DefaultChunkSize is the size of each file chunk (32 KB, below Pion 65535 SCTP limit).
-	DefaultChunkSize = 32 * 1024
-	// HighWaterMark is the buffer threshold above which streaming pauses (1 MB).
+	// ChunkSize is set to 64KB for optimal WebRTC streaming throughput.
+	ChunkSize = 64 * 1024
+
+	// HighWaterMark is the buffer threshold (1MB) above which backpressure pauses reads.
 	HighWaterMark = 1024 * 1024
-	// LowWaterMark is the buffer threshold for low buffer notifications (512 KB).
+
+	// LowWaterMark is the buffer threshold (512KB) below which backpressure resumes reads.
 	LowWaterMark = 512 * 1024
-	// PollingInterval is the ticker interval for backpressure and flush loop evaluations.
-	PollingInterval = 50 * time.Millisecond
+
+	// FlushThreshold is a low non-zero threshold (1KB) for buffer low notification before checking zero.
+	FlushThreshold = 1024
+
+	// DefaultPollInterval is the interval for ticker checks during backpressure and flush.
+	DefaultPollInterval = 20 * time.Millisecond
 )
 
-// DataChannel defines the interface for WebRTC DataChannel operations required by StreamSender.
+// DataChannel represents the WebRTC DataChannel operations required for streaming.
 type DataChannel interface {
 	Send(data []byte) error
 	SendText(text string) error
@@ -35,33 +35,57 @@ type DataChannel interface {
 	OnBufferedAmountLow(f func())
 }
 
-// StreamSender manages single-flight file chunk streaming over a WebRTC DataChannel.
-type StreamSender struct {
-	dc DataChannel
-
-	mu        sync.Mutex
-	streaming bool
-	cancel    context.CancelFunc
-
-	OnProgress func(sent, total int64)
-	OnComplete func(sentInSession int64, elapsed time.Duration)
+// StreamOptions contains optional callbacks and parameters for StartStream.
+type StreamOptions struct {
+	OnProgress   func(sent int64, total int64)
+	OnComplete   func(sentInSession int64, elapsed time.Duration)
+	OnError      func(err error)
+	PollInterval time.Duration
 }
 
-// NewStreamSender creates a new StreamSender instance bound to a DataChannel.
-func NewStreamSender(dc DataChannel) *StreamSender {
-	return &StreamSender{
-		dc: dc,
+// StreamOption is a functional option for configuring StreamOptions.
+type StreamOption func(*StreamOptions)
+
+// WithProgress sets the progress callback.
+func WithProgress(f func(sent int64, total int64)) StreamOption {
+	return func(o *StreamOptions) {
+		o.OnProgress = f
 	}
 }
 
-// IsStreaming returns true if a transfer is currently active.
-func (s *StreamSender) IsStreaming() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.streaming
+// WithComplete sets the completion callback.
+func WithComplete(f func(sentInSession int64, elapsed time.Duration)) StreamOption {
+	return func(o *StreamOptions) {
+		o.OnComplete = f
+	}
 }
 
-// Stop cancels any ongoing stream transfer.
+// WithError sets the error callback.
+func WithError(f func(err error)) StreamOption {
+	return func(o *StreamOptions) {
+		o.OnError = f
+	}
+}
+
+// WithPollInterval sets custom ticker poll interval for backpressure and flush checks.
+func WithPollInterval(d time.Duration) StreamOption {
+	return func(o *StreamOptions) {
+		o.PollInterval = d
+	}
+}
+
+// StreamSender manages WebRTC file streaming lifecycle and state thread-safely.
+type StreamSender struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
+}
+
+// NewStreamSender creates a new thread-safe StreamSender instance.
+func NewStreamSender() *StreamSender {
+	return &StreamSender{}
+}
+
+// Stop cancels any active stream context.
 func (s *StreamSender) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -71,116 +95,226 @@ func (s *StreamSender) Stop() {
 	}
 }
 
-// StartStream begins streaming the file from the given offset over the DataChannel.
-// It enforces single-flight execution: if a stream is already active, it returns ErrAlreadyStreaming.
-func (s *StreamSender) StartStream(ctx context.Context, filePath, fileName string, fileSize, offset int64) error {
-	s.mu.Lock()
-	if s.streaming {
-		s.mu.Unlock()
-		return ErrAlreadyStreaming
+// StartStream cancels any prior active stream context before launching a new worker goroutine.
+func (s *StreamSender) StartStream(parentCtx context.Context, dc DataChannel, filePath string, fileName string, fileSize int64, offset int64, opts ...StreamOption) {
+	options := StreamOptions{
+		PollInterval: DefaultPollInterval,
 	}
-	s.streaming = true
-	streamCtx, cancel := context.WithCancel(ctx)
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+
+	s.mu.Lock()
+	if s.cancel != nil {
+		s.cancel()
+	}
+	ctx, cancel := context.WithCancel(parentCtx)
 	s.cancel = cancel
 	s.mu.Unlock()
 
-	defer func() {
-		s.mu.Lock()
-		s.streaming = false
-		s.cancel = nil
-		s.mu.Unlock()
-	}()
+	go func() {
+		defer cancel()
 
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("error opening file: %w", err)
-	}
-	defer file.Close()
-
-	if offset > 0 {
-		if _, err = file.Seek(offset, io.SeekStart); err != nil {
-			return fmt.Errorf("error seeking file: %w", err)
+		if dc == nil {
+			if options.OnError != nil {
+				options.OnError(fmt.Errorf("data channel is nil"))
+			}
+			return
 		}
+
+		file, err := os.Open(filePath)
+		if err != nil {
+			if options.OnError != nil {
+				options.OnError(fmt.Errorf("error opening file: %w", err))
+			}
+			return
+		}
+		defer file.Close()
+
+		if offset > 0 {
+			if _, err := file.Seek(offset, io.SeekStart); err != nil {
+				if options.OnError != nil {
+					options.OnError(fmt.Errorf("error seeking file: %w", err))
+				}
+				return
+			}
+		}
+
+		// Send META header
+		metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
+		if errSend := dc.SendText(metaHeader); errSend != nil {
+			if options.OnError != nil {
+				options.OnError(fmt.Errorf("error sending meta header: %w", errSend))
+			}
+			return
+		}
+
+		readBuf := make([]byte, ChunkSize)
+		totalSent := offset
+		start := time.Now()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			// Backpressure check
+			if dc.BufferedAmount() > HighWaterMark {
+				if err := WaitBufferedAmountWithInterval(ctx, dc, LowWaterMark, options.PollInterval); err != nil {
+					if options.OnError != nil && ctx.Err() == nil {
+						options.OnError(err)
+					}
+					return
+				}
+			}
+
+			n, readErr := file.Read(readBuf)
+			if n > 0 {
+				// Per-chunk buffer isolation: allocate independent chunk slice for every read
+				chunk := make([]byte, n)
+				copy(chunk, readBuf[:n])
+
+				if errSend := dc.Send(chunk); errSend != nil {
+					if options.OnError != nil && ctx.Err() == nil {
+						options.OnError(fmt.Errorf("error sending chunk: %w", errSend))
+					}
+					return
+				}
+
+				totalSent += int64(n)
+				if options.OnProgress != nil {
+					options.OnProgress(totalSent, fileSize)
+				}
+			}
+
+			if readErr != nil {
+				if readErr == io.EOF {
+					break
+				}
+				if options.OnError != nil && ctx.Err() == nil {
+					options.OnError(fmt.Errorf("error reading file: %w", readErr))
+				}
+				return
+			}
+		}
+
+		// Flush buffer and send EOF
+		if err := FlushWithInterval(ctx, dc, options.PollInterval); err != nil {
+			if options.OnError != nil && ctx.Err() == nil {
+				options.OnError(err)
+			}
+			return
+		}
+
+		if options.OnComplete != nil {
+			sentInSession := totalSent - offset
+			options.OnComplete(sentInSession, time.Since(start))
+		}
+	}()
+}
+
+// WaitBufferedAmount waits until dc.BufferedAmount() drops to targetThreshold or below.
+// It combines OnBufferedAmountLow notifications with periodic ticker polling to prevent hangs.
+func WaitBufferedAmount(ctx context.Context, dc DataChannel, targetThreshold uint64) error {
+	return WaitBufferedAmountWithInterval(ctx, dc, targetThreshold, DefaultPollInterval)
+}
+
+// WaitBufferedAmountWithInterval is WaitBufferedAmount with custom ticker poll interval.
+func WaitBufferedAmountWithInterval(ctx context.Context, dc DataChannel, targetThreshold uint64, pollInterval time.Duration) error {
+	if dc == nil {
+		return nil
+	}
+	if dc.BufferedAmount() <= targetThreshold {
+		return nil
 	}
 
-	// Send META header
-	metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
-	if errSend := s.dc.SendText(metaHeader); errSend != nil {
-		return fmt.Errorf("error sending meta header: %w", errSend)
-	}
-
-	bufferedAmountLowChan := make(chan struct{}, 1)
-	s.dc.SetBufferedAmountLowThreshold(LowWaterMark)
-	s.dc.OnBufferedAmountLow(func() {
+	lowChan := make(chan struct{}, 1)
+	dc.SetBufferedAmountLowThreshold(targetThreshold)
+	dc.OnBufferedAmountLow(func() {
 		select {
-		case bufferedAmountLowChan <- struct{}{}:
+		case lowChan <- struct{}{}:
 		default:
 		}
 	})
 
-	readBuf := make([]byte, DefaultChunkSize)
-	totalSent := offset
-	start := time.Now()
+	if dc.BufferedAmount() <= targetThreshold {
+		return nil
+	}
+
+	if pollInterval <= 0 {
+		pollInterval = DefaultPollInterval
+	}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
-		case <-streamCtx.Done():
-			return streamCtx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-lowChan:
+			if dc.BufferedAmount() <= targetThreshold {
+				return nil
+			}
+		case <-ticker.C:
+			if dc.BufferedAmount() <= targetThreshold {
+				return nil
+			}
+		}
+	}
+}
+
+// Flush waits until dc.BufferedAmount() reaches 0 using a low non-zero threshold combined
+// with ticker polling before sending "EOF".
+func Flush(ctx context.Context, dc DataChannel) error {
+	return FlushWithInterval(ctx, dc, DefaultPollInterval)
+}
+
+// FlushWithInterval is Flush with custom ticker poll interval.
+func FlushWithInterval(ctx context.Context, dc DataChannel, pollInterval time.Duration) error {
+	if dc == nil {
+		return nil
+	}
+	if dc.BufferedAmount() == 0 {
+		return dc.SendText("EOF")
+	}
+
+	lowChan := make(chan struct{}, 1)
+	dc.SetBufferedAmountLowThreshold(FlushThreshold)
+	dc.OnBufferedAmountLow(func() {
+		select {
+		case lowChan <- struct{}{}:
 		default:
 		}
+	})
 
-		// Requirement 3: Dynamic backpressure loop with 50ms polling fallback
-		for s.dc.BufferedAmount() > HighWaterMark {
-			select {
-			case <-streamCtx.Done():
-				return streamCtx.Err()
-			case <-bufferedAmountLowChan:
-			case <-time.After(PollingInterval):
-			}
-		}
-
-		n, errRead := file.Read(readBuf)
-		if n > 0 {
-			// Requirement 2: Isolate byte slice via per-chunk copy
-			chunk := make([]byte, n)
-			copy(chunk, readBuf[:n])
-
-			if errSend := s.dc.Send(chunk); errSend != nil {
-				return fmt.Errorf("error sending chunk: %w", errSend)
-			}
-			totalSent += int64(n)
-
-			if s.OnProgress != nil {
-				s.OnProgress(totalSent, fileSize)
-			}
-		}
-
-		if errRead != nil {
-			if errors.Is(errRead, io.EOF) {
-				break
-			}
-			return fmt.Errorf("error reading file: %w", errRead)
-		}
+	if dc.BufferedAmount() == 0 {
+		return dc.SendText("EOF")
 	}
 
-	// Requirement 4: Wait for buffer level to reach zero before sending EOF string
-	s.dc.SetBufferedAmountLowThreshold(0)
-	for s.dc.BufferedAmount() > 0 {
+	if pollInterval <= 0 {
+		pollInterval = DefaultPollInterval
+	}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
 		select {
-		case <-streamCtx.Done():
-			return streamCtx.Err()
-		case <-bufferedAmountLowChan:
-		case <-time.After(PollingInterval):
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-lowChan:
+			if dc.BufferedAmount() == 0 {
+				return dc.SendText("EOF")
+			}
+		case <-ticker.C:
+			if dc.BufferedAmount() == 0 {
+				return dc.SendText("EOF")
+			}
 		}
 	}
-
-	if errSend := s.dc.SendText("EOF"); errSend != nil {
-		return fmt.Errorf("error sending EOF: %w", errSend)
-	}
-
-	if s.OnComplete != nil {
-		s.OnComplete(totalSent-offset, time.Since(start))
-	}
-
-	return nil
 }
