@@ -4199,7 +4199,7 @@ function generateQRCodeSVG(text) {
   }
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalSize} ${totalSize}" width="100%" height="100%"><rect width="${totalSize}" height="${totalSize}" fill="#ffffff"/><path d="${pathD}" fill="#000000"/></svg>`;
-  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  return svg;
 }
 
 // ── Format helpers ────────────────────────────────────────────────────────────
@@ -4236,6 +4236,15 @@ function mimeIcon(mime) {
   return `<svg width="32" height="32" viewBox="0 0 24 24" ${a} aria-hidden="true"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
 }
 
+
+function generateQRCodeDataURL(text) {
+  const svg = generateQRCodeSVG(text);
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+
+function generateClientQRCodeDataURL(text) {
+  return generateQRCodeDataURL(text);
+}
 
 // ── Web Sender States & Functions ──
 let senderFile = null;
@@ -4707,26 +4716,7 @@ if (typeof window !== 'undefined') {
   });
 }
 
-// ── Client-side QR Code Generator ─────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
-(function initGF256() {
-  let x = 1;
-  for (let i = 0; i < 255; i++) {
-    GF256_EXP[i] = x;
-    GF256_LOG[x] = i;
-    x <<= 1;
-    if (x & 0x100) x ^= 0x11d;
-  }
-  for (let i = 255; i < 512; i++) {
-    GF256_EXP[i] = GF256_EXP[i - 255];
-  }
-})();
 
-function gfMul(x, y) {
-  if (x === 0 || y === 0) return 0;
-  return GF256_EXP[GF256_LOG[x] + GF256_LOG[y]];
-}
 
 function renderQRCode(arg1, arg2, options = {}) {
   let element, text;
@@ -4745,10 +4735,10 @@ function renderQRCode(arg1, arg2, options = {}) {
   }
   return renderQRCodeEngine(element, text, options);
 }
-}
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     uploadFileP2P,
