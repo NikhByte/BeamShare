@@ -171,7 +171,6 @@ func TestDownloadFile_PathTraversalSanitization(t *testing.T) {
 		})
 	}
 }
-
 func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing.T) {
 	tmpFile, err := os.CreateTemp("", "beam_test_*.bin")
 	if err != nil {
@@ -430,5 +429,33 @@ func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing
 	expectedLen := len(data) - 1024
 	if receivedBytesAfterMeta != expectedLen {
 		t.Fatalf("expected received bytes after meta %d, got %d", expectedLen, receivedBytesAfterMeta)
+	}
+}
+
+func TestDownloadFile_InvalidKey(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(server.FileMeta{Name: "badkey.txt", Size: 10})
+	})
+	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("1234567890"))
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	defer os.Remove("received_badkey.txt")
+
+	// 1. Test invalid base64 encoding
+	urlBadB64 := "http://example.com/?backend=" + ts.URL + "#k=!!!invalid-base64!!!"
+	err := downloadFile(urlBadB64)
+	if err == nil {
+		t.Fatalf("expected error for invalid base64 key, got nil")
+	}
+
+	// 2. Test non-32-byte key length (16 bytes = 22 chars in base64: MTIzNDU2Nzg5MDEyMzQ1Ng==)
+	urlShortKey := "http://example.com/?backend=" + ts.URL + "#k=MTIzNDU2Nzg5MDEyMzQ1Ng=="
+	err = downloadFile(urlShortKey)
+	if err == nil {
+		t.Fatalf("expected error for 16-byte key, got nil")
 	}
 }
