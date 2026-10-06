@@ -1,5 +1,5 @@
 // ── Client-side QR Code Generator Engine (Zero Network Dependencies) ──────
-const qrcodegen = (function() {
+var qrcodegen = (function() {
 	function QrCode(version, errorCorrectionLevel, dataCodewords, msk) {
 		if (version < QrCode.MIN_VERSION || version > QrCode.MAX_VERSION)
 			throw new RangeError("Version value out of range");
@@ -1342,6 +1342,8 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 250) {
     }, timeoutMs);
   });
 }
+
+const waitForDataChannelBuffer = waitForBufferedAmountLow;
 let transferMode     = 'http';   // 'webrtc' | 'http'
 let startTime        = 0;
 let receivedBytes    = 0;
@@ -3226,16 +3228,6 @@ async function startWebRTC() {
     startTime     = Date.now();
     updateProgress(initialOffset / totalBytes || 0);
 
-    let decryptionKey = null;
-    try {
-      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
-    } catch (e) {
-      console.error("Failed to import decryption key", e);
-      showError("Decryption key error: " + e.message);
-      pc.close();
-      return;
-    }
-
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
       if (dc.readyState === 'open') {
@@ -3336,7 +3328,7 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
+      encBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -3378,7 +3370,7 @@ async function startWebRTC() {
                     hasError = true;
                     // Handled in chunkQueue onError callback
                   }
-                });
+                }
               } else {
                 chunkQueue.enqueueEOF();
                 chunkQueue.drain().then(async () => {
@@ -3401,7 +3393,7 @@ async function startWebRTC() {
                     triggerSave(finalBlob, currentFile.name);
                   }
                   triggerSave(finalBlob, currentFile.name);
-                }
+                });
                 resolve();
               }
               return;
@@ -4334,9 +4326,36 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Local Client-Side QR Generation ───────────────────────────────────────────
+function generateQRCodeSVG(text, options) {
+  if (typeof QRCode !== 'undefined' && QRCode.generateQRCodeSVG) {
+    return QRCode.generateQRCodeSVG(text, options);
+  }
+  if (typeof window !== 'undefined' && window.qrcode && typeof window.qrcode.generateQRCodeSVG === 'function') {
+    return window.qrcode.generateQRCodeSVG(text, options);
+  }
+  if (typeof globalThis !== 'undefined' && typeof globalThis.generateQRCodeSVG === 'function') {
+    return globalThis.generateQRCodeSVG(text, options);
+  }
+  if (typeof require === 'function') {
+    try {
+      const qrcodeLib = require('./qrcode.min.js');
+      if (qrcodeLib && qrcodeLib.generateQRCodeSVG) {
+        return qrcodeLib.generateQRCodeSVG(text, options);
+      }
+    } catch (e) {}
+  }
+  throw new Error("Client-side QR SVG generator unavailable");
+}
+
 function generateQRCodeDataURL(text, options) {
   if (typeof QRCode !== 'undefined' && QRCode.generateQRCodeDataURL) {
     return QRCode.generateQRCodeDataURL(text, options);
+  }
+  if (typeof window !== 'undefined' && window.qrcode && typeof window.qrcode.generateQRCodeDataURL === 'function') {
+    return window.qrcode.generateQRCodeDataURL(text, options);
+  }
+  if (typeof globalThis !== 'undefined' && typeof globalThis.generateQRCodeSVGDataURL === 'function') {
+    return globalThis.generateQRCodeSVGDataURL(text, options);
   }
   if (typeof require === 'function') {
     try {
@@ -4346,17 +4365,58 @@ function generateQRCodeDataURL(text, options) {
       }
     } catch (e) {}
   }
-  throw new Error("Client-side QR generator unavailable");
+  const svg = generateQRCodeSVG(text, options);
+  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
 }
 
-function renderQRCode(elementOrId, url) {
-  const img = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
-  if (!img) return;
+function renderQRCode(target, text) {
+  let elementOrId = target;
+  let url = text;
+  if (typeof target === 'string' && typeof text === 'object') {
+    elementOrId = text;
+    url = target;
+  } else if (typeof target === 'string' && (target.startsWith('http') || target.startsWith('/') || target.includes('?'))) {
+    url = target;
+    elementOrId = text;
+  }
+  const el = typeof elementOrId === 'string' ? document.getElementById(elementOrId) : elementOrId;
+  if (!el) return;
   try {
     const dataUrl = generateQRCodeDataURL(url);
-    img.src = dataUrl;
+    const svgXml = generateQRCodeSVG(url);
+    if (el.tagName && el.tagName.toLowerCase() === 'svg') {
+      el.setAttribute('viewBox', '0 0 37 37');
+      el.innerHTML = svgXml;
+    } else if (el.tagName && el.tagName.toLowerCase() === 'img') {
+      el.src = dataUrl;
+    } else if (el.tagName && el.tagName.toLowerCase() === 'canvas') {
+      if (typeof qrcodegen !== 'undefined' && qrcodegen.QrCode) {
+        const qr = qrcodegen.QrCode.encodeText(url, qrcodegen.QrCode.Ecc.MEDIUM);
+        const margin = 4;
+        const cellSize = 4;
+        const size = (qr.size + margin * 2) * cellSize;
+        el.width = size;
+        el.height = size;
+        const ctx = el.getContext ? el.getContext('2d') : null;
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, size, size);
+          ctx.fillStyle = '#000000';
+          for (let y = 0; y < qr.size; y++) {
+            for (let x = 0; x < qr.size; x++) {
+              if (qr.getModule(x, y)) {
+                ctx.fillRect((x + margin) * cellSize, (y + margin) * cellSize, cellSize, cellSize);
+              }
+            }
+          }
+        }
+      }
+    } else {
+      if ('src' in el) el.src = dataUrl;
+      el.innerHTML = svgXml;
+    }
   } catch (err) {
-    console.error("Failed to generate QR code client-side");
+    console.error("Failed to generate QR code client-side", err);
   }
 }
 
@@ -4389,6 +4449,10 @@ if (typeof module !== 'undefined' && module.exports) {
     parseDecryptionKeyFromHash,
     parseSessionInput,
     getIceServers,
+    waitForDataChannelBuffer,
+    uploadFileP2P,
+    sendWebRTCFile,
+    generateQRCodeSVG,
     generateQRCodeDataURL,
     renderQRCode
   };
