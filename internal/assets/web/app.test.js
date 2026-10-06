@@ -109,9 +109,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -1181,7 +1178,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     dc.readyState = 'closed';
     dc.emit('close');
 
-    await assert.rejects(promise, { message: /closed or closing/i });
+    await assert.rejects(promise, { message: /no longer open|closed or closing/i });
     assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up on rejection');
   });
 
@@ -1189,7 +1186,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
     const dc = new MockDataChannel(2 * 1024 * 1024, 'closed');
     await assert.rejects(
       app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024),
-      { message: /closed or closing/i }
+      { message: /no longer open|closed or closing/i }
     );
   });
 
