@@ -750,8 +750,10 @@ describe('Gaze Web Sender Test Suite', () => {
   let window;
   let document;
   let app;
+  let fetchedURLs;
 
   beforeEach(() => {
+    fetchedURLs = [];
     dom = new JSDOM(htmlContent, {
       url: 'http://localhost:8080/'
     });
@@ -824,7 +826,7 @@ describe('Gaze Web Sender Test Suite', () => {
       });
     }
 
-    let fetchedURLs = [];
+    fetchedURLs = [];
     global.fetch = async (url) => {
       fetchedURLs.push(url.toString());
       if (url.includes('/poll')) {
