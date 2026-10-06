@@ -38,15 +38,21 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
   test.afterEach(async ({ page, context }) => {
     try {
       await page.unrouteAll({ behavior: 'ignoreErrors' });
+    } catch (e) {}
+    try {
       await context.clearCookies();
-      await page.evaluate(async () => {
-        if ('serviceWorker' in navigator) {
-          const regs = await navigator.serviceWorker.getRegistrations();
-          for (const reg of regs) {
-            await reg.unregister();
+    } catch (e) {}
+    try {
+      if (!page.isClosed()) {
+        await page.evaluate(async () => {
+          if ('serviceWorker' in navigator) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            for (const reg of regs) {
+              await reg.unregister();
+            }
           }
-        }
-      }).catch(() => {});
+        }).catch(() => {});
+      }
     } catch (e) {}
     stopAllProcesses();
   });
