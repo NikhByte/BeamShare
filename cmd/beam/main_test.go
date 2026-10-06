@@ -9,7 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/beamshare/beam/internal/server"
 )
@@ -41,6 +40,13 @@ func TestParseFlags(t *testing.T) {
 
 	if discoveryTimeout != 15*1000*1000*1000 { // 15 seconds
 		t.Fatalf("expected discovery timeout 15s, got %v", discoveryTimeout)
+	}
+
+	if !reflect.DeepEqual(parsedTurnServers, []string{"turn:1"}) {
+		t.Fatalf("expected parsedTurnServers ['turn:1'], got %v", parsedTurnServers)
+	}
+	if parsedTurnUsername != "user" || parsedTurnCredential != "pass" {
+		t.Fatalf("expected parsed turn auth user=user pass=pass, got user=%s pass=%s", parsedTurnUsername, parsedTurnCredential)
 	}
 }
 
@@ -116,44 +122,44 @@ func TestDownloadFile_Relay(t *testing.T) {
 	}
 }
 
-func TestAtomicSenderGuardAndFlowControl(t *testing.T) {
-	var streamActive atomic.Bool
+func TestDownloadFile_PathTraversalSanitization(t *testing.T) {
+	traversalCases := []struct {
+		rawMetaName      string
+		expectedFileName string
+	}{
+		{"../../etc/passwd", "received_passwd"},
+		{"..\\..\\evil.bat", "received_evil.bat"},
+		{"\x00../malicious.sh", "received_malicious.sh"},
+		{"....", "received_download.bin"},
+	}
 
-	// Test 1: Atomic CAS Guard against duplicate OFFSET signals
-	activeCount := atomic.Int32{}
-	var wg sync.WaitGroup
+	for _, tc := range traversalCases {
+		t.Run(tc.rawMetaName, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/meta", func(w http.ResponseWriter, r *http.Request) {
+				meta := server.FileMeta{
+					Name: tc.rawMetaName,
+					Size: 10,
+				}
+				json.NewEncoder(w).Encode(meta)
+			})
+			mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte("0123456789"))
+			})
 
-	// Simulate 10 concurrent duplicate OFFSET signals
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if streamActive.CompareAndSwap(false, true) {
-				defer streamActive.Store(false)
-				activeCount.Add(1)
-				time.Sleep(20 * time.Millisecond) // Simulate streaming duration
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
+
+			defer os.Remove(tc.expectedFileName)
+
+			err := downloadFile(ts.URL)
+			if err != nil {
+				t.Fatalf("downloadFile failed for %s: %v", tc.rawMetaName, err)
 			}
-		}()
-	}
 
-	wg.Wait()
-
-	if activeCount.Load() != 1 {
-		t.Fatalf("expected exactly 1 active stream worker to execute, got %d", activeCount.Load())
-	}
-
-	// Test 2: Isolated Memory Slice Allocation Verification
-	buffer := []byte("ORIGINAL_DATA")
-	n := len(buffer)
-	chunk := make([]byte, n)
-	copy(chunk, buffer[:n])
-
-	// Mutate the original read buffer
-	for i := range buffer {
-		buffer[i] = 'X'
-	}
-
-	if string(chunk) != "ORIGINAL_DATA" {
-		t.Fatalf("expected chunk data to remain isolated as ORIGINAL_DATA, got %s", string(chunk))
+			if _, err := os.Stat(tc.expectedFileName); os.IsNotExist(err) {
+				t.Fatalf("expected file %s to exist, but was not found", tc.expectedFileName)
+			}
+		})
 	}
 }
