@@ -156,9 +156,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -841,32 +838,24 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
+    // Verify QR code image is generated client-side without third-party external HTTP calls
     const qrImg = document.getElementById('send-qr-img');
-    assert.equal(qrImg.src.includes('/api/qr'), true);
-    assert.equal(qrImg.src.includes('url='), true);
+    assert.notEqual(qrImg, null);
+    assert.equal(qrImg.src.startsWith('data:image/'), true);
     assert.equal(qrImg.src.includes('api.qrserver.com'), false);
   });
 
-  test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
-    let externalCallMade = false;
-    const origFetch = global.fetch;
-    global.fetch = async (url, opts) => {
-      if (typeof url === 'string' && (url.includes('qrserver.com') || url.includes('/api/qr'))) {
-        externalCallMade = true;
-      }
-      return origFetch(url, opts);
-    };
+  test('generateClientQRCodeDataURL and renderClientQRCode generate local data URLs without network requests', () => {
+    const testURL = 'http://localhost:8080/?s=test-session-id&mode=webrtc#k=SecretKeyHashFragment123';
+    const dataURL = app.generateClientQRCodeDataURL(testURL);
 
-    await app.startSenderSharing();
+    assert.equal(typeof dataURL, 'string');
+    assert.equal(dataURL.startsWith('data:image/'), true);
+    assert.equal(dataURL.includes('api.qrserver.com'), false);
 
-    assert.equal(externalCallMade, false, 'No external QR API requests should be made');
-
-    const sendCanvas = document.getElementById('send-qr-canvas');
-    assert.notEqual(sendCanvas, null);
-
-    const urlInput = document.getElementById('send-url-input');
-    assert.ok(urlInput.value.includes('#k='));
+    const mockImg = document.createElement('img');
+    app.renderClientQRCode(testURL, mockImg);
+    assert.equal(mockImg.src, dataURL);
   });
 
   test('startSenderSharing renders QR code locally in memory without outbound network calls to api.qrserver.com or /api/qr', async () => {
