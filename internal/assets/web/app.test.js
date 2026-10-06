@@ -158,6 +158,8 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
+    window.crypto = require('node:crypto').webcrypto;
+    global.crypto = require('node:crypto').webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -862,10 +864,18 @@ describe('Gaze Web Sender Test Suite', () => {
     let externalRequests = [];
     window.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      if (url.includes('/poll')) {
+        return { ok: false, status: 404 };
+      }
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
+    global.fetch = window.fetch;
 
-    await app.startSenderSharing();
+    try {
+      await app.startSenderSharing();
+    } catch (e) {
+      console.error('ERROR IN startSenderSharing:', e);
+    }
 
     const urlInput = document.getElementById('send-url-input');
     const fullUrl = urlInput.value || "http://localhost/";

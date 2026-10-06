@@ -497,9 +497,13 @@ function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  const token = params.get('token');
   let fullPath = path;
-  if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+  if (s && !fullPath.includes('s=')) {
+    fullPath = fullPath.includes('?') ? fullPath + '&s=' + s : fullPath + '?s=' + s;
+  }
+  if (token && !fullPath.includes('token=')) {
+    fullPath = fullPath.includes('?') ? fullPath + '&token=' + token : fullPath + '?token=' + token;
   }
   if (backend) {
     return backend + fullPath;
@@ -2705,6 +2709,15 @@ async function parseDecryptionKeyFromHash(hash) {
 async function startHTTPDownload() {
   if (!currentFile) return;
 
+  let decryptionKey = null;
+  if (window.location.hash && window.location.hash.includes('#k=')) {
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch (err) {
+      console.warn("Failed to parse decryption key from URL hash:", err);
+    }
+  }
+
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {
     return;
@@ -4637,8 +4650,6 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Client-side QR Code Generator ─────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -5043,6 +5054,7 @@ if (typeof module !== 'undefined' && module.exports) {
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
+    init,
     setState,
     renderFileCard,
     updateProgress,
