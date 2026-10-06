@@ -501,8 +501,10 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 				}()
 			}
 
-			// Register /api/signal/* routes on the server's mux.
-			session.RegisterHandlers(srv.Mux())
+			// Register /api/signal/* routes on the server's mux wrapped with auth middleware.
+			signalMux := http.NewServeMux()
+			session.RegisterHandlers(signalMux)
+			srv.Mux().Handle("/api/signal/", srv.AuthMiddleware(signalMux))
 
 			session.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 				if state == webrtc.ICEConnectionStateFailed {
@@ -885,7 +887,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		fmt.Printf("    %s    (global relay)\n", relayDisplayURL)
 	} else if receiverURL != "" {
 		baseHost := strings.TrimRight(receiverURL, "/")
-		localDisplayURL := fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+		localDisplayURL := fmt.Sprintf("%s/?backend=%s&s=%s", baseHost, url.QueryEscape(localURL), srv.Token())
 		fmt.Printf("    %s    (custom receiver)\n", localDisplayURL)
 	}
 
@@ -918,7 +920,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	} else {
 		if receiverURL != "" {
 			baseHost := strings.TrimRight(receiverURL, "/")
-			qrURL = fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+			qrURL = fmt.Sprintf("%s/?backend=%s&s=%s", baseHost, url.QueryEscape(localURL), srv.Token())
 			if session != nil {
 				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
 				if len(parsedTurnServers) > 0 {
@@ -934,7 +936,11 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		} else {
 			qrURL = localURL
 			if session != nil {
-				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				if strings.Contains(qrURL, "?") {
+					qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				} else {
+					qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				}
 				if len(parsedTurnServers) > 0 {
 					qrURL += "&turn_server=" + url.QueryEscape(strings.Join(parsedTurnServers, ","))
 					if parsedTurnUsername != "" {
