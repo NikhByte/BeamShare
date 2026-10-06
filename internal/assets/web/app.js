@@ -472,6 +472,19 @@ function renderQRElements(url, canvasId, imgId) {
   if (imgEl) {
     renderQRCode(url, imgEl);
   }
+function getSessionToken() {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get('token') || window.GAZE_SESSION_TOKEN || '';
+  if (!token && window.location.search) {
+    const backend = params.get('backend') || params.get('b') || params.get('local');
+    if (backend && backend.includes('token=')) {
+      try {
+        const u = new URL(backend.startsWith('http') ? backend : 'http://dummy' + (backend.startsWith('/') ? '' : '/') + backend);
+        token = u.searchParams.get('token') || '';
+      } catch (e) {}
+    }
+  }
+  return token;
 }
 
 function getBackendURL() {
@@ -493,14 +506,27 @@ function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  const token = getSessionToken();
   let fullPath = path;
-  if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+  if (s && !fullPath.includes('s=')) {
+    fullPath = fullPath.includes('?') ? fullPath + '&s=' + s : fullPath + '?s=' + s;
+  }
+  if (token && !fullPath.includes('token=')) {
+    fullPath = fullPath.includes('?') ? fullPath + '&token=' + token : fullPath + '?token=' + token;
   }
   if (backend) {
     return backend + fullPath;
   }
   return fullPath;
+}
+
+async function authFetch(url, options = {}) {
+  const token = getSessionToken();
+  const headers = new Headers(options.headers || {});
+  if (token && !headers.has('X-Beam-Token')) {
+    headers.set('X-Beam-Token', token);
+  }
+  return fetch(url, { ...options, headers });
 }
 /**
  * app.js — Gaze Receiver (Phase 4 & 5: Direct-to-Disk + Live Pipe)
@@ -2630,7 +2656,7 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      const res = await authFetch(`${localURL}/api/meta`, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
@@ -2661,7 +2687,7 @@ async function bootstrap() {
 // ── HTTP mode ─────────────────────────────────────────────────────────────────
 async function fetchMetaAndShowReady() {
   try {
-    const res = await fetch(apiPath('/api/meta'));
+    const res = await authFetch(apiPath('/api/meta'));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     currentFile = await res.json();
 
@@ -2808,7 +2834,7 @@ async function startHTTPDownload() {
     if (initialOffset > 0) {
       headers['Range'] = `bytes=${initialOffset}-`;
     }
-    const res = await fetch(apiPath('/api/download'), { headers });
+    const res = await authFetch(apiPath('/api/download'), { headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
     const reader = res.body.getReader();
@@ -3025,7 +3051,7 @@ async function startWebRTC() {
 
   if (!offer) {
     setWebRTCSub('Fetching SDP offer…');
-    const offerRes = await fetch(apiPath('/api/signal/offer'));
+    const offerRes = await authFetch(apiPath('/api/signal/offer'));
     if (!offerRes.ok) throw new Error(`offer fetch: HTTP ${offerRes.status}`);
     offer = await offerRes.json();
   }
@@ -3036,7 +3062,7 @@ async function startWebRTC() {
   const pc = new RTCPeerConnection({ iceServers });
 
   // Also fetch file meta in parallel.
-  const metaPromise = fetch(apiPath('/api/meta')).then(r => r.json());
+  const metaPromise = authFetch(apiPath('/api/meta')).then(r => r.json());
 
   await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
@@ -3067,7 +3093,7 @@ async function startWebRTC() {
 
   // 4. POST answer to sender.
   setWebRTCSub('Sending answer to sender…');
-  const answerRes = await fetch(apiPath('/api/signal/answer'), {
+  const answerRes = await authFetch(apiPath('/api/signal/answer'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(pc.localDescription),
@@ -3078,7 +3104,7 @@ async function startWebRTC() {
   // 5. Fetch and add ICE candidates from sender.
   setWebRTCSub('Exchanging ICE candidates…');
   try {
-    const candRes  = await fetch(apiPath('/api/signal/candidates'));
+    const candRes  = await authFetch(apiPath('/api/signal/candidates'));
     const cands    = await candRes.json();
     for (const c of cands) {
       await pc.addIceCandidate(new RTCIceCandidate(c));
@@ -3336,7 +3362,7 @@ async function startWebRTC() {
         }
       });
 
-      let encBuffer = new Uint8Array(0);
+      encBuffer = new Uint8Array(0);
       let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
@@ -3345,43 +3371,8 @@ async function startWebRTC() {
             if (typeof e.data === 'string') {
               if (e.data === "EOF") {
                 chunkQueue.enqueueEOF();
-                await chunkQueue.drain();
-                if (diskWritableStream) {
-                  await diskWritableStream.close();
-                  if (useOPFS) {
-                    const file = await diskFileHandle.getFile();
-                    triggerSave(file, currentFile.name);
-                  }
-                  chunkQueue.enqueueEOF();
-                  try {
-                    await chunkQueue.drain();
-                    if (diskWritableStream) {
-                      await diskWritableStream.close();
-                      if (useOPFS) {
-                        const file = await diskFileHandle.getFile();
-                        triggerSave(file, currentFile.name);
-                      }
-                    } else if (swPipePort) {
-                      swPipePort.postMessage("EOF");
-                    } else {
-                      let finalBlob;
-                      if (useIndexedDB) {
-                        finalBlob = await getAllChunksIDB(currentFile.mime);
-                        await clearIDB();
-                      } else {
-                        finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                      }
-                      triggerSave(finalBlob, currentFile.name);
-                    }
-                    resolve();
-                  } catch (err) {
-                    hasError = true;
-                    // Handled in chunkQueue onError callback
-                  }
-                });
-              } else {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
+                try {
+                  await chunkQueue.drain();
                   if (diskWritableStream) {
                     await diskWritableStream.close();
                     if (useOPFS) {
@@ -3400,9 +3391,11 @@ async function startWebRTC() {
                     }
                     triggerSave(finalBlob, currentFile.name);
                   }
-                  triggerSave(finalBlob, currentFile.name);
+                  resolve();
+                } catch (err) {
+                  hasError = true;
+                  // Handled in chunkQueue onError callback
                 }
-                resolve();
               }
               return;
             }
@@ -3603,6 +3596,10 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
   });
 }
 
+function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, targetAmount = 512 * 1024, pollMs = 250) {
+  return waitForBufferedAmountLow(dc, targetAmount, pollMs);
+}
+
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
 async function uploadFileP2P(file, dc = webrtcDataChannel) {
   if (!dc || dc.readyState !== 'open') {
@@ -3716,6 +3713,10 @@ async function handleUploadFile(e) {
     };
 
     xhr.open('POST', apiPath('/api/upload'), true);
+    const token = getSessionToken();
+    if (token) {
+      xhr.setRequestHeader('X-Beam-Token', token);
+    }
     xhr.send(formData);
   }
 }
@@ -4077,10 +4078,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (senderDataChannel.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (senderDataChannel.readyState !== 'open') throw new Error("Data channel is no longer open");
-      if (senderDataChannel.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(senderDataChannel, 512 * 1024);
+    while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
+      if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+      if (dc.bufferedAmount > 1024 * 1024) {
+        await waitForBufferedAmountLow(dc, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -4120,11 +4121,12 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (senderDataChannel.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(senderDataChannel, 0);
+  if (dc.bufferedAmount > 0) {
+    await waitForBufferedAmountLow(dc, 0);
   }
-  senderDataChannel.send("EOF");
-  document.getElementById('send-status-label').textContent = "Transfer Complete!";
+  dc.send("EOF");
+  const sendStatusLabel = document.getElementById('send-status-label');
+  if (sendStatusLabel) sendStatusLabel.textContent = "Transfer Complete!";
 }
 
 async function startSenderPolling(backend) {
@@ -4363,6 +4365,9 @@ function renderQRCode(elementOrId, url) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     waitForBufferedAmountLow,
+    waitForDataChannelBuffer,
+    uploadFileP2P,
+    sendWebRTCFile,
     SequentialChunkQueue,
     WebRTCStreamDecrypter,
     decompressOffer,
@@ -4372,6 +4377,8 @@ if (typeof module !== 'undefined' && module.exports) {
     VirtualLogViewer,
     startHTTPSSE,
     getBackendURL,
+    getSessionToken,
+    authFetch,
     apiPath,
     formatBytes,
     mimeLabel,
