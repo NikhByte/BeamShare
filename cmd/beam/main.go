@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/beamshare/beam/internal/mdns"
+	"github.com/beamshare/beam/internal/p2p"
 	"github.com/beamshare/beam/internal/relay"
 	"github.com/beamshare/beam/internal/server"
 	"github.com/beamshare/beam/internal/signaling"
@@ -535,23 +536,15 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									return
 								}
 
-								bufferedAmountLowChan := make(chan struct{}, 1)
-								dc.SetBufferedAmountLowThreshold(512 * 1024)
-								dc.OnBufferedAmountLow(func() {
-									select {
-									case bufferedAmountLowChan <- struct{}{}:
-									default:
-									}
-								})
-
 								buffer := make([]byte, 64*1024) // 64KB chunk size
 								totalSent := offset
 								start := time.Now()
 
 								for {
 									// Backpressure check: wait if buffered amount > 1MB
-									if dc.BufferedAmount() > 1024*1024 {
-										<-bufferedAmountLowChan
+									if errWait := p2p.WaitBufferedAmount(mainCtx, dc, 512*1024, 1024*1024); errWait != nil {
+										fmt.Printf("\n  Error waiting for channel buffer: %v\n", errWait)
+										return
 									}
 
 									n, err := file.Read(buffer)
@@ -574,9 +567,9 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								}
 
 								// Wait for buffer to clear before sending EOF
-								dc.SetBufferedAmountLowThreshold(0)
-								if dc.BufferedAmount() > 0 {
-									<-bufferedAmountLowChan
+								if errWait := p2p.WaitBufferedAmount(mainCtx, dc, 0, 0); errWait != nil {
+									fmt.Printf("\n  Error waiting for buffer flush: %v\n", errWait)
+									return
 								}
 								dc.SendText("EOF")
 
