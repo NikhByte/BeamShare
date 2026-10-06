@@ -2565,7 +2565,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window !== 'undefined' && !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -3796,10 +3798,12 @@ const GF256_LOG = new Uint8Array(256);
   let x = 1;
   for (let i = 0; i < 255; i++) {
     GF256_EXP[i] = x;
-    GF256_EXP[i + 255] = x;
     GF256_LOG[x] = i;
     x <<= 1;
     if (x & 256) x ^= 285;
+  }
+  for (let i = 255; i < 512; i++) {
+    GF256_EXP[i] = GF256_EXP[i - 255];
   }
 })();
 
@@ -4237,7 +4241,8 @@ async function startSenderSharing() {
     const offer = await senderPeerConnection.createOffer();
     await senderPeerConnection.setLocalDescription(offer);
 
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    const waitTime = (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) ? 10 : 2000;
+    await new Promise(resolve => setTimeout(resolve, waitTime));
 
     setLoadingSub('Publishing SDP offer to relay…');
     const stateRes = await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
@@ -4666,20 +4671,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Client-side QR Code Generator ─────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
-(function initGF256() {
-  let x = 1;
-  for (let i = 0; i < 255; i++) {
-    GF256_EXP[i] = x;
-    GF256_LOG[x] = i;
-    x <<= 1;
-    if (x & 0x100) x ^= 0x11d;
-  }
-  for (let i = 255; i < 512; i++) {
-    GF256_EXP[i] = GF256_EXP[i - 255];
-  }
-})();
+
 
 function gfMul(x, y) {
   if (x === 0 || y === 0) return 0;
@@ -5073,6 +5065,7 @@ if (typeof module !== 'undefined' && module.exports) {
     WebRTCStreamDecrypter,
     decompressOffer,
     setState,
+    init,
     renderFileCard,
     updateProgress,
     VirtualLogViewer,
