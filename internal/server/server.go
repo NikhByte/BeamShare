@@ -247,6 +247,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	s.downloads++
 	count := s.downloads
 	s.mu.Unlock()
+
 	fmt.Printf("\r  Receiver connected (download #%d)…\n", count)
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")

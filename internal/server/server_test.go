@@ -712,3 +712,85 @@ func TestConcurrentMetaDownloadUpdateSharedFile(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestConcurrentUpdateAndHandlers(t *testing.T) {
+	tmpDir := t.TempDir()
+	file1Path := filepath.Join(tmpDir, "file1.txt")
+	file2Path := filepath.Join(tmpDir, "file2.txt")
+
+	require.NoError(t, os.WriteFile(file1Path, []byte("content for file 1"), 0600))
+	require.NoError(t, os.WriteFile(file2Path, []byte("content for file 2 - longer data"), 0600))
+
+	srv, err := New(file1Path, 1024*1024)
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Goroutine 1: Concurrently update shared file state
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if i%2 == 0 {
+					srv.UpdateSharedFile(file1Path, "file1.txt", 18)
+				} else {
+					srv.UpdateSharedFile(file2Path, "file2.txt", 32)
+				}
+				i++
+				time.Sleep(1 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Goroutine 2: Concurrently call /api/meta
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		client := ts.Client()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				resp, err := client.Get(ts.URL + "/api/meta")
+				if err == nil {
+					io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+				}
+				time.Sleep(1 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Goroutine 3: Concurrently call /api/download
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		client := ts.Client()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				resp, err := client.Get(ts.URL + "/api/download")
+				if err == nil {
+					io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+				}
+				time.Sleep(1 * time.Millisecond)
+			}
+		}
+	}()
+
+	wg.Wait()
+}
