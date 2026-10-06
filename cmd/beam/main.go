@@ -403,7 +403,8 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								fmt.Println("  ✅ Relay Transfer Complete!")
 							}
 						} else if cmd.Action == "upload" {
-							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", cmd.Filename)
+							sanitizedFilename := sanitizeFilename(cmd.Filename)
+							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", sanitizedFilename)
 							rc, err := relClient.DownloadData()
 							if err != nil {
 								fmt.Printf("  Error downloading from relay: %v\n", err)
@@ -935,4 +936,37 @@ func downloadFile(code string) error {
 
 	fmt.Printf("\n\n  ✅ Saved to %s\n", outName)
 	return nil
+}
+
+// sanitizeFilename cleans and strips directory path components from a filename, ensuring
+// cross-platform safety across both Unix and Windows path separators.
+func sanitizeFilename(rawFilename string) string {
+	// Normalize Windows backslashes to forward slashes for cross-platform handling
+	normalized := strings.ReplaceAll(rawFilename, "\\", "/")
+	cleanBase := filepath.Base(filepath.Clean(normalized))
+	cleanBase = strings.Trim(cleanBase, "\x00./\\")
+	if cleanBase == "" || cleanBase == "." || cleanBase == ".." {
+		cleanBase = "upload.bin"
+	}
+	return cleanBase
+}
+
+// verifyPathInOutputDir verifies that targetPath resides strictly within outputDir without path traversal.
+func verifyPathInOutputDir(targetPath, outputDir string) bool {
+	absOutput, err := filepath.Abs(outputDir)
+	if err != nil {
+		return false
+	}
+	absTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absOutput, absTarget)
+	if err != nil {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "..\\") || filepath.IsAbs(rel) {
+		return false
+	}
+	return true
 }
