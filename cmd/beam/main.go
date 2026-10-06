@@ -867,7 +867,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 						qrURL += "&turn_credential=" + url.QueryEscape(parsedTurnCredential)
 					}
 				}
-				}
 			}
 		}
 	}
