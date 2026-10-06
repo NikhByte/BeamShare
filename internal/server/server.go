@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -328,16 +327,38 @@ func (s *Server) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(assets.ServiceWorkerJS()))
 }
 
+type fileSnapshot struct {
+	filePath   string
+	fileName   string
+	fileSize   int64
+	isLivePipe bool
+}
+
+func (s *Server) fileSnapshot() fileSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return fileSnapshot{
+		filePath:   s.filePath,
+		fileName:   s.fileName,
+		fileSize:   s.fileSize,
+		isLivePipe: s.isLivePipe,
+	}
+}
+
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+
+	snap := s.fileSnapshot()
+
 	json.NewEncoder(w).Encode(FileMeta{
-		Name: s.fileName,
-		Size: s.fileSize,
-		MIME: guessMIME(s.fileName),
+		Name: snap.fileName,
+		Size: snap.fileSize,
+		MIME: guessMIME(snap.fileName),
 	})
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	snap := s.fileSnapshot()
 	s.mu.Lock()
 	s.downloads++
 	count := s.downloads
@@ -346,7 +367,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	if s.isLivePipe {
+	if snap.isLivePipe {
 		s.mu.Lock()
 		var data []byte
 		if s.liveBuf != nil {
@@ -354,13 +375,13 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, s.fileName))
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, snap.fileName))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		http.ServeContent(w, r, s.fileName, time.Time{}, bytes.NewReader(data))
+		http.ServeContent(w, r, snap.fileName, time.Time{}, bytes.NewReader(data))
 		return
 	}
 
-	f, err := os.Open(s.filePath)
+	f, err := os.Open(snap.filePath)
 	if err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
@@ -373,10 +394,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		modTime = stat.ModTime()
 	}
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, s.fileName))
-	w.Header().Set("Content-Type", guessMIME(s.fileName))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, snap.fileName))
+	w.Header().Set("Content-Type", guessMIME(snap.fileName))
 
-	http.ServeContent(w, r, s.fileName, modTime, f)
+	http.ServeContent(w, r, snap.fileName, modTime, f)
 }
 
 func (s *Server) handleLiveStream(w http.ResponseWriter, r *http.Request) {
@@ -572,11 +593,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if part.FormName() == "file" {
-			cleanBase := filepath.Base(filepath.Clean(part.FileName()))
-			cleanBase = strings.Trim(cleanBase, "\x00./\\")
-			if cleanBase == "" {
-				cleanBase = "upload.bin"
-			}
+			cleanBase := SanitizeFilename(part.FileName(), "upload.bin")
 			outName := "received_" + cleanBase
 			outFile, err := os.OpenFile(outName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 			if err != nil {
@@ -600,7 +617,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					totalReceived += int64(n)
-					
+
 					if r.ContentLength > 0 {
 						pct := float64(totalReceived) / float64(r.ContentLength) * 100
 						fmt.Printf("\r  📥 Receiving HTTP Upload: %.1f%% (%s/%s)",
@@ -641,7 +658,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 				formatBytes(int64(speed)),
 			)
 
-			s.UpdateSharedFile(outName, part.FileName(), totalReceived)
+			s.UpdateSharedFile(outName, cleanBase, totalReceived)
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": outName})
@@ -775,7 +792,7 @@ func (r *RingBuffer) Bytes() []byte {
 	res := make([]byte, len(r.buf))
 	copy(res, r.buf[r.head:])
 	copy(res[len(r.buf)-r.head:], r.buf[:r.head])
-	
+
 	// Trim to the first newline to avoid partial lines
 	idx := -1
 	for i := 0; i < len(res); i++ {
@@ -788,4 +805,126 @@ func (r *RingBuffer) Bytes() []byte {
 		return res[idx+1:]
 	}
 	return res
+}
+
+// LiveStreamReader is an io.ReadCloser that continuously streams live piped stdin
+// from a Server session, serving backlog first and then blocking on live stream channels until EOF.
+type LiveStreamReader struct {
+	srv    *Server
+	ch     chan []byte
+	buf    []byte
+	ctx    context.Context
+	cancel context.CancelFunc
+	closed bool
+	mu     sync.Mutex
+}
+
+// NewLiveStreamReader instantiates a continuous streaming adapter for live stdin pipe transfers.
+func (s *Server) NewLiveStreamReader(ctx context.Context, offset int64) *LiveStreamReader {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	r := &LiveStreamReader{
+		srv:    s,
+		ch:     make(chan []byte, 1024),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+
+	var backlog []byte
+	if s.liveBuf != nil {
+		backlog = s.liveBuf.Bytes()
+	}
+
+	if offset > 0 {
+		if offset < int64(len(backlog)) {
+			r.buf = make([]byte, len(backlog)-int(offset))
+			copy(r.buf, backlog[offset:])
+		}
+	} else if len(backlog) > 0 {
+		r.buf = make([]byte, len(backlog))
+		copy(r.buf, backlog)
+	}
+
+	if !s.liveFinished {
+		s.liveClients = append(s.liveClients, r.ch)
+	} else {
+		close(r.ch)
+	}
+
+	return r
+}
+
+func (r *LiveStreamReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return 0, io.EOF
+	}
+
+	if len(r.buf) > 0 {
+		n := copy(p, r.buf)
+		r.buf = r.buf[n:]
+		r.mu.Unlock()
+		return n, nil
+	}
+	r.mu.Unlock()
+
+	if r.ctx.Err() != nil {
+		return 0, r.ctx.Err()
+	}
+
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	case chunk, ok := <-r.ch:
+		if !ok {
+			r.mu.Lock()
+			r.closed = true
+			r.mu.Unlock()
+			return 0, io.EOF
+		}
+		if len(chunk) == 0 {
+			return r.Read(p)
+		}
+		r.mu.Lock()
+		n := copy(p, chunk)
+		if n < len(chunk) {
+			r.buf = make([]byte, len(chunk)-n)
+			copy(r.buf, chunk[n:])
+		}
+		r.mu.Unlock()
+		return n, nil
+	}
+}
+
+func (r *LiveStreamReader) Close() error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	r.cancel()
+	r.mu.Unlock()
+
+	r.srv.mu.Lock()
+	for i, c := range r.srv.liveClients {
+		if c == r.ch {
+			r.srv.liveClients = append(r.srv.liveClients[:i], r.srv.liveClients[i+1:]...)
+			break
+		}
+	}
+	r.srv.mu.Unlock()
+
+	return nil
 }
