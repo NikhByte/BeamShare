@@ -173,6 +173,45 @@ func TestSDPCompressionDecompression(t *testing.T) {
 	}
 }
 
+func TestDecompressSDPSizeLimit(t *testing.T) {
+	t.Run("Payload within 1MB limit decompresses successfully", func(t *testing.T) {
+		line := "a=custom-line: " + strings.Repeat("x", 100) + "\r\n"
+		repeatCount := (maxDecompressedSDPSize - 10) / len(line)
+		payload := strings.Repeat(line, repeatCount)
+
+		compressed, err := CompressSDP(payload)
+		require.NoError(t, err)
+
+		decompressed, err := DecompressSDP(compressed)
+		require.NoError(t, err)
+		assert.LessOrEqual(t, len(decompressed), maxDecompressedSDPSize)
+	})
+
+	t.Run("Payload exceeding 1MB returns size limit error", func(t *testing.T) {
+		line := "a=custom-line: " + strings.Repeat("x", 100) + "\r\n"
+		repeatCount := (maxDecompressedSDPSize + 10000) / len(line)
+		oversizedPayload := strings.Repeat(line, repeatCount)
+
+		compressed, err := CompressSDP(oversizedPayload)
+		require.NoError(t, err)
+
+		_, err = DecompressSDP(compressed)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum limit of 1MB")
+	})
+
+	t.Run("Zlib bomb payload is capped and rejected", func(t *testing.T) {
+		// Construct a highly compressed payload expanding to 3 MB
+		hugeSDP := strings.Repeat("a=flag:1\r\n", 300000) // ~3 MB uncompressed
+		compressed, err := CompressSDP(hugeSDP)
+		require.NoError(t, err)
+
+		_, err = DecompressSDP(compressed)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum limit of 1MB")
+	})
+}
+
 func TestCheckNATWithProber(t *testing.T) {
 	// Mock NAT prober returns true when behind NAT
 	mockProber := func(stunURL, localIP string) bool {
