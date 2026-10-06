@@ -2570,6 +2570,7 @@ function resetState() {
 }
 
 async function bootstrap() {
+  if (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) return;
   const params = new URLSearchParams(window.location.search);
   const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
   let localURL = params.get('local');
@@ -3849,8 +3850,8 @@ function initSpotlight() {
 }
 
 // ── Local QR Code Generator ───────────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
+var GF256_EXP = new Uint8Array(512);
+var GF256_LOG = new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -4723,8 +4724,8 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Client-side QR Code Generator ─────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
+var GF256_EXP = new Uint8Array(512);
+var GF256_LOG = new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -5119,6 +5120,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     uploadFileP2P,
