@@ -47,6 +47,20 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
       header3,
       'attachment; filename="file \\"test\\".txt"; filename*=UTF-8\'\'file%20%22test%22.txt'
     );
+
+    // Case 4: Special RFC 5987 characters (single quote, asterisk) and backslashes
+    const header4 = formatContentDisposition("test'file*.txt");
+    assert.equal(
+      header4,
+      'attachment; filename="test\'file*.txt"; filename*=UTF-8\'\'test%27file%2A.txt'
+    );
+
+    // Case 5: Empty or missing filename fallback
+    const header5 = formatContentDisposition('');
+    assert.equal(
+      header5,
+      'attachment; filename="download"; filename*=UTF-8\'\'download'
+    );
   });
 
   test('StreamMap entry deleted upon stream completion (EOF)', () => {
@@ -273,20 +287,33 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     assert.equal(responseResult.headers.get('Content-Length'), '1024');
   });
 
-  test('Fetch interceptor responds to /sw-download-pipe/iframe-ping with postMessage script', async () => {
+  test('INIT_PORT message handler posts READY message over message port', () => {
     require('./sw.js');
-    let responseResult = null;
-    listeners['fetch']({
-      request: { url: 'http://localhost/sw-download-pipe/iframe-ping' },
-      respondWith: (resp) => {
-        responseResult = resp;
+    const url = '/sw-download-pipe/test-ready';
+    let readyPosted = false;
+
+    const mockPort = {
+      onmessage: null,
+      onmessageerror: null,
+      close: () => {},
+      postMessage: (msg) => {
+        if (msg && msg.type === 'READY') {
+          readyPosted = true;
+        }
       }
+    };
+
+    listeners['message']({
+      data: {
+        type: 'INIT_PORT',
+        url,
+        filename: 'test.bin',
+        size: 100,
+        mime: 'application/octet-stream'
+      },
+      ports: [mockPort]
     });
 
-    assert.notEqual(responseResult, null);
-    assert.equal(responseResult.status, 200);
-    assert.equal(responseResult.headers.get('Content-Type'), 'text/html');
-    const body = await responseResult.text();
-    assert.match(body, /sw-iframe-ok/);
+    assert.equal(readyPosted, true);
   });
 });
