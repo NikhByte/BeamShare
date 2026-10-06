@@ -1,4 +1,4 @@
-const { test, describe, beforeEach } = require('node:test');
+const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
@@ -109,9 +109,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-    const { webcrypto } = require('node:crypto');
-    window.crypto = webcrypto;
-    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -662,6 +659,12 @@ describe('Gaze Web Sender Test Suite', () => {
   let document;
   let app;
 
+  afterEach(() => {
+    if (app && typeof app.resetState === 'function') {
+      app.resetState();
+    }
+  });
+
   beforeEach(() => {
     dom = new JSDOM(htmlContent, {
       url: 'http://localhost:8080/'
@@ -1072,7 +1075,7 @@ describe('WebRTC Buffer Backpressure Suite', () => {
 
     await assert.rejects(
       async () => await waitPromise,
-      { message: 'Data channel is no longer open' }
+      { message: /closed or closing/i }
     );
 
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
@@ -1098,6 +1101,7 @@ describe('WebRTC Backpressure & Flow Control Suite', () => {
 
     global.window = window;
     global.document = document;
+    global.localStorage = window.localStorage;
     global.crypto = window.crypto;
     global.navigator = window.navigator;
     global.location = window.location;
