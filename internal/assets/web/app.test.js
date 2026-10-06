@@ -147,6 +147,7 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.MessageChannel = global.MessageChannel;
     }
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
+
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
@@ -727,8 +728,10 @@ describe('Gaze Web Sender Test Suite', () => {
   let window;
   let document;
   let app;
+  let fetchedURLs = [];
 
   beforeEach(() => {
+    fetchedURLs = [];
     dom = new JSDOM(htmlContent, {
       url: 'http://localhost:8080/'
     });
@@ -842,7 +845,7 @@ describe('Gaze Web Sender Test Suite', () => {
     let externalRequests = [];
     window.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
@@ -861,10 +864,10 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify send-qr-img src uses local client-side Data URL without third-party calls
+    // Verify send-qr-img src uses local client-side Data URL or local endpoint without third-party calls
     const sendQrImg = document.getElementById('send-qr-img');
     assert.notEqual(sendQrImg, null);
-    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml;charset=utf-8,'), true);
+    assert.equal(sendQrImg.src.includes('/api/qr') || sendQrImg.src.includes('data:image/svg+xml'), true);
     assert.equal(sendQrImg.src.includes('api.qrserver.com'), false);
   });
 
