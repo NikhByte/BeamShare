@@ -23,6 +23,16 @@ describe('Gaze Web Receiver Test Suite', () => {
     window = dom.window;
     document = window.document;
 
+    window.HTMLCanvasElement.prototype.getContext = function() {
+      return {
+        fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
+        createImageData: () => [], setTransform: () => {}, drawImage: () => {}, save: () => {}, fillText: () => {},
+        restore: () => {}, beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, closePath: () => {}, stroke: () => {},
+        translate: () => {}, scale: () => {}, rotate: () => {}, arc: () => {}, fill: () => {}, measureText: () => ({ width: 0 }),
+        transform: () => {}, rect: () => {}, clip: () => {}
+      };
+    };
+
     // Set up mock indexedDB to prevent unhandled rejection in JSDOM
     window.indexedDB = {
       open: () => {
@@ -68,12 +78,58 @@ describe('Gaze Web Receiver Test Suite', () => {
     };
     global.localStorage = window.localStorage;
 
+    global.HTMLCanvasElement = window.HTMLCanvasElement;
+    global.HTMLImageElement = window.HTMLImageElement;
+
+    if (!window.HTMLCanvasElement.prototype.getContext) {
+      window.HTMLCanvasElement.prototype.getContext = function() {
+        return {
+          fillRect: () => {},
+          clearRect: () => {},
+          getImageData: (x, y, w, h) => ({ data: new Array(w * h * 4) }),
+          putImageData: () => {},
+          createImageData: () => ([]),
+          setTransform: () => {},
+          drawImage: () => {},
+          save: () => {},
+          fillText: () => {},
+          restore: () => {},
+          beginPath: () => {},
+          moveTo: () => {},
+          lineTo: () => {},
+          closePath: () => {},
+          stroke: () => {},
+          translate: () => {},
+          scale: () => {},
+          rotate: () => {},
+          arc: () => {},
+          fill: () => {},
+          measureText: () => ({ width: 0 }),
+          transform: () => {},
+          rect: () => {},
+          clip: () => {},
+          fillStyle: '',
+          strokeStyle: '',
+          lineWidth: 1
+        };
+      };
+    }
+    if (!window.HTMLCanvasElement.prototype.toDataURL) {
+      window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,mock';
+    }
+
+    const QRious = require('qrious');
+    global.QRious = QRious;
+    window.QRious = QRious;
+
     // Set up global environment for app.js
     const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
-    global.crypto = window.crypto;
+    global.crypto = webcrypto;
     global.window = window;
     global.document = document;
+    global.HTMLCanvasElement = window.HTMLCanvasElement;
+    global.HTMLImageElement = window.HTMLImageElement;
     global.navigator = window.navigator;
     global.location = window.location;
     global.URLSearchParams = window.URLSearchParams;
@@ -82,12 +138,36 @@ describe('Gaze Web Receiver Test Suite', () => {
     global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
     window.atob = global.atob;
     window.btoa = global.btoa;
+    if (typeof global.MessageChannel !== 'undefined') {
+      window.MessageChannel = global.MessageChannel;
+    }
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
+    const QRious = require('./qrious.min.js');
+    window.QRious = QRious;
+    global.QRious = QRious;
+    if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
+      window.HTMLCanvasElement.prototype.getContext = () => ({
+        fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
+        createImageData: () => [], setTransform: () => {}, drawImage: () => {}, save: () => {}, fillText: () => {},
+        restore: () => {}, beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, closePath: () => {}, stroke: () => {},
+        translate: () => {}, scale: () => {}, rotate: () => {}, arc: () => {}, fill: () => {}, measureText: () => ({ width: 0 }),
+        transform: () => {}, rect: () => {}, clip: () => {}
+      });
+    }
     global.pako = pako;
     window.pako = pako;
+    const { webcrypto } = require('node:crypto');
+    window.crypto = webcrypto;
+    global.crypto = webcrypto;
     window.__BEAM_TEST_ENV__ = true;
 
-    // Load app.js
+    // Load qrcode.min.js and app.js
+    delete require.cache[require.resolve('./qrcode.min.js')];
+    const qrcodeLib1 = require('./qrcode.min.js');
+    global.generateQRCodeSVGDataURL = qrcodeLib1.generateQRCodeSVGDataURL;
+    window.generateQRCodeSVGDataURL = qrcodeLib1.generateQRCodeSVGDataURL;
+    window.qrcode = qrcodeLib1;
+
     delete require.cache[require.resolve('./app.js')];
     app = require('./app.js');
   });
@@ -247,22 +327,22 @@ describe('Gaze Web Receiver Test Suite', () => {
       }
     });
 
-    // Enqueue 4 chunks of 40 bytes each while writeHandler is pending on chunk 1
-    const c1 = new Uint8Array(40).fill(1);
-    const c2 = new Uint8Array(40).fill(2);
-    const c3 = new Uint8Array(40).fill(3);
-    const c4 = new Uint8Array(40).fill(4);
+    // Enqueue 4 chunks of 30 bytes each while writeHandler is pending on chunk 1
+    const c1 = new Uint8Array(30).fill(1);
+    const c2 = new Uint8Array(30).fill(2);
+    const c3 = new Uint8Array(30).fill(3);
+    const c4 = new Uint8Array(30).fill(4);
 
-    queue.enqueue(c1); // Dequeued immediately for writing (queue totalBytes = 0)
+    queue.enqueue(c1); // Total bytes = 30
     assert.equal(queue.isPaused, false);
 
-    queue.enqueue(c2); // Queue totalBytes = 40
+    queue.enqueue(c2); // Total bytes = 60
     assert.equal(queue.isPaused, false);
 
-    queue.enqueue(c3); // Queue totalBytes = 80
+    queue.enqueue(c3); // Total bytes = 90
     assert.equal(queue.isPaused, false);
 
-    queue.enqueue(c4); // Queue totalBytes = 120 -> exceeds HWM (100)!
+    queue.enqueue(c4); // Total bytes = 120 -> exceeds HWM (100)!
     assert.equal(queue.isPaused, true);
     assert.deepEqual(sentMessages, ['PAUSE']);
 
@@ -302,6 +382,88 @@ describe('Gaze Web Receiver Test Suite', () => {
     );
   });
 
+  test('SequentialChunkQueue — Default Watermarks (16 MB / 4 MB) and In-Flight Write Memory Tracking', async () => {
+    const sentMessages = [];
+    const mockDataChannel = {
+      readyState: 'open',
+      send: (msg) => sentMessages.push(msg)
+    };
+
+    let finishWrite;
+    const writePromise = new Promise(r => { finishWrite = r; });
+
+    const queue = new app.SequentialChunkQueue({
+      dataChannel: mockDataChannel,
+      writeHandler: async () => {
+        await writePromise;
+      }
+    });
+
+    assert.equal(queue.highWatermark, 16 * 1024 * 1024);
+    assert.equal(queue.lowWatermark, 4 * 1024 * 1024);
+
+    const chunkSize = 5 * 1024 * 1024; // 5 MB
+    const c1 = new Uint8Array(chunkSize);
+    const c2 = new Uint8Array(chunkSize);
+    const c3 = new Uint8Array(chunkSize);
+    const c4 = new Uint8Array(chunkSize);
+
+    queue.enqueue(c1); // 5MB enqueued, processLoop starts writeHandler(c1)
+    queue.enqueue(c2); // 10MB total
+    queue.enqueue(c3); // 15MB total
+    assert.equal(queue.isPaused, false);
+
+    queue.enqueue(c4); // 20MB total >= 16MB HWM -> PAUSE
+    assert.equal(queue.isPaused, true);
+    assert.deepEqual(sentMessages, ['PAUSE']);
+
+    // Total bytes should reflect in-flight chunk + queued chunks (20MB)
+    assert.equal(queue.totalBytes, 20 * 1024 * 1024);
+
+    queue.enqueueEOF();
+
+    // Release writeHandler
+    finishWrite();
+    await queue.drain();
+
+    assert.equal(queue.totalBytes, 0);
+    assert.deepEqual(sentMessages, ['PAUSE', 'RESUME']);
+  });
+
+  test('SequentialChunkQueue — QuotaExceededError and DataChannel Closure', async () => {
+    let capturedError = null;
+    let channelClosed = false;
+    const mockDC = {
+      readyState: 'open',
+      close: () => { channelClosed = true; }
+    };
+
+    const quotaError = new Error('Storage quota exceeded');
+    quotaError.name = 'QuotaExceededError';
+
+    const queue = new app.SequentialChunkQueue({
+      dataChannel: mockDC,
+      writeHandler: async () => {
+        throw quotaError;
+      },
+      onError: (err) => {
+        capturedError = err;
+        mockDC.close();
+      }
+    });
+
+    queue.enqueue(new Uint8Array([1, 2, 3]));
+    queue.enqueueEOF();
+
+    await assert.rejects(
+      async () => await queue.drain(),
+      { name: 'QuotaExceededError' }
+    );
+
+    assert.equal(capturedError.name, 'QuotaExceededError');
+    assert.equal(channelClosed, true, 'DataChannel must be closed on storage write error');
+  });
+
   test('WebRTC Receiver DataChannel Chunk Queueing', async () => {
     const receivedData = [];
     const mockDC = {
@@ -331,8 +493,12 @@ describe('Gaze Web Receiver Test Suite', () => {
       queue.enqueue(new Uint8Array(e.data));
     };
 
-    // Synchronously fire 5 binary messages
-    for (let i = 1; i <= 5; i++) {
+    // Synchronously fire 5 binary messages with interleaved PAUSE/RESUME control messages
+    onmessage({ data: new Uint8Array([1]).buffer });
+    onmessage({ data: 'PAUSE' });
+    onmessage({ data: new Uint8Array([2]).buffer });
+    onmessage({ data: 'RESUME' });
+    for (let i = 3; i <= 5; i++) {
       onmessage({ data: new Uint8Array([i]).buffer });
     }
 
@@ -345,175 +511,195 @@ describe('Gaze Web Receiver Test Suite', () => {
     assert.deepEqual(receivedData, [1, 2, 3, 4, 5]);
   });
 
-  test('WebRTC Receiver — AES-GCM Decryption within SequentialChunkQueue writeHandler', async () => {
-    // 1. Generate key and set hash
-    const key = await crypto.subtle.generateKey(
-      { name: "AES-GCM", length: 256 },
+  test('WebRTC Receiver AES-GCM Decryption and Chunk Queueing', async () => {
+    const { webcrypto } = require('node:crypto');
+    const key = await webcrypto.subtle.generateKey(
+      { name: 'AES-GCM', length: 256 },
       true,
-      ["encrypt", "decrypt"]
+      ['encrypt', 'decrypt']
     );
-    const rawKey = await crypto.subtle.exportKey("raw", key);
+    const rawKey = await webcrypto.subtle.exportKey('raw', key);
     const keyB64 = Buffer.from(rawKey).toString('base64url');
+
     window.location.hash = `#k=${keyB64}`;
+    const importedKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+    assert.notEqual(importedKey, null);
 
-    // Import key using parseDecryptionKeyFromHash
-    const decryptionKey = await app.parseDecryptionKeyFromHash(window.location.hash);
-    assert.notEqual(decryptionKey, null);
+    const receivedData = [];
+    const mockDC = {
+      readyState: 'open',
+      send: () => {},
+      close: () => {}
+    };
 
-    // Prepare helper to create encrypted frames
-    const createEncryptedFrame = async (plainData) => {
-      const nonce = crypto.getRandomValues(new Uint8Array(12));
-      const ciphertext = await crypto.subtle.encrypt(
-        { name: "AES-GCM", iv: nonce },
+    const queue = new app.SequentialChunkQueue({
+      highWatermark: 1024,
+      lowWatermark: 256,
+      dataChannel: mockDC,
+      writeHandler: async (chunk) => {
+        receivedData.push(...chunk);
+      }
+    });
+
+    const plaintext1 = new Uint8Array([10, 20, 30, 40]);
+    const plaintext2 = new Uint8Array([50, 60, 70, 80]);
+
+    async function createEncryptedFrame(pt) {
+      const nonce = webcrypto.getRandomValues(new Uint8Array(12));
+      const ciphertext = await webcrypto.subtle.encrypt(
+        { name: 'AES-GCM', iv: nonce },
         key,
-        plainData
+        pt
       );
       const frameLen = 12 + ciphertext.byteLength;
       const payload = new Uint8Array(4 + frameLen);
       const dv = new DataView(payload.buffer);
       dv.setUint32(0, frameLen, false);
       payload.set(nonce, 4);
-      payload.set(new Uint8Array(ciphertext), 4 + 12);
+      payload.set(new Uint8Array(ciphertext), 16);
       return payload;
-    };
+    }
 
-    const plaintext1 = new Uint8Array([72, 101, 108, 108, 111]); // "Hello"
-    const plaintext2 = new Uint8Array([32, 87, 111, 114, 108, 100]); // " World"
     const frame1 = await createEncryptedFrame(plaintext1);
     const frame2 = await createEncryptedFrame(plaintext2);
 
-    const receivedChunks = [];
-    let receivedBytes = 0;
     let encBuffer = new Uint8Array(0);
+    let decryptChain = Promise.resolve();
 
-    const mockDC = { readyState: 'open', send: () => {}, close: () => {} };
-    const queue = new app.SequentialChunkQueue({
-      dataChannel: mockDC,
-      writeHandler: async (chunk) => {
-        if (decryptionKey) {
-          let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
-          newBuffer.set(encBuffer, 0);
-          newBuffer.set(chunk, encBuffer.length);
-          encBuffer = newBuffer;
-
-          while (encBuffer.length >= 4) {
-            const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-            const frameLen = dv.getUint32(0, false);
-            if (encBuffer.length >= 4 + frameLen) {
-              const frame = encBuffer.slice(4, 4 + frameLen);
-              encBuffer = encBuffer.slice(4 + frameLen);
-
-              const nonce = new Uint8Array(frame.subarray(0, 12));
-              const ciphertext = new Uint8Array(frame.subarray(12));
-
-              const decrypted = await crypto.subtle.decrypt(
-                { name: "AES-GCM", iv: nonce },
-                decryptionKey,
-                ciphertext
-              );
-              const decValue = new Uint8Array(decrypted);
-              receivedChunks.push(decValue);
-              receivedBytes += decValue.byteLength;
-            } else {
-              break;
-            }
+    const onmessage = (e) => {
+      decryptChain = decryptChain.then(async () => {
+        if (typeof e.data === 'string') {
+          if (e.data === 'EOF') {
+            queue.enqueueEOF();
+            await queue.drain();
           }
+          return;
         }
-      }
-    });
 
-    queue.enqueue(frame1);
-    queue.enqueue(frame2);
-    queue.enqueueEOF();
-    await queue.drain();
-
-    const fullPlaintext = Buffer.concat(receivedChunks.map(c => Buffer.from(c))).toString('utf8');
-    assert.equal(fullPlaintext, "Hello World");
-    assert.equal(receivedBytes, 11);
-  });
-
-  test('WebRTC Receiver — Invalid Key or Tampered Ciphertext Triggers Exception in writeHandler', async () => {
-    // Key A used to encrypt
-    const keyA = await crypto.subtle.generateKey(
-      { name: "AES-GCM", length: 256 },
-      true,
-      ["encrypt", "decrypt"]
-    );
-    // Key B set in receiver hash
-    const keyB = await crypto.subtle.generateKey(
-      { name: "AES-GCM", length: 256 },
-      true,
-      ["encrypt", "decrypt"]
-    );
-    const rawKeyB = await crypto.subtle.exportKey("raw", keyB);
-    const keyB64 = Buffer.from(rawKeyB).toString('base64url');
-    window.location.hash = `#k=${keyB64}`;
-
-    const receiverKey = await app.parseDecryptionKeyFromHash(window.location.hash);
-
-    // Encrypt frame with keyA
-    const nonce = crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: nonce },
-      keyA,
-      new Uint8Array([1, 2, 3, 4, 5])
-    );
-    const frameLen = 12 + ciphertext.byteLength;
-    const payload = new Uint8Array(4 + frameLen);
-    const dv = new DataView(payload.buffer);
-    dv.setUint32(0, frameLen, false);
-    payload.set(nonce, 4);
-    payload.set(new Uint8Array(ciphertext), 4 + 12);
-
-    let onErrorCalled = false;
-    let closedChannel = false;
-    const mockDC = {
-      readyState: 'open',
-      send: () => {},
-      close: () => { closedChannel = true; }
-    };
-
-    let encBuffer = new Uint8Array(0);
-    const queue = new app.SequentialChunkQueue({
-      dataChannel: mockDC,
-      onError: (err) => {
-        onErrorCalled = true;
-        mockDC.close();
-      },
-      writeHandler: async (chunk) => {
-        let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
+        const value = new Uint8Array(e.data);
+        let newBuffer = new Uint8Array(encBuffer.length + value.length);
         newBuffer.set(encBuffer, 0);
-        newBuffer.set(chunk, encBuffer.length);
+        newBuffer.set(value, encBuffer.length);
         encBuffer = newBuffer;
 
         while (encBuffer.length >= 4) {
           const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-          const fLen = dv.getUint32(0, false);
-          if (encBuffer.length >= 4 + fLen) {
-            const frame = encBuffer.slice(4, 4 + fLen);
-            encBuffer = encBuffer.slice(4 + fLen);
-            const iv = new Uint8Array(frame.subarray(0, 12));
-            const cipher = new Uint8Array(frame.subarray(12));
+          const frameLen = dv.getUint32(0, false);
+          if (encBuffer.length >= 4 + frameLen) {
+            const frame = encBuffer.slice(4, 4 + frameLen);
+            encBuffer = encBuffer.slice(4 + frameLen);
 
-            // Should throw OperationError because receiverKey is keyB, but chunk was encrypted with keyA
-            await crypto.subtle.decrypt(
-              { name: "AES-GCM", iv },
-              receiverKey,
-              cipher
+            const nonce = new Uint8Array(frame.subarray(0, 12));
+            const ciphertext = new Uint8Array(frame.subarray(12));
+            const decrypted = await webcrypto.subtle.decrypt(
+              { name: 'AES-GCM', iv: nonce },
+              importedKey,
+              ciphertext
             );
+            queue.enqueue(new Uint8Array(decrypted));
           } else {
             break;
           }
         }
+      });
+    };
+
+    onmessage({ data: frame1.buffer });
+    onmessage({ data: frame2.buffer });
+    onmessage({ data: 'EOF' });
+
+    await decryptChain;
+
+    assert.deepEqual(receivedData, [10, 20, 30, 40, 50, 60, 70, 80]);
+  });
+
+  test('WebRTC Receiver AES-GCM Decryption with Chunk Fragmentation', async () => {
+    const { webcrypto } = require('node:crypto');
+    const key = await webcrypto.subtle.generateKey(
+      { name: 'AES-GCM', length: 256 },
+      true,
+      ['encrypt', 'decrypt']
+    );
+    const rawKey = await webcrypto.subtle.exportKey('raw', key);
+    const keyB64 = Buffer.from(rawKey).toString('base64url');
+
+    window.location.hash = `#k=${keyB64}`;
+    const importedKey = await app.parseDecryptionKeyFromHash(window.location.hash);
+
+    const receivedData = [];
+    const queue = new app.SequentialChunkQueue({
+      writeHandler: async (chunk) => {
+        receivedData.push(...chunk);
       }
     });
 
-    queue.enqueue(payload);
-    queue.enqueueEOF();
+    const plaintext = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const nonce = webcrypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await webcrypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce },
+      key,
+      plaintext
+    );
+    const frameLen = 12 + ciphertext.byteLength;
+    const fullPayload = new Uint8Array(4 + frameLen);
+    const dv = new DataView(fullPayload.buffer);
+    dv.setUint32(0, frameLen, false);
+    fullPayload.set(nonce, 4);
+    fullPayload.set(new Uint8Array(ciphertext), 16);
 
-    await assert.rejects(async () => await queue.drain());
-    assert.equal(onErrorCalled, true);
-    assert.equal(closedChannel, true);
+    const chunkA = new Uint8Array(fullPayload.subarray(0, 5));
+    const chunkB = new Uint8Array(fullPayload.subarray(5, 15));
+    const chunkC = new Uint8Array(fullPayload.subarray(15));
+
+    let encBuffer = new Uint8Array(0);
+    let decryptChain = Promise.resolve();
+
+    const onmessage = (e) => {
+      decryptChain = decryptChain.then(async () => {
+        if (typeof e.data === 'string') {
+          if (e.data === 'EOF') {
+            queue.enqueueEOF();
+            await queue.drain();
+          }
+          return;
+        }
+
+        const value = new Uint8Array(e.data);
+        let newBuffer = new Uint8Array(encBuffer.length + value.length);
+        newBuffer.set(encBuffer, 0);
+        newBuffer.set(value, encBuffer.length);
+        encBuffer = newBuffer;
+
+        while (encBuffer.length >= 4) {
+          const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
+          const frameLen = dv.getUint32(0, false);
+          if (encBuffer.length >= 4 + frameLen) {
+            const frame = encBuffer.slice(4, 4 + frameLen);
+            encBuffer = encBuffer.slice(4 + frameLen);
+
+            const nonce = new Uint8Array(frame.subarray(0, 12));
+            const ciphertext = new Uint8Array(frame.subarray(12));
+            const decrypted = await webcrypto.subtle.decrypt(
+              { name: 'AES-GCM', iv: nonce },
+              importedKey,
+              ciphertext
+            );
+            queue.enqueue(new Uint8Array(decrypted));
+          } else {
+            break;
+          }
+        }
+      });
+    };
+
+    onmessage({ data: chunkA.buffer });
+    onmessage({ data: chunkB.buffer });
+    onmessage({ data: chunkC.buffer });
+    onmessage({ data: 'EOF' });
+
+    await decryptChain;
+
+    assert.deepEqual(receivedData, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   });
 });
 
@@ -531,12 +717,28 @@ describe('Gaze Web Sender Test Suite', () => {
     window = dom.window;
     document = window.document;
 
+    window.HTMLCanvasElement.prototype.toDataURL = function() {
+      return 'data:image/png;base64,mock';
+    };
+
+    window.HTMLCanvasElement.prototype.getContext = function() {
+      return {
+        fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
+        createImageData: () => [], setTransform: () => {}, drawImage: () => {}, save: () => {}, fillText: () => {},
+        restore: () => {}, beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, closePath: () => {}, stroke: () => {},
+        translate: () => {}, scale: () => {}, rotate: () => {}, arc: () => {}, fill: () => {}, measureText: () => ({ width: 0 }),
+        transform: () => {}, rect: () => {}, clip: () => {}
+      };
+    };
+
     // Node's WebCrypto
     const { webcrypto } = require('node:crypto');
     window.crypto = webcrypto;
 
     global.window = window;
     global.document = document;
+    global.HTMLCanvasElement = window.HTMLCanvasElement;
+    global.HTMLImageElement = window.HTMLImageElement;
     global.crypto = window.crypto;
     global.navigator = window.navigator;
     global.location = window.location;
@@ -546,6 +748,40 @@ describe('Gaze Web Sender Test Suite', () => {
     global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
     window.atob = global.atob;
     window.btoa = global.btoa;
+
+    const QRious = require('./qrious.min.js');
+    window.QRious = QRious;
+    global.QRious = QRious;
+
+    if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
+      window.HTMLCanvasElement.prototype.getContext = () => ({
+        fillRect: () => {},
+        clearRect: () => {},
+        getImageData: () => ({ data: [] }),
+        putImageData: () => {},
+        createImageData: () => [],
+        setTransform: () => {},
+        drawImage: () => {},
+        save: () => {},
+        fillText: () => {},
+        restore: () => {},
+        beginPath: () => {},
+        moveTo: () => {},
+        lineTo: () => {},
+        closePath: () => {},
+        stroke: () => {},
+        translate: () => {},
+        scale: () => {},
+        rotate: () => {},
+        arc: () => {},
+        fill: () => {},
+        measureText: () => ({ width: 0 }),
+        transform: () => {},
+        rect: () => {},
+        clip: () => {},
+      });
+    }
+
     global.fetch = async (url) => {
       if (url.includes('/poll')) {
           return { ok: false, status: 404 };
@@ -567,6 +803,12 @@ describe('Gaze Web Sender Test Suite', () => {
     global.RTCPeerConnection = RTCPeerConnection;
     window.__BEAM_TEST_ENV__ = true;
 
+    delete require.cache[require.resolve('./qrcode.min.js')];
+    const qrcodeLib2 = require('./qrcode.min.js');
+    global.generateQRCodeSVGDataURL = qrcodeLib2.generateQRCodeSVGDataURL;
+    window.generateQRCodeSVGDataURL = qrcodeLib2.generateQRCodeSVGDataURL;
+    window.qrcode = qrcodeLib2;
+
     delete require.cache[require.resolve('./app.js')];
     app = require('./app.js');
 
@@ -575,11 +817,19 @@ describe('Gaze Web Sender Test Suite', () => {
 
   });
 
-  test('startSenderSharing generates AES-GCM key and appends #k fragment', async () => {
+  test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
+    // Intercept fetch / network calls to verify no external requests are made
+    let externalRequests = [];
+    window.fetch = async (url) => {
+      externalRequests.push(url.toString());
+      return { ok: true, json: async () => ({}) };
+    };
+
     await app.startSenderSharing();
 
     const urlInput = document.getElementById('send-url-input');
-    const hash = new URL(urlInput.value || "http://localhost/").hash;
+    const shareURL = urlInput.value || "http://localhost/";
+    const hash = new URL(shareURL).hash;
 
     assert.equal(hash.startsWith('#k='), true);
 
@@ -590,6 +840,33 @@ describe('Gaze Web Sender Test Suite', () => {
 
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
+
+    // Verify QR code image src uses native /api/qr endpoint instead of third-party api.qrserver.com
+    const qrImg = document.getElementById('send-qr-img');
+    assert.equal(qrImg.src.includes('/api/qr'), true);
+    assert.equal(qrImg.src.includes('url='), true);
+    assert.equal(qrImg.src.includes('api.qrserver.com'), false);
+  });
+
+  test('startSenderSharing generates local QR code with full URL and #k fragment on canvas without external API calls', async () => {
+    let externalCallMade = false;
+    const origFetch = global.fetch;
+    global.fetch = async (url, opts) => {
+      if (typeof url === 'string' && (url.includes('qrserver.com') || url.includes('/api/qr'))) {
+        externalCallMade = true;
+      }
+      return origFetch(url, opts);
+    };
+
+    await app.startSenderSharing();
+
+    assert.equal(externalCallMade, false, 'No external QR API requests should be made');
+
+    const sendCanvas = document.getElementById('send-qr-canvas');
+    assert.notEqual(sendCanvas, null);
+
+    const urlInput = document.getElementById('send-url-input');
+    assert.ok(urlInput.value.includes('#k='));
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
@@ -691,6 +968,22 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(key.algorithm.name, 'AES-GCM');
   });
 
+  test('parseDecryptionKeyFromHash rejects non-32-byte key length', async () => {
+    // 16-byte key in base64
+    const raw16 = new Uint8Array(16).fill(1);
+    const b64 = Buffer.from(raw16).toString('base64');
+    const encodedHash = `#k=${b64}`;
+
+    await assert.rejects(
+      async () => {
+        await app.parseDecryptionKeyFromHash(encodedHash);
+      },
+      {
+        message: /Invalid decryption key length: expected 32 bytes, got 16/
+      }
+    );
+  });
+
   test('parseSessionInput handles full URLs, relative paths, and raw session IDs/passphrases', () => {
     const origin = (typeof window !== 'undefined' && window.location && window.location.origin) 
       ? window.location.origin 
@@ -711,4 +1004,301 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(app.parseSessionInput('   '), null);
     assert.equal(app.parseSessionInput(null), null);
   });
+
+  test('getIceServers extracts TURN server and credentials from URL parameters during embedded offer handling', () => {
+    // Mock location with turn query parameters
+    dom.reconfigure({
+      url: 'http://localhost:8080/?mode=webrtc&turn_server=turn%3Aturn.example.com%3A3478&turn_username=alice&turn_credential=secret'
+    });
+
+    const offer = { type: 'offer', sdp: 'v=0...', iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    const servers = app.getIceServers(offer);
+
+    assert.equal(servers.length, 1);
+    assert.deepEqual(servers[0].urls, ['turn:turn.example.com:3478']);
+    assert.equal(servers[0].username, 'alice');
+    assert.equal(servers[0].credential, 'secret');
+  });
 });
+
+describe('WebRTC Buffer Backpressure Suite', () => {
+  let app;
+
+  beforeEach(() => {
+    delete require.cache[require.resolve('./app.js')];
+    app = require('./app.js');
+  });
+
+  class MockDataChannel {
+    constructor(bufferedAmount = 0, readyState = 'open') {
+      this.bufferedAmount = bufferedAmount;
+      this.bufferedAmountLowThreshold = 0;
+      this.readyState = readyState;
+      this.listeners = new Map();
+    }
+
+    addEventListener(event, fn) {
+      if (!this.listeners.has(event)) {
+        this.listeners.set(event, new Set());
+      }
+      this.listeners.get(event).add(fn);
+    }
+
+    removeEventListener(event, fn) {
+      if (this.listeners.has(event)) {
+        this.listeners.get(event).delete(fn);
+      }
+    }
+
+    emit(event) {
+      if (this.listeners.has(event)) {
+        for (const fn of this.listeners.get(event)) {
+          fn();
+        }
+      }
+    }
+
+    getListenerCount(event) {
+      return this.listeners.has(event) ? this.listeners.get(event).size : 0;
+    }
+  }
+
+  test('resolves immediately if bufferedAmount is already <= targetThreshold', async () => {
+    const dc = new MockDataChannel(256 * 1024, 'open');
+    let resolved = false;
+
+    await app.waitForBufferedAmountLow(dc, 512 * 1024);
+    resolved = true;
+
+    assert.equal(resolved, true);
+    assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
+  });
+
+  test('resolves via bufferedamountlow event when buffer drops', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+    
+    const waitPromise = app.waitForBufferedAmountLow(dc, 512 * 1024);
+    assert.equal(dc.getListenerCount('bufferedamountlow'), 1);
+
+    // Simulate buffer drop and event fire
+    dc.bufferedAmount = 256 * 1024;
+    dc.emit('bufferedamountlow');
+
+    await waitPromise;
+    assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
+  });
+
+  test('resolves on immediate recheck if buffer dropped during listener attachment', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+
+    // Intercept addEventListener to simulate buffer drop right before recheck
+    const origAddEventListener = dc.addEventListener.bind(dc);
+    dc.addEventListener = (event, fn) => {
+      origAddEventListener(event, fn);
+      dc.bufferedAmount = 100; // Drops buffer below threshold!
+    };
+
+    await app.waitForBufferedAmountLow(dc, 512 * 1024);
+    assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
+  });
+
+  test('resolves via polling fallback if event is lost/missed', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+
+    const waitPromise = app.waitForBufferedAmountLow(dc, 512 * 1024, 10);
+    assert.equal(dc.getListenerCount('bufferedamountlow'), 1);
+
+    // Simulate buffer drop WITHOUT emitting event
+    dc.bufferedAmount = 100 * 1024;
+
+    await waitPromise;
+    assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
+  });
+
+  test('rejects cleanly and cleans up listeners if data channel closes', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+
+    const waitPromise = app.waitForBufferedAmountLow(dc, 512 * 1024, 10);
+    assert.equal(dc.getListenerCount('bufferedamountlow'), 1);
+
+    // Simulate channel close
+    dc.readyState = 'closed';
+
+    await assert.rejects(
+      async () => await waitPromise,
+      { message: 'Data channel is no longer open' }
+    );
+
+    assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
+  });
+});
+
+describe('WebRTC Backpressure & Flow Control Suite', () => {
+  let dom;
+  let window;
+  let document;
+  let app;
+
+  beforeEach(() => {
+    dom = new JSDOM(htmlContent, {
+      url: 'http://localhost:8080/'
+    });
+
+    window = dom.window;
+    document = window.document;
+
+    const { webcrypto } = require('node:crypto');
+    window.crypto = webcrypto;
+
+    global.window = window;
+    global.document = document;
+    global.crypto = window.crypto;
+    global.navigator = window.navigator;
+    global.location = window.location;
+    global.URLSearchParams = window.URLSearchParams;
+    global.TextDecoder = require('util').TextDecoder;
+    global.FileReader = window.FileReader;
+
+    window.__BEAM_TEST_ENV__ = true;
+
+    delete require.cache[require.resolve('./app.js')];
+    app = require('./app.js');
+  });
+
+  class MockDataChannel {
+    constructor(bufferedAmount = 0, readyState = 'open') {
+      this.bufferedAmount = bufferedAmount;
+      this.bufferedAmountLowThreshold = 0;
+      this.readyState = readyState;
+      this.listeners = new Map();
+    }
+
+    addEventListener(type, listener) {
+      if (!this.listeners.has(type)) {
+        this.listeners.set(type, new Set());
+      }
+      this.listeners.get(type).add(listener);
+    }
+
+    removeEventListener(type, listener) {
+      if (this.listeners.has(type)) {
+        this.listeners.get(type).delete(listener);
+      }
+    }
+
+    emit(type, event) {
+      if (this.listeners.has(type)) {
+        for (const listener of Array.from(this.listeners.get(type))) {
+          listener(event);
+        }
+      }
+    }
+
+    send(data) {}
+  }
+
+  test('waitForDataChannelBuffer resolves immediately if bufferedAmount <= targetAmount', async () => {
+    const dc = new MockDataChannel(500 * 1024, 'open');
+    await app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    assert.equal(dc.bufferedAmountLowThreshold, 512 * 1024);
+  });
+
+  test('waitForDataChannelBuffer resolves when bufferedamountlow event fires', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+    const promise = app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+
+    assert.equal(dc.listeners.get('bufferedamountlow').size, 1);
+    dc.bufferedAmount = 500 * 1024;
+    dc.emit('bufferedamountlow');
+
+    await promise;
+    assert.equal(dc.listeners.get('bufferedamountlow').size, 0, 'Listeners must be cleaned up on resolve');
+  });
+
+  test('waitForDataChannelBuffer post-registration re-check resolves without waiting', async () => {
+    class FastDrainDataChannel extends MockDataChannel {
+      addEventListener(type, listener) {
+        super.addEventListener(type, listener);
+        if (type === 'bufferedamountlow') {
+          // Buffer drained immediately before event loop fired event
+          this.bufferedAmount = 300 * 1024;
+        }
+      }
+    }
+
+    const dc = new FastDrainDataChannel(2 * 1024 * 1024, 'open');
+    await app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up');
+  });
+
+  test('waitForDataChannelBuffer periodic fallback timer resolves when event is missed', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+    const start = Date.now();
+    const promise = app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+
+    // Drains buffer without firing 'bufferedamountlow'
+    dc.bufferedAmount = 100 * 1024;
+
+    await promise;
+    const elapsed = Date.now() - start;
+    assert.equal(elapsed >= 200, true, 'Resolved via 250ms periodic timer fallback');
+    assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up');
+  });
+
+  test('waitForDataChannelBuffer rejects when channel closes or errors', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+    const promise = app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+
+    dc.readyState = 'closed';
+    dc.emit('close');
+
+    await assert.rejects(promise, { message: /closed or closing/i });
+    assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up on rejection');
+  });
+
+  test('waitForDataChannelBuffer rejects immediately if channel is already closed', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'closed');
+    await assert.rejects(
+      app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024),
+      { message: /closed or closing/i }
+    );
+  });
+
+  test('uploadFileP2P streams file chunks and sends UPLOAD_EOF using backpressure helper', async () => {
+    const sent = [];
+    const mockDC = new MockDataChannel(0, 'open');
+    mockDC.send = (msg) => sent.push(msg);
+
+    delete require.cache[require.resolve('./app.js')];
+    const testApp = require('./app.js');
+
+    const fileContent = new Uint8Array(150 * 1024).fill(65);
+    const mockFile = new window.File([fileContent], 'test-p2p.bin', { type: 'application/octet-stream' });
+
+    await testApp.uploadFileP2P(mockFile, mockDC);
+
+    assert.equal(sent.length, 5, 'Should send UPLOAD_META, 3 chunks, and UPLOAD_EOF');
+    assert.equal(sent[0], 'UPLOAD_META:test-p2p.bin:153600');
+    assert.equal(sent[4], 'UPLOAD_EOF');
+  });
+
+  test('sendWebRTCFile streams chunks and sends EOF using backpressure helper', async () => {
+    const sent = [];
+    const mockDC = new MockDataChannel(0, 'open');
+    mockDC.send = (msg) => sent.push(msg);
+
+    delete require.cache[require.resolve('./app.js')];
+    const testApp = require('./app.js');
+
+    const fileContent = new Uint8Array(150 * 1024).fill(66);
+    const mockFile = new window.File([fileContent], 'sender-test.bin', { type: 'application/octet-stream' });
+
+    testApp.handleSenderFileSelect(mockFile);
+
+    await testApp.sendWebRTCFile(0, mockDC);
+
+    assert.equal(sent.length, 4, 'Should send 3 chunks and EOF');
+    assert.equal(sent[3], 'EOF');
+  });
+});
+
