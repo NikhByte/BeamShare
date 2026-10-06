@@ -2405,10 +2405,16 @@ function handleJoinSession(e) {
   }
 }
 
+function safeFetch(...args) {
+  const f = (typeof window !== 'undefined' && window.fetch) ? window.fetch : fetch;
+  return f(...args);
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 function init() {
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(err => {
+  const swNav = (typeof window !== 'undefined' && window.navigator) ? window.navigator : (typeof navigator !== 'undefined' ? navigator : null);
+  if (swNav && 'serviceWorker' in swNav) {
+    swNav.serviceWorker.register('/sw.js', { scope: '/' }).catch(err => {
       console.warn('Service Worker registration failed:', err);
     });
 
@@ -2416,13 +2422,13 @@ function init() {
       document.documentElement.setAttribute('data-sw-ready', 'true');
     };
 
-    if (navigator.serviceWorker.controller) {
+    if (swNav.serviceWorker.controller) {
       markSwReady();
-    } else if (typeof navigator.serviceWorker.addEventListener === 'function') {
-      navigator.serviceWorker.addEventListener('controllerchange', markSwReady, { once: true });
+    } else if (typeof swNav.serviceWorker.addEventListener === 'function') {
+      swNav.serviceWorker.addEventListener('controllerchange', markSwReady, { once: true });
     }
 
-    navigator.serviceWorker.ready.then(() => {
+    swNav.serviceWorker.ready.then(() => {
       markSwReady();
     }).catch(() => {});
   }
@@ -2604,9 +2610,10 @@ async function bootstrap() {
     try {
       setLoadingSub('Attempting direct local connection…');
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 1500);
+      const timeoutMs = (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) ? 10 : 1500;
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      const res = await safeFetch(`${localURL}/api/meta`, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
@@ -2637,7 +2644,7 @@ async function bootstrap() {
 // ── HTTP mode ─────────────────────────────────────────────────────────────────
 async function fetchMetaAndShowReady() {
   try {
-    const res = await fetch(apiPath('/api/meta'));
+    const res = await safeFetch(apiPath('/api/meta'));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     currentFile = await res.json();
 
@@ -2653,6 +2660,7 @@ async function fetchMetaAndShowReady() {
       setState('ready');
     }
   } catch (err) {
+    if (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) return;
     showError(`Could not reach the sender: ${err.message}`);
   }
 }
@@ -2784,7 +2792,7 @@ async function startHTTPDownload() {
     if (initialOffset > 0) {
       headers['Range'] = `bytes=${initialOffset}-`;
     }
-    const res = await fetch(apiPath('/api/download'), { headers });
+    const res = await safeFetch(apiPath('/api/download'), { headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
     const reader = res.body.getReader();
@@ -2996,7 +3004,7 @@ async function startWebRTC() {
 
   if (!offer) {
     setWebRTCSub('Fetching SDP offer…');
-    const offerRes = await fetch(apiPath('/api/signal/offer'));
+    const offerRes = await safeFetch(apiPath('/api/signal/offer'));
     if (!offerRes.ok) throw new Error(`offer fetch: HTTP ${offerRes.status}`);
     offer = await offerRes.json();
   }
@@ -3007,7 +3015,7 @@ async function startWebRTC() {
   const pc = new RTCPeerConnection({ iceServers });
 
   // Also fetch file meta in parallel.
-  const metaPromise = fetch(apiPath('/api/meta')).then(r => r.json());
+  const metaPromise = safeFetch(apiPath('/api/meta')).then(r => r.json());
 
   await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
@@ -3038,7 +3046,7 @@ async function startWebRTC() {
 
   // 4. POST answer to sender.
   setWebRTCSub('Sending answer to sender…');
-  const answerRes = await fetch(apiPath('/api/signal/answer'), {
+  const answerRes = await safeFetch(apiPath('/api/signal/answer'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(pc.localDescription),
@@ -3049,7 +3057,7 @@ async function startWebRTC() {
   // 5. Fetch and add ICE candidates from sender.
   setWebRTCSub('Exchanging ICE candidates…');
   try {
-    const candRes  = await fetch(apiPath('/api/signal/candidates'));
+    const candRes  = await safeFetch(apiPath('/api/signal/candidates'));
     const cands    = await candRes.json();
     for (const c of cands) {
       await pc.addIceCandidate(new RTCIceCandidate(c));
@@ -3718,7 +3726,8 @@ function showError(msg) {
   if (useOPFS) {
     navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
   }
-  document.getElementById('error-msg').textContent = msg;
+  const errEl = document.getElementById('error-msg');
+  if (errEl) errEl.textContent = msg;
   setState('error');
 }
 
@@ -3758,372 +3767,6 @@ function initSpotlight() {
     card.style.setProperty('--mouse-x', `${((e.clientX - r.left) / r.width * 100)}%`);
     card.style.setProperty('--mouse-y', `${((e.clientY - r.top)  / r.height * 100)}%`);
   });
-}
-
-// ── Local QR Code Generator ───────────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
-(function initGF256() {
-  let x = 1;
-  for (let i = 0; i < 255; i++) {
-    GF256_EXP[i] = x;
-    GF256_EXP[i + 255] = x;
-    GF256_LOG[x] = i;
-    x <<= 1;
-    if (x & 256) x ^= 285;
-  }
-})();
-
-function gfMul(x, y) {
-  if (x === 0 || y === 0) return 0;
-  return GF256_EXP[GF256_LOG[x] + GF256_LOG[y]];
-}
-
-function rsPolyMul(p1, p2) {
-  const result = new Uint8Array(p1.length + p2.length - 1);
-  for (let i = 0; i < p1.length; i++) {
-    for (let j = 0; j < p2.length; j++) {
-      result[i + j] ^= gfMul(p1[i], p2[j]);
-    }
-  }
-  return result;
-}
-
-function rsGenPoly(numEc) {
-  let g = new Uint8Array([1]);
-  for (let i = 0; i < numEc; i++) {
-    g = rsPolyMul(g, new Uint8Array([1, GF256_EXP[i]]));
-  }
-  return g;
-}
-
-function rsComputeSyndromes(data, numEc) {
-  const gen = rsGenPoly(numEc);
-  const msg = new Uint8Array(data.length + numEc);
-  msg.set(data);
-  for (let i = 0; i < data.length; i++) {
-    const coef = msg[i];
-    if (coef !== 0) {
-      for (let j = 0; j < gen.length; j++) {
-        msg[i + j] ^= gfMul(gen[j], coef);
-      }
-    }
-  }
-  return msg.slice(data.length);
-}
-
-const RS_BLOCK_TABLE_L = [
-  [19, 7, 1, 19, 0, 0], [34, 10, 1, 34, 0, 0], [55, 15, 1, 55, 0, 0], [80, 20, 1, 80, 0, 0],
-  [108, 26, 1, 108, 0, 0], [136, 18, 2, 68, 0, 0], [156, 20, 2, 78, 0, 0], [194, 24, 2, 97, 0, 0],
-  [232, 30, 2, 116, 0, 0], [274, 18, 2, 68, 2, 69], [324, 20, 4, 81, 0, 0], [370, 24, 2, 92, 2, 93],
-  [428, 26, 4, 107, 0, 0], [461, 30, 3, 115, 1, 116], [523, 22, 5, 87, 1, 88], [586, 24, 5, 98, 1, 99],
-  [647, 28, 1, 107, 5, 108], [721, 30, 5, 120, 1, 121], [795, 28, 3, 113, 4, 114], [868, 28, 3, 107, 5, 108],
-  [926, 28, 4, 115, 4, 116], [1002, 28, 2, 125, 6, 126], [1091, 30, 4, 121, 5, 122], [1171, 30, 6, 117, 4, 118],
-  [1277, 26, 8, 106, 4, 107], [1367, 28, 10, 114, 2, 115], [1465, 28, 8, 122, 4, 123], [1528, 30, 3, 117, 10, 118],
-  [1628, 30, 7, 116, 7, 117], [1732, 30, 5, 115, 10, 116], [1840, 30, 13, 115, 3, 116], [1952, 30, 17, 115, 0, 0],
-  [2068, 30, 17, 115, 1, 116], [2188, 30, 19, 115, 1, 116], [2303, 30, 6, 115, 14, 116], [2431, 30, 6, 115, 15, 116],
-  [2563, 30, 17, 115, 5, 116], [2699, 30, 4, 115, 19, 116], [2809, 30, 20, 115, 4, 116], [2953, 30, 19, 115, 6, 116]
-];
-
-const ALIGNMENT_POS = [
-  [], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34],
-  [6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50], [6, 30, 54],
-  [6, 32, 58], [6, 34, 62], [6, 26, 46, 66], [6, 26, 48, 70], [6, 26, 50, 74],
-  [6, 30, 54, 78], [6, 30, 56, 82], [6, 30, 58, 86], [6, 34, 62, 90],
-  [6, 28, 50, 72, 94], [6, 26, 50, 74, 98], [6, 30, 54, 78, 102], [6, 28, 54, 80, 106],
-  [6, 32, 58, 84, 110], [6, 30, 58, 86, 114], [6, 34, 62, 90, 118], [6, 26, 50, 74, 98, 122],
-  [6, 30, 54, 78, 102, 126], [6, 26, 52, 78, 104, 130], [6, 30, 56, 82, 108, 134],
-  [6, 34, 60, 86, 112, 138], [6, 30, 58, 86, 114, 142], [6, 34, 62, 90, 118, 146],
-  [6, 30, 54, 78, 102, 126, 150], [6, 24, 50, 76, 102, 128, 154], [6, 28, 54, 80, 106, 132, 158],
-  [6, 32, 58, 84, 110, 136, 162], [6, 26, 54, 82, 110, 138, 166], [6, 30, 58, 86, 114, 142, 170]
-];
-
-function getFormatInfo(ecLevelBit, maskPattern) {
-  const data = (ecLevelBit << 3) | maskPattern;
-  let rem = data << 10;
-  for (let i = 4; i >= 0; i--) {
-    if (rem & (1 << (i + 10))) {
-      rem ^= (0x537 << i);
-    }
-  }
-  return ((data << 10) | rem) ^ 0x5370;
-}
-
-function getVersionInfo(version) {
-  let rem = version << 12;
-  for (let i = 5; i >= 0; i--) {
-    if (rem & (1 << (i + 12))) {
-      rem ^= (0x1F25 << i);
-    }
-  }
-  return (version << 12) | rem;
-}
-
-function generateQRCodeSVG(text) {
-  let bytes;
-  if (typeof TextEncoder !== 'undefined') {
-    bytes = new TextEncoder().encode(text);
-  } else {
-    bytes = new Uint8Array(text.length);
-    for (let i = 0; i < text.length; i++) {
-      bytes[i] = text.charCodeAt(i) & 0xff;
-    }
-  }
-
-  let version = 1;
-  let spec = null;
-  for (let v = 1; v <= 40; v++) {
-    spec = RS_BLOCK_TABLE_L[v - 1];
-    const totalDataCap = spec[0];
-    const headerBits = 4 + (v >= 10 ? 16 : 8);
-    const requiredBits = headerBits + bytes.length * 8;
-    if (requiredBits <= totalDataCap * 8) {
-      version = v;
-      break;
-    }
-  }
-
-  const specCap = spec[0];
-  const ecPerBlock = spec[1];
-  const g1Blocks = spec[2];
-  const g1Data = spec[3];
-  const g2Blocks = spec[4];
-  const g2Data = spec[5];
-  const totalBlocks = g1Blocks + g2Blocks;
-
-  const bits = [];
-  function pushBits(val, count) {
-    for (let i = count - 1; i >= 0; i--) {
-      bits.push((val >> i) & 1);
-    }
-  }
-
-  pushBits(4, 4);
-  pushBits(bytes.length, version >= 10 ? 16 : 8);
-  for (let b of bytes) {
-    pushBits(b, 8);
-  }
-  const totalBitsCap = specCap * 8;
-  const termBits = Math.min(4, totalBitsCap - bits.length);
-  pushBits(0, termBits);
-  while (bits.length % 8 !== 0) {
-    bits.push(0);
-  }
-  const padBytes = [0xEC, 0x11];
-  let padIdx = 0;
-  while (bits.length < totalBitsCap) {
-    pushBits(padBytes[padIdx % 2], 8);
-    padIdx++;
-  }
-
-  const dataCodewords = new Uint8Array(specCap);
-  for (let i = 0; i < specCap; i++) {
-    let byteVal = 0;
-    for (let b = 0; b < 8; b++) {
-      byteVal = (byteVal << 1) | bits[i * 8 + b];
-    }
-    dataCodewords[i] = byteVal;
-  }
-
-  const blocks = [];
-  let cwOffset = 0;
-  for (let b = 0; b < g1Blocks; b++) {
-    const blockData = dataCodewords.slice(cwOffset, cwOffset + g1Data);
-    cwOffset += g1Data;
-    const ec = rsComputeSyndromes(blockData, ecPerBlock);
-    blocks.push({ data: blockData, ec });
-  }
-  for (let b = 0; b < g2Blocks; b++) {
-    const blockData = dataCodewords.slice(cwOffset, cwOffset + g2Data);
-    cwOffset += g2Data;
-    const ec = rsComputeSyndromes(blockData, ecPerBlock);
-    blocks.push({ data: blockData, ec });
-  }
-
-  const finalCodewords = [];
-  const maxDataLen = Math.max(g1Data, g2Data);
-  for (let i = 0; i < maxDataLen; i++) {
-    for (let b = 0; b < totalBlocks; b++) {
-      if (i < blocks[b].data.length) {
-        finalCodewords.push(blocks[b].data[i]);
-      }
-    }
-  }
-  for (let i = 0; i < ecPerBlock; i++) {
-    for (let b = 0; b < totalBlocks; b++) {
-      finalCodewords.push(blocks[b].ec[i]);
-    }
-  }
-
-  const size = version * 4 + 17;
-  const modules = Array.from({ length: size }, () => new Uint8Array(size));
-  const isFunction = Array.from({ length: size }, () => new Uint8Array(size));
-
-  function placeFinder(r, c) {
-    for (let dr = -1; dr <= 7; dr++) {
-      for (let dc = -1; dc <= 7; dc++) {
-        const nr = r + dr;
-        const nc = c + dc;
-        if (nr >= 0 && nr < size && nc >= 0 && nc < size) {
-          isFunction[nr][nc] = 1;
-          if (dr >= 0 && dr <= 6 && dc >= 0 && dc <= 6) {
-            if (dr === 0 || dr === 6 || dc === 0 || dc === 6 || (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4)) {
-              modules[nr][nc] = 1;
-            } else {
-              modules[nr][nc] = 0;
-            }
-          } else {
-            modules[nr][nc] = 0;
-          }
-        }
-      }
-    }
-  }
-  placeFinder(0, 0);
-  placeFinder(0, size - 7);
-  placeFinder(size - 7, 0);
-
-  const alignCoords = ALIGNMENT_POS[version - 1];
-  for (let r of alignCoords) {
-    for (let c of alignCoords) {
-      if (isFunction[r][c]) continue;
-      for (let dr = -2; dr <= 2; dr++) {
-        for (let dc = -2; dc <= 2; dc++) {
-          const nr = r + dr;
-          const nc = c + dc;
-          isFunction[nr][nc] = 1;
-          if (Math.abs(dr) === 2 || Math.abs(dc) === 2 || (dr === 0 && dc === 0)) {
-            modules[nr][nc] = 1;
-          } else {
-            modules[nr][nc] = 0;
-          }
-        }
-      }
-    }
-  }
-
-  for (let i = 8; i < size - 8; i++) {
-    if (!isFunction[6][i]) {
-      isFunction[6][i] = 1;
-      modules[6][i] = (i % 2 === 0) ? 1 : 0;
-    }
-    if (!isFunction[i][6]) {
-      isFunction[i][6] = 1;
-      modules[i][6] = (i % 2 === 0) ? 1 : 0;
-    }
-  }
-
-  isFunction[size - 8][8] = 1;
-  modules[size - 8][8] = 1;
-
-  for (let i = 0; i < 9; i++) {
-    if (i !== 6) {
-      isFunction[8][i] = 1;
-      isFunction[i][8] = 1;
-    }
-  }
-  for (let i = 0; i < 8; i++) {
-    isFunction[8][size - 1 - i] = 1;
-    isFunction[size - 1 - i][8] = 1;
-  }
-
-  if (version >= 7) {
-    for (let r = 0; r < 6; r++) {
-      for (let c = 0; c < 3; c++) {
-        isFunction[r][size - 11 + c] = 1;
-        isFunction[size - 11 + c][r] = 1;
-      }
-    }
-  }
-
-  const flatBits = [];
-  for (let cw of finalCodewords) {
-    for (let i = 7; i >= 0; i--) {
-      flatBits.push((cw >> i) & 1);
-    }
-  }
-
-  let bitIdx = 0;
-  let up = true;
-  for (let right = size - 1; right > 0; right -= 2) {
-    if (right === 6) right--;
-    const rows = [];
-    if (up) {
-      for (let r = size - 1; r >= 0; r--) rows.push(r);
-    } else {
-      for (let r = 0; r < size; r++) rows.push(r);
-    }
-    for (let r of rows) {
-      for (let c of [right, right - 1]) {
-        if (!isFunction[r][c]) {
-          if (bitIdx < flatBits.length) {
-            modules[r][c] = flatBits[bitIdx++];
-          }
-        }
-      }
-    }
-    up = !up;
-  }
-
-  const mask = 0;
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      if (!isFunction[r][c]) {
-        if ((r + c) % 2 === 0) {
-          modules[r][c] ^= 1;
-        }
-      }
-    }
-  }
-
-  const formatInfo = getFormatInfo(1, mask);
-  const formatBits = [];
-  for (let i = 14; i >= 0; i--) {
-    formatBits.push((formatInfo >> i) & 1);
-  }
-
-  const formatCoordsTopLeft = [
-    [8, 0], [8, 1], [8, 2], [8, 3], [8, 4], [8, 5], [8, 7], [8, 8],
-    [7, 8], [5, 8], [4, 8], [3, 8], [2, 8], [1, 8], [0, 8]
-  ];
-  const formatCoordsSplit = [
-    [size - 1, 8], [size - 2, 8], [size - 3, 8], [size - 4, 8], [size - 5, 8], [size - 6, 8], [size - 7, 8],
-    [8, size - 8], [8, size - 7], [8, size - 6], [8, size - 5], [8, size - 4], [8, size - 3], [8, size - 2], [8, size - 1]
-  ];
-
-  for (let i = 0; i < 15; i++) {
-    const [r1, c1] = formatCoordsTopLeft[i];
-    modules[r1][c1] = formatBits[i];
-    const [r2, c2] = formatCoordsSplit[i];
-    modules[r2][c2] = formatBits[i];
-  }
-
-  if (version >= 7) {
-    const verInfo = getVersionInfo(version);
-    for (let i = 0; i < 18; i++) {
-      const bit = (verInfo >> i) & 1;
-      const r1 = Math.floor(i / 3);
-      const c1 = size - 11 + (i % 3);
-      modules[r1][c1] = bit;
-      modules[c1][r1] = bit;
-    }
-  }
-
-  const margin = 4;
-  const totalSize = size + margin * 2;
-  let pathD = "";
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      if (modules[r][c]) {
-        const x = c + margin;
-        const y = r + margin;
-        pathD += `M${x},${y}h1v1h-1z`;
-      }
-    }
-  }
-
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalSize} ${totalSize}" width="100%" height="100%"><rect width="${totalSize}" height="${totalSize}" fill="#ffffff"/><path d="${pathD}" fill="#000000"/></svg>`;
-  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
 }
 
 // ── Format helpers ────────────────────────────────────────────────────────────
@@ -4173,9 +3816,12 @@ let senderEncryptionKey = null;
 function handleSenderFileSelect(file) {
   if (!file) return;
   senderFile = file;
-  document.getElementById('sender-file-name').textContent = file.name;
-  document.getElementById('sender-file-size').textContent = formatBytes(file.size);
-  document.getElementById('sender-file-icon-wrap').innerHTML = mimeIcon(file.type);
+  const nameEl = document.getElementById('sender-file-name');
+  if (nameEl) nameEl.textContent = file.name;
+  const sizeEl = document.getElementById('sender-file-size');
+  if (sizeEl) sizeEl.textContent = formatBytes(file.size);
+  const iconEl = document.getElementById('sender-file-icon-wrap');
+  if (iconEl) iconEl.innerHTML = mimeIcon(file.type);
   setState('send-ready');
 }
 
@@ -4187,7 +3833,7 @@ async function startSenderSharing() {
   const backend = getBackendURL();
 
   try {
-    const regRes = await fetch(`${backend}/relay/register`);
+    const regRes = await safeFetch(`${backend}/relay/register`);
     if (!regRes.ok) throw new Error(`Register failed: HTTP ${regRes.status}`);
     const regData = await regRes.json();
     senderSessionID = regData.session;
@@ -4208,10 +3854,10 @@ async function startSenderSharing() {
     const offer = await senderPeerConnection.createOffer();
     await senderPeerConnection.setLocalDescription(offer);
 
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) ? 10 : 2000));
 
     setLoadingSub('Publishing SDP offer to relay…');
-    const stateRes = await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
+    const stateRes = await safeFetch(`${backend}/relay/state?session=${senderSessionID}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -4244,7 +3890,8 @@ async function startSenderSharing() {
       .replace(/=+/g, '');
     shareURL.hash = `k=${keyB64}`;
 
-    document.getElementById('send-url-input').value = shareURL.href;
+    const urlInput = document.getElementById('send-url-input');
+    if (urlInput) urlInput.value = shareURL.href;
     const sendQrImg = document.getElementById('send-qr-img');
     if (sendQrImg) {
       renderQRCode(shareURL.href, sendQrImg);
@@ -4254,9 +3901,10 @@ async function startSenderSharing() {
       renderQRCode(shareURL.href, sendQrCanvas);
     }
     
-    document.getElementById('send-link-section').classList.remove('hidden');
-    document.getElementById('send-progress-section').classList.add('hidden');
-    document.getElementById('send-status-label').textContent = "Waiting for receiver…";
+    document.getElementById('send-link-section')?.classList.remove('hidden');
+    document.getElementById('send-progress-section')?.classList.add('hidden');
+    const statusLabel = document.getElementById('send-status-label');
+    if (statusLabel) statusLabel.textContent = "Waiting for receiver…";
 
     setMode('sender', 'P2P Sender Mode');
     setState('send-sharing');
@@ -4431,12 +4079,12 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 }
 
 async function startSenderPolling(backend) {
-  if (isSenderPolling) return;
+  if (isSenderPolling || (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__)) return;
   isSenderPolling = true;
 
   while (isSenderPolling && !senderAborted) {
     try {
-      const pollRes = await fetch(`${backend}/relay/poll?session=${senderSessionID}`);
+      const pollRes = await safeFetch(`${backend}/relay/poll?session=${senderSessionID}`);
       if (!pollRes.ok) {
         if (pollRes.status === 404 || pollRes.status === 410) {
           break;
@@ -4543,7 +4191,7 @@ async function receiveFileFromHTTP(backend, filename) {
       return;
     }
 
-    const res = await fetch(url);
+    const res = await safeFetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     
     document.getElementById('send-status-label').textContent = "Downloading file…";
@@ -5033,6 +4681,8 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
+    bootstrap,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     uploadFileP2P,
