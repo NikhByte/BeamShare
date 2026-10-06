@@ -333,10 +333,12 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 	testCases := []struct {
 		name        string
 		claimLength uint32
+		wantErr     error
 	}{
-		{name: "One Byte Over MaxFrameSize", claimLength: MaxFrameSize + 1},
-		{name: "10MB Oversized Frame", claimLength: 10 * 1024 * 1024},
-		{name: "Max Uint32 Oversized Frame", claimLength: 0xFFFFFFFF},
+		{name: "One Byte Over MaxFrameSize", claimLength: MaxFrameSize + 1, wantErr: ErrFrameTooLarge},
+		{name: "10MB Oversized Frame", claimLength: 10 * 1024 * 1024, wantErr: ErrFrameTooLarge},
+		{name: "Max Uint32 Oversized Frame", claimLength: 0xFFFFFFFF, wantErr: ErrFrameTooLarge},
+		{name: "Frame Size Exactly MaxFrameSize", claimLength: MaxFrameSize, wantErr: nil},
 	}
 
 	for _, tc := range testCases {
@@ -351,11 +353,14 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 
 			out := make([]byte, 64)
 			_, err = decReader.Read(out)
-			if err == nil {
-				t.Fatalf("expected error for frame size %d exceeding MaxFrameSize, got nil", tc.claimLength)
-			}
-			if !errors.Is(err, ErrFrameTooLarge) {
-				t.Fatalf("expected ErrFrameTooLarge (%v), got %v", ErrFrameTooLarge, err)
+			if tc.wantErr == ErrFrameTooLarge {
+				if !errors.Is(err, ErrFrameTooLarge) {
+					t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+				}
+			} else {
+				if errors.Is(err, ErrFrameTooLarge) {
+					t.Fatalf("did not expect ErrFrameTooLarge, got %v", err)
+				}
 			}
 		})
 	}

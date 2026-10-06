@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -45,9 +46,32 @@ type Session struct {
 	ctx       context.Context
 	cancel    context.CancelCauseFunc
 	mu        sync.Mutex
+	closed    bool
 
 	pendingDownload *DownloadRequest
 	downloadNotify  chan struct{}
+}
+
+func (s *Session) Close(err error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	if s.cancel != nil {
+		s.cancel(err)
+	}
+	if s.AnswerReady != nil {
+		close(s.AnswerReady)
+	}
+	if s.UploadReq != nil {
+		close(s.UploadReq)
+	}
+	s.closePipesIfMatchLocked(nil, nil, err)
+	s.mu.Unlock()
+
+	s.ClearDownloadQueue()
 }
 
 func (s *Session) EnqueueDownload(req DownloadRequest) bool {
@@ -304,11 +328,7 @@ func (s *Server) SweepExpiredSessions() {
 	s.mu.Unlock()
 
 	for _, sess := range expired {
-		if sess.cancel != nil {
-			sess.cancel(fmt.Errorf("session expired"))
-		}
-		sess.ClosePipes(fmt.Errorf("session expired"))
-		sess.ClearDownloadQueue()
+		sess.Close(fmt.Errorf("session expired"))
 	}
 
 	s.failedAttemptsMu.Lock()
@@ -465,6 +485,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux.HandleFunc("/api/signal/answer", s.handleAnswer)
 	mux.HandleFunc("/api/signal/candidates", s.handleCandidates)
 	mux.HandleFunc("/api/download", s.handleDownload)
+	mux.HandleFunc("/sw-download-pipe/", s.handleDownload)
 	mux.HandleFunc("/api/upload", s.handleUpload)
 
 	// Add support for QR API since app.js requests it (we can just return an empty image or real one)
@@ -581,14 +602,29 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for {
+		var ctxDone <-chan struct{}
+		if sess.ctx != nil {
+			ctxDone = sess.ctx.Done()
+		}
+
 		select {
-		case answer := <-sess.AnswerReady:
+		case answer, ok := <-sess.AnswerReady:
+			if !ok {
+				log.Printf("relay: session %s expired during poll", sess.ID)
+				http.Error(w, "session expired", http.StatusGone)
+				return
+			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"action": "answer",
 				"answer": answer,
 			})
 			return
-		case filename := <-sess.UploadReq:
+		case filename, ok := <-sess.UploadReq:
+			if !ok {
+				log.Printf("relay: session %s expired during poll", sess.ID)
+				http.Error(w, "session expired", http.StatusGone)
+				return
+			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"action":   "upload",
 				"filename": filename,
@@ -599,8 +635,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 				respondWithDownload(w, dlReq)
 				return
 			}
-		case <-sess.ctx.Done():
-			http.Error(w, "not found", http.StatusNotFound)
+		case <-ctxDone:
+			log.Printf("relay: session %s expired during poll", sess.ID)
+			http.Error(w, "session expired", http.StatusGone)
 			return
 		case <-r.Context().Done():
 			return
@@ -885,10 +922,14 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1*1024*1024)
 	body, _ := io.ReadAll(r.Body)
-	select {
-	case sess.AnswerReady <- string(body):
-	default:
+	sess.mu.Lock()
+	if !sess.closed && sess.AnswerReady != nil {
+		select {
+		case sess.AnswerReady <- string(body):
+		default:
+		}
 	}
+	sess.mu.Unlock()
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
@@ -1248,9 +1289,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}()
 
 			// Notify sender
-			select {
-			case sess.UploadReq <- part.FileName():
-			default:
+			if !sess.closed && sess.UploadReq != nil {
+				select {
+				case sess.UploadReq <- part.FileName():
+				default:
+				}
 			}
 
 			// Stream data to pipe
