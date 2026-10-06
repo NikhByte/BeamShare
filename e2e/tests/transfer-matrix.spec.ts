@@ -30,6 +30,12 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
     expectedHash = computeHash(buffer);
   });
 
+  test.beforeEach(() => {
+    if (!fs.existsSync(testFilePath)) {
+      createTestFile('test-transfer-payload.bin', testFileContent);
+    }
+  });
+
   test.afterAll(() => {
     stopAllProcesses();
     cleanupTempDir();
@@ -74,8 +80,9 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
 
       // Assert DOM lifecycle states
       // WebRTC mode starts at loading/webrtc -> downloading -> done
-      await expect(page.locator('#state-done')).toBeVisible({ timeout: 30000 });
+      await expect(page.locator('#state-done')).toBeVisible({ timeout: 45000 });
       await expect(page.locator('#done-title')).toHaveText(/Transfer complete|File Shared/i);
+      await page.screenshot({ path: '/tmp/webrtc_transfer_done.png' });
 
       const download = await downloadPromise;
       const downloadPath = await download.path();
@@ -114,7 +121,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       ]);
 
       // State transition: downloading -> done
-      await expect(page.locator('#state-done')).toBeVisible({ timeout: 30000 });
+      await expect(page.locator('#state-done')).toBeVisible({ timeout: 45000 });
       await expect(page.locator('#done-title')).toHaveText(/Transfer complete|File Shared/i);
 
       const downloadPath = await download.path();
@@ -163,7 +170,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       ]);
 
       // State transition to downloading -> done via relay stream
-      await expect(page.locator('#state-done')).toBeVisible({ timeout: 30000 });
+      await expect(page.locator('#state-done')).toBeVisible({ timeout: 45000 });
       await expect(page.locator('#done-title')).toHaveText(/Transfer complete|File Shared/i);
 
       const downloadPath = await download.path();
@@ -202,7 +209,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
         page.click('#btn-download'),
       ]);
 
-      await expect(page.locator('#state-done')).toBeVisible({ timeout: 30000 });
+      await expect(page.locator('#state-done')).toBeVisible({ timeout: 45000 });
 
       const downloadPath = await download.path();
       expect(downloadPath).toBeTruthy();

@@ -27,7 +27,7 @@ type Server struct {
 	port      int
 	srv       *http.Server
 	mux       *http.ServeMux
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	downloads int
 
 	// Phase 5: Live Pipe
@@ -145,8 +145,8 @@ func (s *Server) CloseLive() {
 
 // GetLiveBacklog returns the accumulated stream buffer.
 func (s *Server) GetLiveBacklog() []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.liveBuf != nil {
 		return s.liveBuf.Bytes()
 	}
@@ -201,8 +201,8 @@ type fileSnapshot struct {
 }
 
 func (s *Server) fileSnapshot() fileSnapshot {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return fileSnapshot{
 		filePath:   s.filePath,
 		fileName:   s.fileName,
@@ -224,7 +224,6 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Private-Network", "true")
 
 	snap := s.fileSnapshot()
-
 	json.NewEncoder(w).Encode(FileMeta{
 		Name: snap.fileName,
 		Size: snap.fileSize,
@@ -256,12 +255,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	if snap.isLivePipe {
-		s.mu.Lock()
+		s.mu.RLock()
 		var data []byte
 		if s.liveBuf != nil {
 			data = s.liveBuf.Bytes()
 		}
-		s.mu.Unlock()
+		s.mu.RUnlock()
 
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, snap.fileName))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
