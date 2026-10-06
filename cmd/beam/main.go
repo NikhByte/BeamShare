@@ -673,6 +673,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	}
 
 	localURL := srv.LocalURL()
+	token := srv.Token()
 
 	// ── Phase 2: mDNS ────────────────────────────────────────────────────────
 	broadcaster := mdns.New("", srv.Port())
@@ -694,7 +695,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
 
-		relayDisplayURL := fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		relayDisplayURL := fmt.Sprintf("%s/?s=%s&token=%s&local=%s", baseHost, relSessionID, token, url.QueryEscape(localURL))
 		if receiverURL != "" {
 			relayDisplayURL += "&backend=" + url.QueryEscape(relayURL)
 		}
@@ -702,7 +703,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		fmt.Printf("    %s    (global relay)\n", relayDisplayURL)
 	} else if receiverURL != "" {
 		baseHost := strings.TrimRight(receiverURL, "/")
-		localDisplayURL := fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+		localDisplayURL := fmt.Sprintf("%s/?token=%s&backend=%s", baseHost, token, url.QueryEscape(localURL))
 		fmt.Printf("    %s    (custom receiver)\n", localDisplayURL)
 	}
 
@@ -715,7 +716,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 		}
 		baseHost = strings.TrimRight(baseHost, "/")
 
-		qrURL = fmt.Sprintf("%s/?s=%s&local=%s", baseHost, relSessionID, url.QueryEscape(localURL))
+		qrURL = fmt.Sprintf("%s/?s=%s&token=%s&local=%s", baseHost, relSessionID, token, url.QueryEscape(localURL))
 		if receiverURL != "" {
 			qrURL += "&backend=" + url.QueryEscape(relayURL)
 		}
@@ -726,14 +727,16 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 	} else {
 		if receiverURL != "" {
 			baseHost := strings.TrimRight(receiverURL, "/")
-			qrURL = fmt.Sprintf("%s/?backend=%s", baseHost, url.QueryEscape(localURL))
+			qrURL = fmt.Sprintf("%s/?token=%s&backend=%s", baseHost, token, url.QueryEscape(localURL))
 			if session != nil {
 				qrURL += fmt.Sprintf("&mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
 			}
 		} else {
 			qrURL = localURL
 			if session != nil {
-				qrURL += fmt.Sprintf("/?mode=webrtc&sdp=%s&timeout=%d", session.CompressedOffer(), discoveryTimeout.Milliseconds())
+				qrURL += fmt.Sprintf("/?token=%s&mode=webrtc&sdp=%s&timeout=%d", token, session.CompressedOffer(), discoveryTimeout.Milliseconds())
+			} else {
+				qrURL += fmt.Sprintf("/?token=%s", token)
 			}
 		}
 	}
@@ -847,14 +850,24 @@ func downloadFile(code string) error {
 	backend = strings.TrimRight(backend, "/")
 
 	s := u.Query().Get("s")
+	token := u.Query().Get("token")
+
 	k := u.Fragment
 	if strings.HasPrefix(k, "k=") {
 		k = k[2:]
 	}
 
-	metaURL := backend + "/api/meta"
+	q := url.Values{}
 	if s != "" {
-		metaURL += "?s=" + s
+		q.Set("s", s)
+	}
+	if token != "" {
+		q.Set("token", token)
+	}
+
+	metaURL := backend + "/api/meta"
+	if len(q) > 0 {
+		metaURL += "?" + q.Encode()
 	}
 
 	fmt.Printf("  %s\n", dimStr("Fetching metadata..."))
@@ -875,8 +888,8 @@ func downloadFile(code string) error {
 	ui.PrintFileMeta(meta.Name, meta.Size)
 
 	downloadURL := backend + "/api/download"
-	if s != "" {
-		downloadURL += "?s=" + s
+	if len(q) > 0 {
+		downloadURL += "?" + q.Encode()
 	}
 
 	fmt.Printf("  %s\n", dimStr("Starting download..."))
