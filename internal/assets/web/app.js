@@ -2662,7 +2662,7 @@ async function bootstrap() {
       let metaProbeUrl = `${localURL}/api/meta`;
       try {
         const lObj = new URL(localURL);
-        const tok = lObj.searchParams.get('token') || lObj.searchParams.get('s') || '';
+        const tok = lObj.searchParams.get('token') || lObj.searchParams.get('s') || params.get('token') || params.get('s') || '';
         const cleanPath = lObj.pathname === '/' ? '' : lObj.pathname.replace(/\/$/, '');
         metaProbeUrl = lObj.origin + cleanPath + '/api/meta';
         if (tok) {
@@ -2767,6 +2767,13 @@ async function parseDecryptionKeyFromHash(hash) {
 
 async function startHTTPDownload() {
   if (!currentFile) return;
+
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.warn("Failed to parse decryption key from hash:", err);
+  }
 
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {
