@@ -2645,7 +2645,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -2674,6 +2676,9 @@ function resetState() {
 }
 
 async function bootstrap() {
+  if (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) {
+    return;
+  }
   const params = new URLSearchParams(window.location.search);
   const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
   let localURL = params.get('local');
@@ -3938,6 +3943,7 @@ async function startSenderSharing() {
     let senderStatePublished = false;
     let candidatePublishTimer = null;
     const publishCandidateUpdate = () => {
+      if (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) return;
       if (!senderStatePublished || candidatePublishTimer !== null) return;
       candidatePublishTimer = setTimeout(async () => {
         candidatePublishTimer = null;
@@ -4190,6 +4196,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 }
 
 async function startSenderPolling(backend) {
+  if (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) return;
   if (isSenderPolling) return;
   isSenderPolling = true;
 
@@ -4862,7 +4869,6 @@ if (typeof module !== 'undefined' && module.exports) {
     extractKeyFragment,
     parseDecryptionKeyFromHash,
     parseSessionInput,
-    getIceServers,
-    init
+    getIceServers
   };
 }
