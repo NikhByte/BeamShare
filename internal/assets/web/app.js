@@ -1,3 +1,27 @@
+function getSessionToken() {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get('token');
+  if (!token) {
+    const backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
+    if (backend && backend.includes('token=')) {
+      try {
+        const u = new URL(backend);
+        token = u.searchParams.get('token');
+      } catch (e) {}
+    }
+  }
+  if (!token) {
+    const local = params.get('local');
+    if (local && local.includes('token=')) {
+      try {
+        const u = new URL(local);
+        token = u.searchParams.get('token');
+      } catch (e) {}
+    }
+  }
+  return token || '';
+}
+
 // ── Client-side QR Code Generator Engine (Zero Network Dependencies) ──────
 var qrcodegen = (function() {
 	function QrCode(version, errorCorrectionLevel, dataCodewords, msk) {
@@ -509,8 +533,13 @@ function getBackendURL() {
       backend = 'https://beamshare.onrender.com';
     }
   }
-  if (backend && backend.endsWith('/')) {
-    backend = backend.slice(0, -1);
+  if (backend) {
+    if (backend.includes('?')) {
+      backend = backend.split('?')[0];
+    }
+    if (backend.endsWith('/')) {
+      backend = backend.slice(0, -1);
+    }
   }
   return backend;
 }
@@ -519,9 +548,13 @@ function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  const token = getSessionToken();
   let fullPath = path;
   if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+    fullPath = fullPath.includes('?') ? fullPath + '&s=' + s : fullPath + '?s=' + s;
+  }
+  if (token && !fullPath.includes('token=')) {
+    fullPath = fullPath.includes('?') ? fullPath + '&token=' + encodeURIComponent(token) : fullPath + '?token=' + encodeURIComponent(token);
   }
   if (backend) {
     return backend + fullPath;
@@ -2178,6 +2211,7 @@ async function getSWPipe(fileMeta) {
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 10000));
     const reg = await Promise.race([swReady, timeout]);
+    if (!reg) return null;
 
     if (!navigator.serviceWorker.controller) {
       await new Promise((resolve) => {
@@ -2190,7 +2224,10 @@ async function getSWPipe(fileMeta) {
           resolve();
         };
         navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
-        setTimeout(resolve, 500);
+        setTimeout(() => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          resolve();
+        }, 5000);
       });
     }
 
@@ -2628,12 +2665,20 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      const token = getSessionToken();
+      let probeBase = localURL;
+      if (probeBase.includes('?')) {
+        probeBase = probeBase.split('?')[0];
+      }
+      if (probeBase.endsWith('/')) probeBase = probeBase.slice(0, -1);
+      const probeUrl = token ? `${probeBase}/api/meta?token=${encodeURIComponent(token)}` : `${probeBase}/api/meta`;
+
+      const res = await fetch(probeUrl, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
         console.log("Local connection successful, using as backend...");
-        window.GAZE_BACKEND_URL = localURL;
+        window.GAZE_BACKEND_URL = probeBase;
         // Do not return, continue to bootstrap flow using localURL as backend
       }
     } catch (e) {
