@@ -4094,10 +4094,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (dc.bufferedAmount > 0) {
+  if (dc && dc.bufferedAmount > 0) {
     await waitForBufferedAmountLow(dc, 0);
   }
-  dc.send("EOF");
+  if (dc) dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
