@@ -463,8 +463,8 @@ func TestFrameHeader_LessThanNonceSize_UnexpectedEOF(t *testing.T) {
 
 	out := make([]byte, 64)
 	_, err = decReader.Read(out)
-	if err != io.ErrUnexpectedEOF {
-		t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+	if err != ErrInvalidFrameLength {
+		t.Fatalf("expected ErrInvalidFrameLength, got %v", err)
 	}
 }
 

@@ -1283,18 +1283,23 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 					case <-done:
 						return
 					default:
-						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("upload context cancelled: %w", r.Context().Err()))
+						if r.Body != nil {
+							r.Body.Close()
+						}
+						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("uploader context cancelled: %w", r.Context().Err()))
 					}
 				}
 			}()
 
 			// Notify sender
+			sess.mu.Lock()
 			if !sess.closed && sess.UploadReq != nil {
 				select {
 				case sess.UploadReq <- part.FileName():
 				default:
 				}
 			}
+			sess.mu.Unlock()
 
 			// Stream data to pipe
 			_, uploadErr = io.Copy(pw, part)
@@ -1306,11 +1311,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}
 			pw.Close()
 			part.Close()
-
-			if uploadErr != nil {
-				http.Error(w, fmt.Sprintf("upload error: %v", uploadErr), http.StatusInternalServerError)
-				return
-			}
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})
