@@ -78,9 +78,10 @@ test.describe('Client-Side QR Code Rendering & Privacy E2E Tests', () => {
     await page.waitForSelector('#btn-start-share:not([disabled])');
     await page.click('#btn-start-share');
 
-    // Wait for QR code image to appear
+    // Wait for QR code element to appear
+    const qrCanvas = page.locator('#send-qr-canvas');
     const qrImg = page.locator('#send-qr-img');
-    await expect(qrImg).toBeVisible();
+    await expect(page.locator('#send-qr-canvas, #send-qr-img').filter({ hasText: '' }).locator('visible=true')).toBeVisible();
 
     // Verify image source is a local data URI
     const src = await qrImg.getAttribute('src');
