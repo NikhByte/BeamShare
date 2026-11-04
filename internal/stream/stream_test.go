@@ -251,10 +251,15 @@ func TestStreamManager_DeterministicEOFFlush(t *testing.T) {
 
 	done := make(chan struct{})
 
+	firstChunkSent := make(chan struct{})
+	var once sync.Once
 	// Hook into Send to track when buffer clears and EOF is sent
 	dc.sendHook = func(data []byte) {
 		// Simulation: when chunks are sent, simulate buffered data in DataChannel
 		dc.bufferedAmount = 500 * 1024
+		once.Do(func() {
+			close(firstChunkSent)
+		})
 	}
 
 	opts := StreamOptions{
@@ -269,6 +274,12 @@ func TestStreamManager_DeterministicEOFFlush(t *testing.T) {
 	}
 
 	mgr.StartStream(context.Background(), dc, opts)
+
+	select {
+	case <-firstChunkSent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for first chunk to be sent")
+	}
 
 	// Wait 50ms while bufferedAmount is 500KB
 	time.Sleep(50 * time.Millisecond)

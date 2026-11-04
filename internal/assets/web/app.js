@@ -518,13 +518,42 @@ function getBackendURL() {
 function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
+  const token = params.get('token');
   const s = params.get('s');
-  let fullPath = path;
-  if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
-  }
+
+  let backendToken = '';
   if (backend) {
-    return backend + fullPath;
+    try {
+      let bUrlStr = backend;
+      if (!bUrlStr.startsWith('http://') && !bUrlStr.startsWith('https://')) {
+        bUrlStr = (typeof window !== 'undefined' && window.location ? window.location.protocol : 'http:') + '//' + bUrlStr;
+      }
+      const bUrl = new URL(bUrlStr);
+      backendToken = bUrl.searchParams.get('token') || bUrl.searchParams.get('s') || '';
+    } catch (e) {}
+  }
+
+  const activeToken = token || backendToken;
+
+  let fullPath = path;
+  if (activeToken) {
+    fullPath = path.includes('?') ? path + '&token=' + encodeURIComponent(activeToken) : path + '?token=' + encodeURIComponent(activeToken);
+  } else if (s) {
+    fullPath = path.includes('?') ? path + '&s=' + encodeURIComponent(s) : path + '?s=' + encodeURIComponent(s);
+  }
+
+  if (backend) {
+    try {
+      let bUrlStr = backend;
+      if (!bUrlStr.startsWith('http://') && !bUrlStr.startsWith('https://')) {
+        bUrlStr = (typeof window !== 'undefined' && window.location ? window.location.protocol : 'http:') + '//' + bUrlStr;
+      }
+      const bUrl = new URL(bUrlStr);
+      const cleanPath = bUrl.pathname === '/' ? '' : bUrl.pathname.replace(/\/$/, '');
+      return bUrl.origin + cleanPath + fullPath;
+    } catch (e) {
+      return backend + fullPath;
+    }
   }
   return fullPath;
 }
@@ -2563,7 +2592,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -2628,7 +2659,17 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      let metaProbeUrl = `${localURL}/api/meta`;
+      try {
+        const lObj = new URL(localURL);
+        const tok = lObj.searchParams.get('token') || lObj.searchParams.get('s') || params.get('token') || params.get('s') || '';
+        const cleanPath = lObj.pathname === '/' ? '' : lObj.pathname.replace(/\/$/, '');
+        metaProbeUrl = lObj.origin + cleanPath + '/api/meta';
+        if (tok) {
+          metaProbeUrl += '?token=' + encodeURIComponent(tok);
+        }
+      } catch (e) {}
+      const res = await fetch(metaProbeUrl, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
@@ -2726,6 +2767,13 @@ async function parseDecryptionKeyFromHash(hash) {
 
 async function startHTTPDownload() {
   if (!currentFile) return;
+
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.warn("Failed to parse decryption key from hash:", err);
+  }
 
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {
