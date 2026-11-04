@@ -41,7 +41,62 @@ type Broadcaster struct {
 	port           int
 	server         Registrar
 	registerFunc   RegisterFunc
+	ifacesFunc     func() ([]net.Interface, error)
+	addrsFunc      func(net.Interface) ([]net.Addr, error)
 	interfacesFunc InterfacesFunc
+}
+
+func defaultIfaceAddrs(iface net.Interface) ([]net.Addr, error) {
+	return iface.Addrs()
+}
+
+// FilterActiveInterfaces filters network interfaces for active status (FlagUp),
+// multicast capability (FlagMulticast), non-loopback flags (FlagLoopback == 0),
+// and valid IP address assignment.
+func FilterActiveInterfaces(ifaces []net.Interface, addrsFn func(net.Interface) ([]net.Addr, error)) []net.Interface {
+	if addrsFn == nil {
+		addrsFn = defaultIfaceAddrs
+	}
+	var active []net.Interface
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			log.Printf("[DEBUG] skipping interface %s: interface is down", iface.Name)
+			continue
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			log.Printf("[DEBUG] skipping interface %s: loopback interface", iface.Name)
+			continue
+		}
+		if iface.Flags&net.FlagMulticast == 0 {
+			log.Printf("[DEBUG] skipping interface %s: missing multicast flag", iface.Name)
+			continue
+		}
+		addrs, err := addrsFn(iface)
+		if err != nil || len(addrs) == 0 {
+			log.Printf("[DEBUG] skipping interface %s: no addresses found", iface.Name)
+			continue
+		}
+		hasValidIP := false
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip != nil && !ip.IsUnspecified() && !ip.IsLoopback() {
+				hasValidIP = true
+				break
+			}
+		}
+		if hasValidIP {
+			active = append(active, iface)
+		} else {
+			log.Printf("[DEBUG] skipping interface %s: no valid non-loopback/unspecified IP", iface.Name)
+		}
+	}
+	return active
 }
 
 // ActiveInterfaces returns network interfaces that are UP, non-loopback,
@@ -51,46 +106,7 @@ func ActiveInterfaces() ([]net.Interface, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list network interfaces: %w", err)
 	}
-	return filterInterfaces(ifaces, func(iface net.Interface) ([]net.Addr, error) {
-		return iface.Addrs()
-	})
-}
-
-func filterInterfaces(ifaces []net.Interface, getAddrs func(net.Interface) ([]net.Addr, error)) ([]net.Interface, error) {
-	var active []net.Interface
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagMulticast == 0 {
-			continue
-		}
-		addrs, err := getAddrs(iface)
-		if err != nil || len(addrs) == 0 {
-			continue
-		}
-		hasIP := false
-		for _, a := range addrs {
-			var ip net.IP
-			switch v := a.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			default:
-				ipStr := a.String()
-				if host, _, err := net.ParseCIDR(ipStr); err == nil {
-					ip = host
-				} else {
-					ip = net.ParseIP(ipStr)
-				}
-			}
-			if ip != nil && !ip.IsUnspecified() {
-				hasIP = true
-				break
-			}
-		}
-		if hasIP {
-			active = append(active, iface)
-		}
-	}
+	active := FilterActiveInterfaces(ifaces, defaultIfaceAddrs)
 	if len(active) == 0 {
 		return nil, errors.New("no active multicast network interfaces found")
 	}
@@ -119,7 +135,13 @@ func NewWithRegister(hostname string, port int, registerFunc RegisterFunc) *Broa
 	if registerFunc == nil {
 		registerFunc = defaultRegister
 	}
-	return &Broadcaster{hostname: hostname, port: port, registerFunc: registerFunc}
+	return &Broadcaster{
+		hostname:     hostname,
+		port:         port,
+		registerFunc: registerFunc,
+		ifacesFunc:   net.Interfaces,
+		addrsFunc:    defaultIfaceAddrs,
+	}
 }
 
 func defaultRegister(instance, service, domain string, port int, text []string, ifaces []net.Interface) (Registrar, error) {
@@ -139,42 +161,34 @@ func (b *Broadcaster) LocalName() string { return b.hostname + ".local" }
 // SetInterfacesFunc sets a custom network interface enumerator (for mocking/testing).
 func (b *Broadcaster) SetInterfacesFunc(fn InterfacesFunc) {
 	b.interfacesFunc = fn
+	b.ifacesFunc = fn
 }
 
 // Start begins advertising the Beam service via mDNS.
 // It is non-blocking; call Stop() to deregister.
 func (b *Broadcaster) Start() error {
-	ifacesFunc := b.interfacesFunc
-	if ifacesFunc == nil {
-		ifacesFunc = ActiveInterfaces
+	ifacesFn := b.ifacesFunc
+	if ifacesFn == nil && b.interfacesFunc != nil {
+		ifacesFn = b.interfacesFunc
+	}
+	if ifacesFn == nil {
+		ifacesFn = net.Interfaces
+	}
+	addrsFn := b.addrsFunc
+	if addrsFn == nil {
+		addrsFn = defaultIfaceAddrs
 	}
 
-	ifaces, err := ifacesFunc()
+	ifaces, err := ifacesFn()
 	if err != nil {
 		log.Printf("[DEBUG] failed to list network interfaces: %v", err)
 		return fmt.Errorf("mdns interfaces: %w", err)
 	}
 
-	var validIfaces []net.Interface
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 {
-			log.Printf("[DEBUG] skipping interface %s: interface is down", iface.Name)
-			continue
-		}
-		if iface.Flags&net.FlagMulticast == 0 {
-			log.Printf("[DEBUG] skipping interface %s: missing multicast flag", iface.Name)
-			continue
-		}
-		if iface.Flags&net.FlagLoopback != 0 {
-			log.Printf("[DEBUG] skipping interface %s: loopback interface", iface.Name)
-			continue
-		}
-		validIfaces = append(validIfaces, iface)
-	}
-
-	if len(validIfaces) == 0 {
+	activeIfaces := FilterActiveInterfaces(ifaces, addrsFn)
+	if len(activeIfaces) == 0 {
 		log.Printf("[DEBUG] no active multicast-capable interfaces found for mDNS")
-		return fmt.Errorf("no active multicast interfaces found")
+		return fmt.Errorf("mdns register: no active multicast network interfaces available")
 	}
 
 	// TXT record: clients can read the Beam version from it.
@@ -191,7 +205,7 @@ func (b *Broadcaster) Start() error {
 		Domain,
 		b.port,
 		txtRecords,
-		validIfaces,
+		activeIfaces,
 	)
 	if err != nil {
 		return fmt.Errorf("mdns register: %w", err)
