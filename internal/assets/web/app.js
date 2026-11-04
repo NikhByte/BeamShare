@@ -423,15 +423,29 @@ function renderQRCode(arg1, arg2, options = {}) {
     text = arg2;
   }
 
-  if (!text || !targetElement) return;
+  if (!text || !targetElement) return false;
 
-  const rawSvg = generateQRCodeSVG(text);
-  const svgStr = rawSvg.replace('<path fill="#000000" d=', '<path d=');
   const tag = targetElement.tagName ? targetElement.tagName.toLowerCase() : '';
 
-  if (tag === 'img') {
-    targetElement.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
-  } else if (tag === 'svg') {
+  try {
+    if (tag === 'canvas' && typeof window !== 'undefined' && typeof window.QRious === 'function') {
+      new window.QRious({
+        element: targetElement,
+        value: text,
+        size: Math.min(targetElement.width || 256, targetElement.height || 256),
+        level: 'M',
+        padding: 8
+      });
+      return true;
+    }
+
+    const rawSvg = generateQRCodeSVG(text);
+    const svgStr = rawSvg.replace('<path fill="#000000" d=', '<path d=');
+
+    if (tag === 'img') {
+      targetElement.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
+      return true;
+    } else if (tag === 'svg') {
     const vbMatch = svgStr.match(/viewBox="([^"]+)"/);
     if (vbMatch) {
       targetElement.setAttribute('viewBox', vbMatch[1]);
@@ -440,6 +454,7 @@ function renderQRCode(arg1, arg2, options = {}) {
     if (innerMatch) {
       targetElement.innerHTML = innerMatch[1];
     }
+      return true;
   } else if (tag === 'canvas') {
     targetElement.width = targetElement.width || 256;
     targetElement.height = targetElement.height || 256;
@@ -448,34 +463,41 @@ function renderQRCode(arg1, arg2, options = {}) {
       try {
         const qr = qrc.QrCode.encodeText(text, qrc.QrCode.Ecc.MEDIUM);
         renderQRToCanvas(qr, targetElement, 4);
+        return true;
       } catch (e) {
-        const ctx = targetElement.getContext ? targetElement.getContext('2d') : null;
-        if (ctx) {
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, targetElement.width, targetElement.height);
-        }
-      }
-    } else {
-      const ctx = targetElement.getContext ? targetElement.getContext('2d') : null;
-      if (ctx) {
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, targetElement.width, targetElement.height);
+        console.warn('Canvas QR rendering failed; using image fallback.', e);
       }
     }
   } else {
     targetElement.innerHTML = svgStr;
+    return true;
   }
+  } catch (error) {
+    console.error('QR rendering failed:', error);
+  }
+  return false;
 }
 
 function renderQRElements(url, canvasId, imgId) {
   const canvasEl = document.getElementById(canvasId);
-  if (canvasEl) {
-    renderQRCode(url, canvasEl);
-  }
   const imgEl = document.getElementById(imgId);
-  if (imgEl) {
-    renderQRCode(url, imgEl);
+  let canvasRendered = false;
+  if (canvasEl) {
+    canvasRendered = renderQRCode(url, canvasEl);
   }
+  const imageRendered = imgEl ? renderQRCode(url, imgEl) : false;
+
+  if (canvasEl) {
+    canvasEl.classList.toggle('hidden', !canvasRendered);
+    canvasEl.style.display = canvasRendered ? 'block' : 'none';
+  }
+  if (imgEl) {
+    const useImageFallback = !canvasRendered && imageRendered;
+    imgEl.classList.toggle('hidden', !useImageFallback);
+    imgEl.style.display = useImageFallback ? 'block' : 'none';
+  }
+
+  return canvasRendered || imageRendered;
 }
 
 function getBackendURL() {
@@ -3698,11 +3720,8 @@ function showDone(name, size, mode) {
     }
     currentShareURL = shareLink;
 
-    // Load QR SVG data URL locally without external network requests
-    const qrImg = document.getElementById('done-qr-img');
-    if (qrImg) {
-      qrImg.src = generateQRCodeDataURL(shareLink);
-    }
+    // Render into the visible canvas, with the image as an automatic fallback.
+    renderQRElements(shareLink, 'done-qr-canvas', 'done-qr-img');
     
     if (doneShare) doneShare.classList.remove('hidden');
   } else {
@@ -3830,10 +3849,29 @@ async function startSenderSharing() {
     senderPeerConnection = new RTCPeerConnection({ iceServers: getIceServers({}) });
     
     const localCandidates = [];
+    let senderStatePublished = false;
+    let candidatePublishTimer = null;
+    const publishCandidateUpdate = () => {
+      if (!senderStatePublished || candidatePublishTimer !== null) return;
+      candidatePublishTimer = setTimeout(async () => {
+        candidatePublishTimer = null;
+        try {
+          await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ candidates: localCandidates })
+          });
+        } catch (error) {
+          console.warn('Unable to publish updated ICE candidates:', error);
+        }
+      }, 50);
+    };
+
     senderPeerConnection.onicecandidate = (e) => {
       if (e.candidate) {
         localCandidates.push(e.candidate.toJSON());
       }
+      publishCandidateUpdate();
     };
 
     senderDataChannel = senderPeerConnection.createDataChannel("beamshare", { ordered: true });
@@ -3842,7 +3880,9 @@ async function startSenderSharing() {
     const offer = await senderPeerConnection.createOffer();
     await senderPeerConnection.setLocalDescription(offer);
 
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Publish as soon as the first usable route is available. Later candidates
+    // are pushed to the relay instead of blocking QR display.
+    await waitForInitialICECandidate(senderPeerConnection, localCandidates);
 
     setLoadingSub('Publishing SDP offer to relay…');
     const stateRes = await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
@@ -3859,6 +3899,8 @@ async function startSenderSharing() {
       })
     });
     if (!stateRes.ok) throw new Error(`Publish state failed: HTTP ${stateRes.status}`);
+    senderStatePublished = true;
+    publishCandidateUpdate();
 
     const shareURL = new URL(window.location.origin);
     shareURL.searchParams.set('s', senderSessionID);
@@ -3879,13 +3921,8 @@ async function startSenderSharing() {
     shareURL.hash = `k=${keyB64}`;
 
     document.getElementById('send-url-input').value = shareURL.href;
-    const sendQrImg = document.getElementById('send-qr-img');
-    if (sendQrImg) {
-      renderQRCode(shareURL.href, sendQrImg);
-    }
-    const sendQrCanvas = document.getElementById('send-qr-canvas');
-    if (sendQrCanvas) {
-      renderQRCode(shareURL.href, sendQrCanvas);
+    if (!renderQRElements(shareURL.href, 'send-qr-canvas', 'send-qr-img')) {
+      throw new Error('Could not generate the sharing QR code');
     }
     
     document.getElementById('send-link-section').classList.remove('hidden');
@@ -4662,6 +4699,40 @@ function generateQRCodeDataURL(text) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
+function waitForInitialICECandidate(peerConnection, candidates, timeoutMs = 750) {
+  if (!peerConnection || peerConnection.iceGatheringState === undefined ||
+      peerConnection.iceGatheringState === 'complete' || candidates.length > 0) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      peerConnection.removeEventListener('icecandidate', onCandidate);
+      peerConnection.removeEventListener('icegatheringstatechange', onStateChange);
+      resolve();
+    };
+    const onCandidate = (event) => {
+      if (event.candidate || peerConnection.iceGatheringState === 'complete') finish();
+    };
+    const onStateChange = () => {
+      if (peerConnection.iceGatheringState === 'complete') finish();
+    };
+
+    if (typeof peerConnection.addEventListener !== 'function') {
+      finish();
+      return;
+    }
+    peerConnection.addEventListener('icecandidate', onCandidate);
+    peerConnection.addEventListener('icegatheringstatechange', onStateChange);
+    timer = setTimeout(finish, timeoutMs);
+  });
+}
+
 function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark = 512 * 1024, pollMs = 25) {
   const targetThreshold = (typeof lowWatermark === 'number') ? lowWatermark : highWatermark;
   return waitForBufferedAmountLow(dc, targetThreshold, pollMs);
@@ -4672,6 +4743,7 @@ if (typeof module !== 'undefined' && module.exports) {
     init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
+    waitForInitialICECandidate,
     uploadFileP2P,
     sendWebRTCFile,
     generateQRCodeSVG,
@@ -4693,6 +4765,8 @@ if (typeof module !== 'undefined' && module.exports) {
     stripAnsi,
     parseAnsiToHtml,
     renderQRCode,
+    renderQRElements,
+    showDone,
     handleSenderFileSelect,
     startSenderSharing,
     get_senderEncryptionKey: () => senderEncryptionKey,
@@ -4702,6 +4776,7 @@ if (typeof module !== 'undefined' && module.exports) {
     extractKeyFragment,
     parseDecryptionKeyFromHash,
     parseSessionInput,
-    getIceServers
+    getIceServers,
+    init
   };
 }
