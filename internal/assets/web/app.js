@@ -512,6 +512,9 @@ function getBackendURL() {
   if (backend && backend.endsWith('/')) {
     backend = backend.slice(0, -1);
   }
+  if (backend.includes('?')) {
+    backend = backend.split('?')[0];
+  }
   return backend;
 }
 
@@ -519,9 +522,30 @@ function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  let token = params.get('token') || params.get('t');
+  if (!token && params.get('local')) {
+    try {
+      const localUrl = new URL(params.get('local'));
+      token = localUrl.searchParams.get('token') || localUrl.searchParams.get('t');
+    } catch (e) {}
+  }
+  if (!token && params.get('backend')) {
+    try {
+      const backendUrl = new URL(params.get('backend'));
+      token = backendUrl.searchParams.get('token') || backendUrl.searchParams.get('t');
+    } catch (e) {}
+  }
   let fullPath = path;
+  let q = [];
   if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+    q.push('s=' + encodeURIComponent(s));
+  }
+  if (token) {
+    q.push('token=' + encodeURIComponent(token));
+  }
+  if (q.length > 0) {
+    const sep = path.includes('?') ? '&' : '?';
+    fullPath = path + sep + q.join('&');
   }
   if (backend) {
     return backend + fullPath;
@@ -2563,7 +2587,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window !== 'undefined' && !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -2628,7 +2654,12 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      let localMetaURL = `${localURL}/api/meta`;
+      try {
+        const lu = new URL(localURL);
+        localMetaURL = `${lu.origin}/api/meta${lu.search}`;
+      } catch (e) {}
+      const res = await fetch(localMetaURL, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
@@ -2811,7 +2842,15 @@ async function startHTTPDownload() {
 
     const reader = res.body.getReader();
     let received = initialOffset;
+    let decryptionKey = null;
     let encBuffer = new Uint8Array(0);
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch(e) {
+      console.error("Failed to import decryption key", e);
+      showError("Decryption key error: " + e.message);
+      return;
+    }
 
     while (true) {
       const { done, value } = await reader.read();
@@ -4323,6 +4362,7 @@ const GF256_LOG = new Uint8Array(256);
   }
 })();
 
+
 function gfMul(x, y) {
   if (x === 0 || y === 0) return 0;
   return GF256_EXP[GF256_LOG[x] + GF256_LOG[y]];
@@ -4750,6 +4790,7 @@ if (typeof module !== 'undefined' && module.exports) {
     WebRTCStreamDecrypter,
     decompressOffer,
     setState,
+    init,
     renderFileCard,
     updateProgress,
     VirtualLogViewer,
@@ -4773,7 +4814,6 @@ if (typeof module !== 'undefined' && module.exports) {
     extractKeyFragment,
     parseDecryptionKeyFromHash,
     parseSessionInput,
-    getIceServers,
-    init
+    getIceServers
   };
 }
