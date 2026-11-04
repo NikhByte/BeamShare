@@ -198,6 +198,8 @@ describe('Gaze Web Receiver Test Suite', () => {
   });
 
   test('Service Worker Registration & data-sw-ready attribute', async () => {
+    const origFetch = global.fetch;
+    global.fetch = window.fetch = async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
     let readyResolver;
     const readyPromise = new Promise(resolve => { readyResolver = resolve; });
     const mockSW = {
@@ -235,6 +237,7 @@ describe('Gaze Web Receiver Test Suite', () => {
     if (typeof global.navigator !== 'undefined') {
       delete global.navigator.serviceWorker;
     }
+    global.fetch = window.fetch = origFetch;
   });
 
   test('Render File Metadata Card', () => {
