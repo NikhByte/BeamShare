@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"runtime"
 	"testing"
 )
 
@@ -337,6 +338,7 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 	}{
 		{name: "One Byte Over MaxFrameSize", claimLength: MaxFrameSize + 1, wantErr: ErrFrameTooLarge},
 		{name: "10MB Oversized Frame", claimLength: 10 * 1024 * 1024, wantErr: ErrFrameTooLarge},
+		{name: "1GB Frame Header", claimLength: 1024 * 1024 * 1024, wantErr: ErrFrameTooLarge},
 		{name: "Max Uint32 Oversized Frame", claimLength: 0xFFFFFFFF, wantErr: ErrFrameTooLarge},
 		{name: "Frame Size Exactly MaxFrameSize", claimLength: MaxFrameSize, wantErr: nil},
 	}
@@ -463,8 +465,8 @@ func TestFrameHeader_LessThanNonceSize_UnexpectedEOF(t *testing.T) {
 
 	out := make([]byte, 64)
 	_, err = decReader.Read(out)
-	if err != io.ErrUnexpectedEOF {
-		t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+	if err != io.ErrUnexpectedEOF && !errors.Is(err, ErrInvalidFrameLength) {
+		t.Fatalf("expected io.ErrUnexpectedEOF or ErrInvalidFrameLength, got %v", err)
 	}
 }
 
@@ -722,5 +724,38 @@ func TestBufferReuseZeroAllocations(t *testing.T) {
 
 	if allocs > 0 {
 		t.Fatalf("expected 0 heap allocations per frame Read call, got %f", allocs)
+	}
+}
+
+func TestMemoryFlatOnOversizedFrameHeader(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, uint32(1024*1024*1024))
+
+	decReader, err := NewDecryptingReader(buf, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	runtime.GC()
+	var mBefore runtime.MemStats
+	runtime.ReadMemStats(&mBefore)
+
+	out := make([]byte, 64)
+	_, err = decReader.Read(out)
+	if !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+	}
+
+	var mAfter runtime.MemStats
+	runtime.ReadMemStats(&mAfter)
+
+	allocated := mAfter.TotalAlloc - mBefore.TotalAlloc
+	if allocated > 1024*1024 {
+		t.Fatalf("excessive heap memory allocated (%d bytes) when processing oversized frame header", allocated)
 	}
 }
