@@ -398,6 +398,10 @@ function renderQRCode(arg1, arg2, options = {}) {
   let text = null;
   let targetElement = null;
 
+  if (arguments.length === 1 && typeof arg1 === 'string') {
+    return generateClientQRCodeDataURL(arg1);
+  }
+
   if (arg1 && typeof arg1 === 'object') {
     targetElement = arg1;
     text = arg2;
@@ -2291,10 +2295,6 @@ function checkRamWarning(size) {
     abortBtn.addEventListener('click', onAbort);
     proceedBtn.addEventListener('click', onProceed);
   });
-}
-
-function renderQRCode(text) {
-  return generateClientQRCodeDataURL(text);
 }
 
 function generateClientQRCodeDataURL(text) {
