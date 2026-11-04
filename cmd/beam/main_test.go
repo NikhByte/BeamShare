@@ -203,6 +203,7 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 
 		var (
 			senderCancel context.CancelFunc
+			senderDone   chan struct{}
 			senderMu     sync.Mutex
 		)
 
@@ -231,11 +232,22 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 				if senderCancel != nil {
 					senderCancel()
 				}
+				prevDone := senderDone
+				done := make(chan struct{})
+				senderDone = done
 				var ctx context.Context
 				ctx, senderCancel = context.WithCancel(mainCtx)
 				senderMu.Unlock()
 
-				go func(ctx context.Context) {
+				go func(ctx context.Context, done chan struct{}, prevDone chan struct{}) {
+					defer close(done)
+					if prevDone != nil {
+						<-prevDone
+					}
+					if ctx.Err() != nil {
+						return
+					}
+
 					file, err := os.Open(filePath)
 					if err != nil {
 						return
@@ -312,7 +324,7 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 					}
 
 					dc.SendText("EOF")
-				}(ctx)
+				}(ctx, done, prevDone)
 			}
 		})
 	}
