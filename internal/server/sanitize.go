@@ -1,7 +1,7 @@
 package server
 
 import (
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -22,7 +22,7 @@ func SanitizeFilename(name string, fallback ...string) string {
 	clean = strings.ReplaceAll(clean, "\\", "/")
 
 	// Extract base name after cleaning path
-	clean = filepath.Base(filepath.Clean(clean))
+	clean = path.Base(path.Clean(clean))
 
 	// Trim remaining null bytes, dots, slashes, backslashes, and surrounding spaces
 	clean = strings.Trim(clean, "\x00./\\ \t\r\n")

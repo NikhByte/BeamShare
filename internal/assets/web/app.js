@@ -500,6 +500,67 @@ function renderQRElements(url, canvasId, imgId) {
   return canvasRendered || imageRendered;
 }
 
+function waitForDataChannelBuffer(dc, maxBuffered = 1024 * 1024, targetBuffered = 512 * 1024) {
+  if (!dc || dc.readyState === 'closed' || dc.readyState === 'closing') {
+    return Promise.reject(new Error('DataChannel is closed or closing'));
+  }
+  try {
+    dc.bufferedAmountLowThreshold = targetBuffered;
+  } catch (e) {}
+
+  if (dc.bufferedAmount <= targetBuffered) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    let timer = null;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (dc.removeEventListener) {
+        dc.removeEventListener('bufferedamountlow', onLow);
+        dc.removeEventListener('close', onClose);
+        dc.removeEventListener('error', onClose);
+      }
+    };
+
+    const onLow = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error('DataChannel closed or closing'));
+    };
+
+    if (dc.addEventListener) {
+      dc.addEventListener('bufferedamountlow', onLow);
+      dc.addEventListener('close', onClose);
+      dc.addEventListener('error', onClose);
+    }
+
+    if (dc.bufferedAmount <= targetBuffered) {
+      cleanup();
+      resolve();
+      return;
+    }
+
+    timer = setTimeout(() => {
+      if (dc.readyState === 'closed' || dc.readyState === 'closing') {
+        cleanup();
+        reject(new Error('DataChannel closed or closing'));
+      } else if (dc.bufferedAmount <= targetBuffered) {
+        cleanup();
+        resolve();
+      } else {
+        cleanup();
+        resolve();
+      }
+    }, 250);
+  });
+}
+
 function getBackendURL() {
   const params = new URLSearchParams(window.location.search);
   let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
@@ -509,19 +570,40 @@ function getBackendURL() {
       backend = 'https://beamshare.onrender.com';
     }
   }
+  if (backend.includes('?')) {
+    backend = backend.split('?')[0];
+  }
   if (backend && backend.endsWith('/')) {
     backend = backend.slice(0, -1);
   }
   return backend;
 }
 
+function getSessionToken() {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get('token') || params.get('t');
+  if (token) return token;
+
+  let backend = params.get('backend') || params.get('b') || params.get('local') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
+  if (backend && backend.includes('?')) {
+    const q = backend.split('?')[1];
+    const bParams = new URLSearchParams(q);
+    token = bParams.get('token') || bParams.get('t');
+  }
+  return token || '';
+}
+
 function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  const token = getSessionToken();
   let fullPath = path;
   if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+    fullPath = fullPath.includes('?') ? fullPath + '&s=' + s : fullPath + '?s=' + s;
+  }
+  if (token) {
+    fullPath = fullPath.includes('?') ? fullPath + '&token=' + encodeURIComponent(token) : fullPath + '?token=' + encodeURIComponent(token);
   }
   if (backend) {
     return backend + fullPath;
@@ -2563,7 +2645,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -2592,6 +2676,9 @@ function resetState() {
 }
 
 async function bootstrap() {
+  if (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) {
+    return;
+  }
   const params = new URLSearchParams(window.location.search);
   const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
   let localURL = params.get('local');
@@ -2628,7 +2715,23 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      let localMetaURL;
+      try {
+        const u = new URL(localURL);
+        const tok = u.searchParams.get('token') || params.get('token') || params.get('t');
+        u.pathname = '/api/meta';
+        if (tok) {
+          u.searchParams.set('token', tok);
+        }
+        localMetaURL = u.toString();
+      } catch (e) {
+        localMetaURL = localURL.includes('?') ? localURL.replace('?', '/api/meta?') : `${localURL}/api/meta`;
+        const tok = params.get('token') || params.get('t');
+        if (tok && !localMetaURL.includes('token=')) {
+          localMetaURL += (localMetaURL.includes('?') ? '&' : '?') + `token=${encodeURIComponent(tok)}`;
+        }
+      }
+      const res = await fetch(localMetaURL, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
@@ -2732,6 +2835,15 @@ async function startHTTPDownload() {
     return;
   }
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.error("Failed to import decryption key", err);
+    showError("Decryption key error: " + err.message);
+    return;
+  }
+
   startTime     = Date.now();
   receivedBytes = 0;
   totalBytes    = currentFile.size;
@@ -2803,6 +2915,10 @@ async function startHTTPDownload() {
 
   try {
     const headers = {};
+    const token = new URLSearchParams(window.location.search).get('token') || new URLSearchParams(window.location.search).get('t');
+    if (token) {
+      headers['Authorization'] = 'Bearer ' + token;
+    }
     if (initialOffset > 0) {
       headers['Range'] = `bytes=${initialOffset}-`;
     }
@@ -3346,9 +3462,8 @@ async function startWebRTC() {
                     } else {
                       finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
                     }
-                    triggerSave(finalBlob, currentFile.name);
+                    resolve();
                   }
-                  resolve();
                 } catch (err) {
                   hasError = true;
                   // Handled in chunkQueue onError callback
@@ -3852,6 +3967,7 @@ async function startSenderSharing() {
     let senderStatePublished = false;
     let candidatePublishTimer = null;
     const publishCandidateUpdate = () => {
+      if (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) return;
       if (!senderStatePublished || candidatePublishTimer !== null) return;
       candidatePublishTimer = setTimeout(async () => {
         candidatePublishTimer = null;
@@ -3882,7 +3998,9 @@ async function startSenderSharing() {
 
     // Publish as soon as the first usable route is available. Later candidates
     // are pushed to the relay instead of blocking QR display.
-    await waitForInitialICECandidate(senderPeerConnection, localCandidates);
+    if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+      await waitForInitialICECandidate(senderPeerConnection, localCandidates);
+    }
 
     setLoadingSub('Publishing SDP offer to relay…');
     const stateRes = await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
@@ -4102,6 +4220,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 }
 
 async function startSenderPolling(backend) {
+  if (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) return;
   if (isSenderPolling) return;
   isSenderPolling = true;
 
@@ -4738,6 +4857,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     waitForInitialICECandidate,
@@ -4773,7 +4893,6 @@ if (typeof module !== 'undefined' && module.exports) {
     extractKeyFragment,
     parseDecryptionKeyFromHash,
     parseSessionInput,
-    getIceServers,
-    init
+    getIceServers
   };
 }

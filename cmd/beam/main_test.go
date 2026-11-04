@@ -203,6 +203,7 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 
 		var (
 			senderCancel context.CancelFunc
+			senderDone   chan struct{}
 			senderMu     sync.Mutex
 		)
 
@@ -231,22 +232,34 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 				if senderCancel != nil {
 					senderCancel()
 				}
+				if senderDone != nil {
+					<-senderDone
+				}
+				done := make(chan struct{})
+				senderDone = done
 				var ctx context.Context
 				ctx, senderCancel = context.WithCancel(mainCtx)
 				senderMu.Unlock()
 
-				go func(ctx context.Context) {
+				go func(ctx context.Context, reqOffset int64, done chan struct{}) {
+					defer close(done)
 					file, err := os.Open(filePath)
 					if err != nil {
 						return
 					}
 					defer file.Close()
 
-					if offset > 0 {
-						_, err = file.Seek(offset, io.SeekStart)
+					if reqOffset > 0 {
+						_, err = file.Seek(reqOffset, io.SeekStart)
 						if err != nil {
 							return
 						}
+					}
+
+					select {
+					case <-ctx.Done():
+						return
+					default:
 					}
 
 					metaHeader := fmt.Sprintf("META:%s:%d", filepath.Base(filePath), fileSize)
@@ -264,7 +277,7 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 					})
 
 					buffer := make([]byte, 32*1024)
-					totalSent := offset
+					totalSent := reqOffset
 
 					for {
 						select {
@@ -307,12 +320,14 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 						}
 					}
 
-					if ctx.Err() != nil {
+					select {
+					case <-ctx.Done():
 						return
+					default:
 					}
 
 					dc.SendText("EOF")
-				}(ctx)
+				}(ctx, offset, done)
 			}
 		})
 	}
@@ -415,6 +430,7 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 	var receivedBuf bytes.Buffer
 	eofChan := make(chan struct{})
 	firstChunkReceived := make(chan struct{}, 1)
+	metaCount := 0
 
 	rxDC.OnMessage(func(msg webrtc.DataChannelMessage) {
 		mu.Lock()
@@ -422,16 +438,23 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 		if msg.IsString {
 			str := string(msg.Data)
 			if strings.HasPrefix(str, "META:") {
-				receivedBuf.Reset()
+				metaCount++
+				if metaCount >= 2 {
+					receivedBuf.Reset()
+				}
 			} else if str == "EOF" {
-				select {
-				case <-eofChan:
-				default:
-					close(eofChan)
+				if metaCount >= 2 {
+					select {
+					case <-eofChan:
+					default:
+						close(eofChan)
+					}
 				}
 			}
 		} else {
-			receivedBuf.Write(msg.Data)
+			if metaCount >= 2 {
+				receivedBuf.Write(msg.Data)
+			}
 			select {
 			case firstChunkReceived <- struct{}{}:
 			default:
