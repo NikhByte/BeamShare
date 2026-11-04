@@ -50,6 +50,14 @@ type Session struct {
 
 	pendingDownload *DownloadRequest
 	downloadNotify  chan struct{}
+	activePollers   int
+}
+
+// ActivePollers returns the number of active long-polling connections waiting on the session.
+func (s *Session) ActivePollers() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.activePollers
 }
 
 func (s *Session) Close(err error) {
@@ -594,6 +602,15 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		respondWithDownload(w, dlReq)
 		return
 	}
+
+	sess.mu.Lock()
+	sess.activePollers++
+	sess.mu.Unlock()
+	defer func() {
+		sess.mu.Lock()
+		sess.activePollers--
+		sess.mu.Unlock()
+	}()
 
 	if sess.ctx == nil {
 		ctx, cancel := context.WithCancelCause(context.Background())
@@ -1289,12 +1306,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}()
 
 			// Notify sender
+			sess.mu.Lock()
 			if !sess.closed && sess.UploadReq != nil {
 				select {
 				case sess.UploadReq <- part.FileName():
 				default:
 				}
 			}
+			sess.mu.Unlock()
 
 			// Stream data to pipe
 			_, uploadErr = io.Copy(pw, part)

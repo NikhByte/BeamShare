@@ -282,8 +282,15 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 							}
 						}
 
+						if ctx.Err() != nil {
+							return
+						}
+
 						n, err := file.Read(buffer)
 						if n > 0 {
+							if ctx.Err() != nil {
+								return
+							}
 							chunk := make([]byte, n)
 							copy(chunk, buffer[:n])
 							errSend := dc.Send(chunk)
@@ -415,6 +422,7 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 	var receivedBuf bytes.Buffer
 	eofChan := make(chan struct{})
 	firstChunkReceived := make(chan struct{}, 1)
+	metaCount := 0
 
 	rxDC.OnMessage(func(msg webrtc.DataChannelMessage) {
 		mu.Lock()
@@ -422,16 +430,23 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 		if msg.IsString {
 			str := string(msg.Data)
 			if strings.HasPrefix(str, "META:") {
-				receivedBuf.Reset()
+				metaCount++
+				if metaCount == 2 {
+					receivedBuf.Reset()
+				}
 			} else if str == "EOF" {
-				select {
-				case <-eofChan:
-				default:
-					close(eofChan)
+				if metaCount >= 2 {
+					select {
+					case <-eofChan:
+					default:
+						close(eofChan)
+					}
 				}
 			}
 		} else {
-			receivedBuf.Write(msg.Data)
+			if metaCount >= 2 {
+				receivedBuf.Write(msg.Data)
+			}
 			select {
 			case firstChunkReceived <- struct{}{}:
 			default:
@@ -451,11 +466,8 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 		t.Fatal("timed out waiting for first chunk")
 	}
 
-	// Reset buffer and send second OFFSET:32768 while the first stream is actively running
+	// Send second OFFSET:32768 while the first stream is actively running
 	offsetSecond := int64(32768)
-	mu.Lock()
-	receivedBuf.Reset()
-	mu.Unlock()
 
 	if err := rxDC.SendText(fmt.Sprintf("OFFSET:%d", offsetSecond)); err != nil {
 		t.Fatalf("SendText OFFSET second failed: %v", err)
