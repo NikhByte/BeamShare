@@ -160,6 +160,12 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.pako = pako;
     window.__BEAM_TEST_ENV__ = true;
 
+    global.fetch = async () => ({
+      ok: true,
+      json: async () => ({ name: 'test.txt', size: 100, mime: 'text/plain' })
+    });
+    window.fetch = global.fetch;
+
     // Load qrcode.min.js and app.js
     delete require.cache[require.resolve('./qrcode.min.js')];
     const qrcodeLib1 = require('./qrcode.min.js');
@@ -746,6 +752,7 @@ describe('Gaze Web Sender Test Suite', () => {
   let dom;
   let window;
   let document;
+  let app;
   let fetchedURLs = [];
 
   beforeEach(() => {
