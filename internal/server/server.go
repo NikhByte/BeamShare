@@ -37,7 +37,7 @@ type Server struct {
 	trustedOrigins []string
 	srv            *http.Server
 	mux            *http.ServeMux
-	mu             sync.Mutex
+	mu             sync.RWMutex
 	downloads      int
 
 	// Phase 5: Live Pipe
@@ -115,6 +115,7 @@ func New(filePath string, bufferSize int) (*Server, error) {
 	mux.HandleFunc("/sitemap.xml", assets.SitemapXMLHandler)
 	mux.HandleFunc("/api/meta", s.AuthMiddleware(s.handleMeta))
 	mux.HandleFunc("/api/download", s.AuthMiddleware(s.handleDownload))
+	mux.HandleFunc("/sw-download-pipe/", s.handleDownload)
 	mux.HandleFunc("/api/upload", s.AuthMiddleware(s.handleUpload))
 	mux.HandleFunc("/api/qr", s.AuthMiddleware(s.handleQR))
 
@@ -168,8 +169,8 @@ func (s *Server) CloseLive() {
 
 // GetLiveBacklog returns the accumulated stream buffer.
 func (s *Server) GetLiveBacklog() []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.liveBuf != nil {
 		return s.liveBuf.Bytes()
 	}
@@ -344,8 +345,8 @@ type fileSnapshot struct {
 }
 
 func (s *Server) fileSnapshot() fileSnapshot {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return fileSnapshot{
 		filePath:   s.filePath,
 		fileName:   s.fileName,
@@ -370,17 +371,18 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	s.downloads++
 	count := s.downloads
 	s.mu.Unlock()
+
 	fmt.Printf("\r  Receiver connected (download #%d)…\n", count)
 
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	if snap.isLivePipe {
-		s.mu.Lock()
+		s.mu.RLock()
 		var data []byte
 		if s.liveBuf != nil {
 			data = s.liveBuf.Bytes()
 		}
-		s.mu.Unlock()
+		s.mu.RUnlock()
 
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, snap.fileName))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
