@@ -78,6 +78,7 @@ func WithPollInterval(d time.Duration) StreamOption {
 type StreamSender struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // NewStreamSender creates a new thread-safe StreamSender instance.
@@ -111,12 +112,18 @@ func (s *StreamSender) StartStream(parentCtx context.Context, dc DataChannel, fi
 	s.mu.Lock()
 	if s.cancel != nil {
 		s.cancel()
+		if s.done != nil {
+			<-s.done
+		}
 	}
 	ctx, cancel := context.WithCancel(parentCtx)
 	s.cancel = cancel
+	done := make(chan struct{})
+	s.done = done
 	s.mu.Unlock()
 
 	go func() {
+		defer close(done)
 		defer cancel()
 
 		if dc == nil {
