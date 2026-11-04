@@ -2070,13 +2070,21 @@ function initIDB() {
 async function clearIDB() {
   if (!idb) await initIDB();
   return new Promise((resolve, reject) => {
-    const tx = idb.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).clear();
-    tx.oncomplete = () => {
-      idbChunkIndex = 0;
-      resolve();
-    };
-    tx.onerror = (e) => reject(e.target.error);
+    try {
+      const tx = idb.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).clear();
+      tx.oncomplete = () => {
+        idbChunkIndex = 0;
+        resolve();
+      };
+      tx.onerror = (e) => reject(e.target ? e.target.error : e);
+    } catch (err) {
+      idb = null;
+      initIDB()
+        .then(() => clearIDB())
+        .then(resolve)
+        .catch(reject);
+    }
   });
 }
 
@@ -2580,6 +2588,7 @@ function resetState() {
   useOPFS = false;
   navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
   if (idb) clearIDB().catch(console.error);
+  idb = null;
   document.getElementById('done-share-container')?.classList.add('hidden');
   
   if (!virtualViewer) {

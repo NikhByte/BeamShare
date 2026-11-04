@@ -23,6 +23,13 @@ describe('Gaze Web Receiver Test Suite', () => {
     window = dom.window;
     document = window.document;
 
+    global.fetch = window.fetch = async () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({}),
+      text: async () => ''
+    });
+
     window.HTMLCanvasElement.prototype.getContext = function() {
       return {
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
@@ -313,7 +320,7 @@ describe('Gaze Web Receiver Test Suite', () => {
     const ssePromise = app.startHTTPSSE();
 
     // Allow microtasks to run so clearIDB completes and onmessage is assigned
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await new Promise(resolve => setTimeout(resolve, 50));
 
     assert.notEqual(mockSourceInstance, null);
     assert.equal(document.getElementById('state-livepipe').classList.contains('hidden'), false);
@@ -746,6 +753,7 @@ describe('Gaze Web Sender Test Suite', () => {
   let dom;
   let window;
   let document;
+  let app;
   let fetchedURLs = [];
 
   beforeEach(() => {
