@@ -160,6 +160,12 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.pako = pako;
     window.__BEAM_TEST_ENV__ = true;
 
+    global.fetch = async () => ({
+      ok: true,
+      json: async () => ({ session: 'mock-session-123', name: 'mock.txt', size: 100, mime: 'text/plain' })
+    });
+    window.fetch = global.fetch;
+
     // Load qrcode.min.js and app.js
     delete require.cache[require.resolve('./qrcode.min.js')];
     const qrcodeLib1 = require('./qrcode.min.js');
@@ -746,6 +752,7 @@ describe('Gaze Web Sender Test Suite', () => {
   let dom;
   let window;
   let document;
+  let app;
   let fetchedURLs = [];
 
   beforeEach(() => {
@@ -793,7 +800,7 @@ describe('Gaze Web Sender Test Suite', () => {
     window.QRious = QRious;
     global.QRious = QRious;
 
-    if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
+    if (window.HTMLCanvasElement) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
         fillRect: () => {},
         clearRect: () => {},
@@ -863,7 +870,10 @@ describe('Gaze Web Sender Test Suite', () => {
     let externalRequests = [];
     window.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      if (url.includes('/poll')) {
+        return { ok: false, status: 404 };
+      }
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
