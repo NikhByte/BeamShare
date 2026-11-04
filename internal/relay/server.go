@@ -149,6 +149,14 @@ func (s *Session) closeUploadPipesLocked(err error) {
 	}
 }
 
+func (s *Session) CloseUploadPipes(err error) {
+	s.ClosePipesIfMatch(nil, nil, err)
+}
+
+func (s *Session) CloseUploadPipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err error) {
+	s.ClosePipesIfMatch(pr, pw, err)
+}
+
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
 	closePipeWriter := func(w **io.PipeWriter) {
 		if *w != nil {
@@ -208,6 +216,25 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 				pr.Close()
 			}
 		}
+	}
+}
+
+func (s *Session) closeDataPipesLocked(err error) {
+	if s.DataPipeW != nil {
+		if err != nil {
+			s.DataPipeW.CloseWithError(err)
+		} else {
+			s.DataPipeW.Close()
+		}
+		s.DataPipeW = nil
+	}
+	if s.DataPipeR != nil {
+		if err != nil {
+			s.DataPipeR.CloseWithError(err)
+		} else {
+			s.DataPipeR.Close()
+		}
+		s.DataPipeR = nil
 	}
 }
 
@@ -1264,6 +1291,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
+
+			// Notify sender under lock to avoid race with session close
+			if !sess.closed && sess.UploadReq != nil {
+				select {
+				case sess.UploadReq <- part.FileName():
+				default:
+				}
+			}
 			sess.mu.Unlock()
 
 			var uploadErr error
@@ -1283,34 +1318,23 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 					case <-done:
 						return
 					default:
-						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("upload context cancelled: %w", r.Context().Err()))
+						if r.Body != nil {
+							r.Body.Close()
+						}
+						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("uploader context cancelled: %w", r.Context().Err()))
 					}
 				}
 			}()
-
-			// Notify sender
-			if !sess.closed && sess.UploadReq != nil {
-				select {
-				case sess.UploadReq <- part.FileName():
-				default:
-				}
-			}
 
 			// Stream data to pipe
 			_, uploadErr = io.Copy(pw, part)
 			if uploadErr != nil {
 				pw.CloseWithError(uploadErr)
-				part.Close()
 				http.Error(w, fmt.Sprintf("upload failed: %v", uploadErr), http.StatusInternalServerError)
 				return
 			}
 			pw.Close()
 			part.Close()
-
-			if uploadErr != nil {
-				http.Error(w, fmt.Sprintf("upload error: %v", uploadErr), http.StatusInternalServerError)
-				return
-			}
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})
@@ -1324,8 +1348,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	sess := s.getSession(r.URL.Query().Get("session"))
 	if sess == nil {
-		http.Error(w, "not found", 404)
-		return
+		sess = s.getSession(r.URL.Query().Get("s"))
+		if sess == nil {
+			http.Error(w, "not found", 404)
+			return
+		}
 	}
 
 	sess.mu.Lock()
