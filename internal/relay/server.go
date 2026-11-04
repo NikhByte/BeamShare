@@ -316,13 +316,12 @@ func (s *Server) SweepExpiredSessions() {
 	s.mu.Lock()
 	now := time.Now()
 	var expired []*Session
-	for id, sess := range s.sessions {
+	for _, sess := range s.sessions {
 		sess.mu.Lock()
 		exp := sess.expiresAt
 		sess.mu.Unlock()
 		if !exp.IsZero() && now.After(exp) {
 			expired = append(expired, sess)
-			delete(s.sessions, id)
 		}
 	}
 	s.mu.Unlock()
@@ -330,6 +329,12 @@ func (s *Server) SweepExpiredSessions() {
 	for _, sess := range expired {
 		sess.Close(fmt.Errorf("session expired"))
 	}
+
+	s.mu.Lock()
+	for _, sess := range expired {
+		delete(s.sessions, sess.ID)
+	}
+	s.mu.Unlock()
 
 	s.failedAttemptsMu.Lock()
 	for ip, fa := range s.failedAttempts {
@@ -1289,12 +1294,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}()
 
 			// Notify sender
+			sess.mu.Lock()
 			if !sess.closed && sess.UploadReq != nil {
 				select {
 				case sess.UploadReq <- part.FileName():
 				default:
 				}
 			}
+			sess.mu.Unlock()
 
 			// Stream data to pipe
 			_, uploadErr = io.Copy(pw, part)
