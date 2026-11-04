@@ -232,7 +232,7 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 }
 
 func TestServer_LongPollingUnblockedAndGoroutinesCleanedOnExpiration(t *testing.T) {
-	srv := NewServerWithConfig(100*time.Millisecond, 20*time.Millisecond)
+	srv := NewServerWithConfig(500*time.Millisecond, 20*time.Millisecond)
 	defer srv.Stop()
 
 	ts := httptest.NewServer(srv)
@@ -361,6 +361,60 @@ func TestSession_ClosePipesClosesUploadPipes(t *testing.T) {
 	assert.Error(t, errWrite, "Writing to closed UploadPipeW should return error")
 }
 
+func TestSession_CloseUploadPipes(t *testing.T) {
+	pr, pw := io.Pipe()
+	sess := &Session{
+		ID:          "test-upload-pipes",
+		UploadPipeR: pr,
+		UploadPipeW: pw,
+	}
+
+	testErr := fmt.Errorf("test error")
+	sess.CloseUploadPipes(testErr)
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	sess.mu.Unlock()
+
+	_, err := pw.Write([]byte("data"))
+	assert.Error(t, err)
+}
+
+func TestSweepExpiredSessions_ClosesUploadAndDataPipes(t *testing.T) {
+	srv := NewServerWithConfig(100*time.Millisecond, 10*time.Millisecond)
+	defer srv.Stop()
+
+	sess := srv.createSession()
+	upr, upw := io.Pipe()
+	dpr, dpw := io.Pipe()
+
+	sess.mu.Lock()
+	sess.UploadPipeR = upr
+	sess.UploadPipeW = upw
+	sess.DataPipeR = dpr
+	sess.DataPipeW = dpw
+	sess.expiresAt = time.Now().Add(-1 * time.Second)
+	sess.mu.Unlock()
+
+	srv.SweepExpiredSessions()
+
+	assert.Nil(t, srv.GetSession(sess.ID))
+
+	sess.mu.Lock()
+	assert.Nil(t, sess.UploadPipeR)
+	assert.Nil(t, sess.UploadPipeW)
+	assert.Nil(t, sess.DataPipeR)
+	assert.Nil(t, sess.DataPipeW)
+	sess.mu.Unlock()
+
+	_, err := upw.Write([]byte("data"))
+	assert.Error(t, err)
+
+	_, err = dpw.Write([]byte("data"))
+	assert.Error(t, err)
+}
+
 func TestServer_SessionExpirationUnblocksBlockedUpload(t *testing.T) {
 	srv := NewServerWithConfig(10*time.Second, 10*time.Millisecond)
 	defer srv.Stop()
@@ -390,6 +444,7 @@ func TestServer_SessionExpirationUnblocksBlockedUpload(t *testing.T) {
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
 	client := newTestHTTPClient()
+	defer client.CloseIdleConnections()
 	respChan := make(chan *http.Response, 1)
 	errChan := make(chan error, 1)
 
@@ -481,6 +536,7 @@ func TestServer_ReassignUploadPipesClosesPreviousPipes(t *testing.T) {
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
 	client := newTestHTTPClient()
+	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
@@ -490,4 +546,144 @@ func TestServer_ReassignUploadPipesClosesPreviousPipes(t *testing.T) {
 
 	_, errWrite := pw1.Write([]byte("data"))
 	assert.Error(t, errWrite, "Previous UploadPipeW should be closed")
+}
+
+func TestHandleUpload_ClientDisconnect(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	pr, pw := io.Pipe()
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/upload?s="+sess.ID, pr).WithContext(reqCtx)
+	writer := multipart.NewWriter(pw)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rr, req)
+		close(done)
+	}()
+
+	// Write part header into pipe
+	go func() {
+		part, err := writer.CreateFormFile("file", "test.bin")
+		if err == nil {
+			part.Write([]byte("chunk1"))
+		}
+		writer.Close()
+	}()
+
+	// Wait briefly for handleUpload to process part header and set pipes
+	assert.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil
+	}, 1*time.Second, 10*time.Millisecond)
+
+	// Cancel client context
+	reqCancel()
+
+	// handleUpload should unblock and exit
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleUpload did not unblock on client context cancellation")
+	}
+
+	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+}
+
+func TestHandleUpload_SessionExpirationMidTransfer(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	pr, pw := io.Pipe()
+	req := httptest.NewRequest(http.MethodPost, "/api/upload?s="+sess.ID, pr)
+	writer := multipart.NewWriter(pw)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rr, req)
+		close(done)
+	}()
+
+	// Write part header into pipe
+	go func() {
+		part, err := writer.CreateFormFile("file", "test.bin")
+		if err == nil {
+			part.Write([]byte("chunk1"))
+		}
+		writer.Close()
+	}()
+
+	// Wait for handleUpload to process part header and set pipes
+	assert.Eventually(t, func() bool {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.UploadPipeR != nil
+	}, 1*time.Second, 10*time.Millisecond)
+
+	// Expire session manually and run SweepExpiredSessions
+	sess.mu.Lock()
+	sess.expiresAt = time.Now().Add(-1 * time.Second)
+	sess.mu.Unlock()
+
+	srv.SweepExpiredSessions()
+
+	// handleUpload should unblock and return HTTP error response
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleUpload did not unblock on session expiration")
+	}
+
+	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+}
+
+func TestHandlePull_ClientDisconnect(t *testing.T) {
+	srv := NewServer()
+	defer srv.Stop()
+
+	sess := srv.createSession()
+
+	upr, upw := io.Pipe()
+	sess.mu.Lock()
+	sess.UploadPipeR = upr
+	sess.UploadPipeW = upw
+	sess.mu.Unlock()
+
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/relay/pull?session="+sess.ID, nil).WithContext(reqCtx)
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rr, req)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Cancel pull client context
+	reqCancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handlePull did not unblock on client context cancellation")
+	}
+
+	// Writer upw should see error on write
+	_, err := upw.Write([]byte("data"))
+	assert.Error(t, err)
 }
