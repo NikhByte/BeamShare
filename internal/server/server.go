@@ -91,6 +91,7 @@ func New(filePath string, bufferSize int) (*Server, error) {
 	mux.HandleFunc("/sitemap.xml", assets.SitemapXMLHandler)
 	mux.HandleFunc("/api/meta", s.handleMeta)
 	mux.HandleFunc("/api/download", s.handleDownload)
+	mux.HandleFunc("/sw-download-pipe/", s.handleDownload)
 	mux.HandleFunc("/api/upload", s.handleUpload)
 	mux.HandleFunc("/api/qr", s.handleQR)
 
@@ -218,6 +219,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Private-Network", "true")
@@ -246,6 +248,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	s.downloads++
 	count := s.downloads
 	s.mu.Unlock()
+
 	fmt.Printf("\r  Receiver connected (download #%d)…\n", count)
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
