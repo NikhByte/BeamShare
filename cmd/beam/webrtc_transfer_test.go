@@ -33,10 +33,18 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 	require.NoError(t, err)
 
 	var mu sync.Mutex
+	var senderCandidates []webrtc.ICECandidateInit
+	var receiverCandidates []webrtc.ICECandidateInit
+	var senderRemoteDescSet, receiverRemoteDescSet bool
+
 	senderPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
 			mu.Lock()
-			_ = receiverPC.AddICECandidate(c.ToJSON())
+			if receiverRemoteDescSet {
+				_ = receiverPC.AddICECandidate(c.ToJSON())
+			} else {
+				receiverCandidates = append(receiverCandidates, c.ToJSON())
+			}
 			mu.Unlock()
 		}
 	})
@@ -44,7 +52,11 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 	receiverPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
 			mu.Lock()
-			_ = senderPC.AddICECandidate(c.ToJSON())
+			if senderRemoteDescSet {
+				_ = senderPC.AddICECandidate(c.ToJSON())
+			} else {
+				senderCandidates = append(senderCandidates, c.ToJSON())
+			}
 			mu.Unlock()
 		}
 	})
@@ -65,10 +77,26 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 	require.NoError(t, senderPC.SetLocalDescription(offer))
 	require.NoError(t, receiverPC.SetRemoteDescription(offer))
 
+	mu.Lock()
+	receiverRemoteDescSet = true
+	for _, c := range receiverCandidates {
+		_ = receiverPC.AddICECandidate(c)
+	}
+	receiverCandidates = nil
+	mu.Unlock()
+
 	answer, err := receiverPC.CreateAnswer(nil)
 	require.NoError(t, err)
 	require.NoError(t, receiverPC.SetLocalDescription(answer))
 	require.NoError(t, senderPC.SetRemoteDescription(answer))
+
+	mu.Lock()
+	senderRemoteDescSet = true
+	for _, c := range senderCandidates {
+		_ = senderPC.AddICECandidate(c)
+	}
+	senderCandidates = nil
+	mu.Unlock()
 
 	var receiverDC *webrtc.DataChannel
 	select {
@@ -106,6 +134,7 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, fileName string, fileSize int64, activeSendersCount *int32) {
 	var senderMu sync.Mutex
 	var activeCancel context.CancelFunc
+	var activeDone chan struct{}
 
 	dc.OnClose(func() {
 		senderMu.Lock()
@@ -132,11 +161,17 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 			if activeCancel != nil {
 				activeCancel()
 			}
+			if activeDone != nil {
+				<-activeDone
+			}
+			done := make(chan struct{})
+			activeDone = done
 			transferCtx, cancel := context.WithCancel(context.Background())
 			activeCancel = cancel
 			senderMu.Unlock()
 
-			go func(ctx context.Context) {
+			go func(ctx context.Context, reqOffset int64, done chan struct{}) {
+				defer close(done)
 				if activeSendersCount != nil {
 					atomic.AddInt32(activeSendersCount, 1)
 					defer atomic.AddInt32(activeSendersCount, -1)
@@ -148,8 +183,8 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				}
 				defer file.Close()
 
-				if offset > 0 {
-					_, err = file.Seek(offset, io.SeekStart)
+				if reqOffset > 0 {
+					_, err = file.Seek(reqOffset, io.SeekStart)
 					if err != nil {
 						return
 					}
@@ -170,7 +205,7 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				})
 
 				buffer := make([]byte, 64*1000) // 64KB chunk size
-				totalSent := offset
+				totalSent := reqOffset
 
 				for {
 					select {
@@ -228,7 +263,7 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				}
 
 				dc.SendText("EOF")
-			}(transferCtx)
+			}(transferCtx, offset, done)
 		}
 	})
 }
@@ -265,9 +300,11 @@ func TestWebRTCTransfer_DuplicateOffsetCancellation(t *testing.T) {
 					receivedBytes.Reset()
 				}
 			} else if dataStr == "EOF" {
-				select {
-				case eofCh <- struct{}{}:
-				default:
+				if metaCount >= 2 {
+					select {
+					case eofCh <- struct{}{}:
+					default:
+					}
 				}
 			}
 		} else {

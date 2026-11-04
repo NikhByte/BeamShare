@@ -2715,7 +2715,22 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const localMetaURL = localURL.includes('?') ? localURL.replace('?', '/api/meta?') : `${localURL}/api/meta`;
+      let localMetaURL;
+      try {
+        const u = new URL(localURL);
+        const tok = u.searchParams.get('token') || params.get('token') || params.get('t');
+        u.pathname = '/api/meta';
+        if (tok) {
+          u.searchParams.set('token', tok);
+        }
+        localMetaURL = u.toString();
+      } catch (e) {
+        localMetaURL = localURL.includes('?') ? localURL.replace('?', '/api/meta?') : `${localURL}/api/meta`;
+        const tok = params.get('token') || params.get('t');
+        if (tok && !localMetaURL.includes('token=')) {
+          localMetaURL += (localMetaURL.includes('?') ? '&' : '?') + `token=${encodeURIComponent(tok)}`;
+        }
+      }
       const res = await fetch(localMetaURL, { signal: controller.signal });
       clearTimeout(timeoutId);
       
@@ -2817,6 +2832,15 @@ async function startHTTPDownload() {
 
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {
+    return;
+  }
+
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.error("Failed to import decryption key", err);
+    showError("Decryption key error: " + err.message);
     return;
   }
 
