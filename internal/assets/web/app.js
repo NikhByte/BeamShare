@@ -2164,7 +2164,11 @@ function setMode(mode, label) {
 
 // ── Service Worker Pipe ───────────────────────────────────────────────────────
 async function getSWPipe(fileMeta) {
-  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
+  // Service Worker pipe synthetic iframe downloads do not trigger browser downloads in Firefox
+  const isFirefox = typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.includes('Firefox');
+  if (isFirefox) return null;
+
+  if (!('serviceWorker' in navigator)) return null;
 
   // WebKit (Safari / Mobile Safari) does not reliably route iframe navigations through SW fetch handlers
   const isWebKit = typeof navigator !== 'undefined' && (/AppleWebKit/i.test(navigator.userAgent) && !/Chrome|Chromium|Edg|Firefox/i.test(navigator.userAgent));
@@ -2190,7 +2194,7 @@ async function getSWPipe(fileMeta) {
           resolve();
         };
         navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
-        setTimeout(resolve, 500);
+        setTimeout(resolve, 1500);
       });
     }
 
@@ -2433,9 +2437,11 @@ function init() {
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(err => {
       console.warn('Service Worker registration failed:', err);
     });
-
     const markSwReady = () => {
       document.documentElement.setAttribute('data-sw-ready', 'true');
+      if (document.body) {
+        document.body.setAttribute('data-sw-ready', 'true');
+      }
     };
 
     if (navigator.serviceWorker.controller) {
@@ -2563,7 +2569,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -2592,6 +2600,9 @@ function resetState() {
 }
 
 async function bootstrap() {
+  if (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) {
+    return;
+  }
   const params = new URLSearchParams(window.location.search);
   const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
   let localURL = params.get('local');
@@ -2796,6 +2807,15 @@ async function startHTTPDownload() {
       await clearIDB();
     }
     receivedChunks = [];
+  }
+
+  let decryptionKey = null;
+  if (typeof window !== 'undefined' && window.location && window.location.hash) {
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch (e) {
+      console.warn("Could not parse decryption key from hash:", e);
+    }
   }
 
   setState('downloading');
@@ -3083,7 +3103,10 @@ async function startWebRTC() {
   setWebRTCSub('Waiting for data channel…');
   const dc = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('data channel timeout')), 30000);
-    pc.ondatachannel = (e) => { clearTimeout(timer); resolve(e.channel); };
+    pc.ondatachannel = (e) => {
+      clearTimeout(timer);
+      resolve(e.channel);
+    };
   });
   markStep('step-open');
   webrtcDataChannel = dc;
@@ -3221,13 +3244,25 @@ async function startWebRTC() {
 
     await new Promise((resolve, reject) => {
       dc.binaryType = 'arraybuffer';
-      if (dc.readyState === 'open') {
-        dc.send(`OFFSET:${initialOffset}`);
-      } else {
-        dc.onopen = () => dc.send(`OFFSET:${initialOffset}`);
-      }
+      let offsetSent = false;
+      const sendOffset = () => {
+        if (offsetSent) return;
+        offsetSent = true;
+        try {
+          dc.send(`OFFSET:${initialOffset}`);
+        } catch (err) {
+          console.error('Error sending OFFSET:', err);
+        }
+      };
 
-      let encBuffer = new Uint8Array(0);
+      if (dc.readyState === 'open') {
+        sendOffset();
+      } else {
+        dc.addEventListener('open', sendOffset, { once: true });
+        if (dc.readyState === 'open') {
+          sendOffset();
+        }
+      }
 
       const chunkQueue = new SequentialChunkQueue({
         highWatermark: 16 * 1024 * 1024,
@@ -3243,78 +3278,22 @@ async function startWebRTC() {
           reject(err);
         },
         writeHandler: async (chunk) => {
-          if (decryptionKey) {
-            let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(chunk, encBuffer.length);
-            encBuffer = newBuffer;
-
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-              const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
-
-                if (frame.length < 12) {
-                  throw new Error("Invalid frame length: shorter than 12-byte nonce size");
-                }
-
-                const nonce = new Uint8Array(frame.subarray(0, 12));
-                const ciphertext = new Uint8Array(frame.subarray(12));
-
-                let decrypted;
-                try {
-                  decrypted = await crypto.subtle.decrypt(
-                    { name: "AES-GCM", iv: nonce },
-                    decryptionKey,
-                    ciphertext
-                  );
-                } catch (decryptErr) {
-                  throw new Error("Decryption failed: " + (decryptErr.message || String(decryptErr)));
-                }
-
-                const decValue = new Uint8Array(decrypted);
-
-                if (diskWritableStream) {
-                  await diskWritableStream.write(decValue);
-                } else if (swPipePort) {
-                  swPipePort.postMessage(decValue);
-                } else if (useIndexedDB) {
-                  await storeChunkIDB(decValue);
-                } else {
-                  receivedChunks.push(decValue);
-                }
-
-                receivedBytes += decValue.length;
-                maybeSaveProgress();
-                if (totalBytes > 0) {
-                  updateProgress(receivedBytes / totalBytes);
-                  updateDLStats(receivedBytes, totalBytes);
-                  updateSpeed(receivedBytes);
-                }
-              } else {
-                break;
-              }
-            }
+          if (diskWritableStream) {
+            await diskWritableStream.write(chunk);
+          } else if (swPipePort) {
+            swPipePort.postMessage(chunk);
+          } else if (useIndexedDB) {
+            await storeChunkIDB(chunk);
           } else {
-            if (diskWritableStream) {
-              await diskWritableStream.write(chunk);
-            } else if (swPipePort) {
-              swPipePort.postMessage(chunk);
-            } else if (useIndexedDB) {
-              await storeChunkIDB(chunk);
-            } else {
-              receivedChunks.push(chunk);
-            }
+            receivedChunks.push(chunk);
+          }
 
-            receivedBytes += chunk.byteLength;
-            maybeSaveProgress();
-            if (totalBytes > 0) {
-              updateProgress(receivedBytes / totalBytes);
-              updateDLStats(receivedBytes, totalBytes);
-              updateSpeed(receivedBytes);
-            }
+          receivedBytes += chunk.byteLength || chunk.length || 0;
+          maybeSaveProgress();
+          if (totalBytes > 0) {
+            updateProgress(receivedBytes / totalBytes);
+            updateDLStats(receivedBytes, totalBytes);
+            updateSpeed(receivedBytes);
           }
         }
       });
@@ -3686,12 +3665,17 @@ function triggerSave(blob, name) {
   const a   = Object.assign(document.createElement('a'), { href: url, download: name, target: '_blank', rel: 'noopener' });
   document.body.appendChild(a);
   a.click();
-  setTimeout(() => {
-    if (a.parentNode) {
-      a.parentNode.removeChild(a);
-    }
-    URL.revokeObjectURL(url);
-  }, 5000);
+  document.body.removeChild(a);
+  try {
+    const iframe = document.createElement('iframe');
+    iframe.hidden = true;
+    iframe.src = url;
+    document.body.appendChild(iframe);
+    setTimeout(() => {
+      try { document.body.removeChild(iframe); } catch(e) {}
+    }, 5000);
+  } catch (_) {}
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
 function appendTerminalText(text) {
@@ -4098,7 +4082,8 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
     await waitForBufferedAmountLow(dc, 0);
   }
   dc.send("EOF");
-  document.getElementById('send-status-label').textContent = "Transfer Complete!";
+  const statusLabel = document.getElementById('send-status-label');
+  if (statusLabel) statusLabel.textContent = "Transfer Complete!";
 }
 
 async function startSenderPolling(backend) {
@@ -4273,7 +4258,9 @@ function switchTab(tab) {
   if (tab === 'receive') {
     receiveBtn?.classList.add('active');
     sendBtn?.classList.remove('active');
-    bootstrap();
+    if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+      bootstrap();
+    }
   } else {
     sendBtn?.classList.add('active');
     receiveBtn?.classList.remove('active');
