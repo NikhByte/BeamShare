@@ -2563,6 +2563,9 @@ function init() {
   });
 
   initSpotlight();
+  if (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) {
+    return;
+  }
   bootstrap();
 }
 
