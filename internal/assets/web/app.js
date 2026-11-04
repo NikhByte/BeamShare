@@ -2666,7 +2666,7 @@ async function bootstrap() {
       let metaURL = `${localURL}/api/meta`;
       try {
         const u = new URL(localURL);
-        const tok = u.searchParams.get('token');
+        const tok = u.searchParams.get('token') || params.get('token') || params.get('t');
         u.pathname = '/api/meta';
         if (tok) {
           u.searchParams.set('token', tok);
@@ -2775,6 +2775,15 @@ async function startHTTPDownload() {
 
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {
+    return;
+  }
+
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.error("Failed to import decryption key", err);
+    showError("Decryption key error: " + err.message);
     return;
   }
 
