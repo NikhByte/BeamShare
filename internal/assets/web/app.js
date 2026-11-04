@@ -2563,7 +2563,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -3500,7 +3502,7 @@ async function startWebRTC() {
  * Attaches the 'bufferedamountlow' listener and immediately re-evaluates bufferedAmount before awaiting,
  * supplemented by a polling fallback to prevent race conditions during buffer drains.
  */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
+function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 250) {
   return new Promise((resolve, reject) => {
     if (!dc || dc.readyState !== 'open') {
       return reject(new Error("Data channel is no longer open"));
@@ -3550,6 +3552,16 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
         resolve();
       }
     }, pollMs);
+  });
+}
+
+function waitForDataChannelBuffer(dc, highThreshold, lowThreshold, pollMs = 250) {
+  const target = lowThreshold !== undefined ? lowThreshold : highThreshold;
+  return waitForBufferedAmountLow(dc, target, pollMs).catch(err => {
+    if (err && err.message === "Data channel is no longer open") {
+      throw new Error("Data channel is closed or closing");
+    }
+    throw err;
   });
 }
 
