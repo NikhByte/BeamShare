@@ -516,15 +516,27 @@ function getBackendURL() {
 }
 
 function apiPath(path) {
-  const backend = getBackendURL();
+  let backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
-  const s = params.get('s');
-  let fullPath = path;
-  if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+  let token = params.get('s') || params.get('token');
+  let cleanBackend = backend;
+  if (backend && backend.includes('?')) {
+    const [bBase, bQuery] = backend.split('?');
+    cleanBackend = bBase;
+    const bParams = new URLSearchParams(bQuery);
+    if (!token) {
+      token = bParams.get('s') || bParams.get('token');
+    }
   }
-  if (backend) {
-    return backend + fullPath;
+  if (cleanBackend && cleanBackend.endsWith('/')) {
+    cleanBackend = cleanBackend.slice(0, -1);
+  }
+  let fullPath = path;
+  if (token && !fullPath.includes('s=') && !fullPath.includes('token=')) {
+    fullPath = path.includes('?') ? path + '&s=' + encodeURIComponent(token) : path + '?s=' + encodeURIComponent(token);
+  }
+  if (cleanBackend) {
+    return cleanBackend + fullPath;
   }
   return fullPath;
 }
@@ -550,7 +562,6 @@ function apiPath(path) {
 
 // ── Local QR Code Generator & Renderer ─────────────────────────────────────
 "use strict";
-// var qrcodegen;
 (function (qrcodegen) {
  class QrCode {
  constructor(
@@ -1255,65 +1266,6 @@ const CIRCUMFERENCE   = 2 * Math.PI * 42; // SVG progress ring
 
 // ── State ──────────────────────────────────────────────────────────────────────
 let currentFile      = null;
-
-/**
- * Waits for a WebRTC DataChannel's bufferedAmount to drop to or below targetThreshold.
- * Combines bufferedamountlow listener, post-registration level check, and 250ms timeout fallback.
- *
- * @param {RTCDataChannel} dc
- * @param {number} targetThreshold - Target bufferedAmount in bytes
- * @param {number} timeoutMs - Timeout fallback in milliseconds (default: 250)
- * @returns {Promise<void>}
- */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 250) {
-  if (!dc) return Promise.resolve();
-  try {
-    dc.bufferedAmountLowThreshold = targetThreshold;
-  } catch (e) {}
-
-  if (dc.bufferedAmount <= targetThreshold) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve) => {
-    let timer = null;
-    let resolved = false;
-
-    const cleanupAndResolve = () => {
-      if (resolved) return;
-      resolved = true;
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      try {
-        dc.removeEventListener('bufferedamountlow', listener);
-      } catch (e) {}
-      resolve();
-    };
-
-    const listener = () => {
-      cleanupAndResolve();
-    };
-
-    try {
-      dc.addEventListener('bufferedamountlow', listener);
-    } catch (e) {
-      cleanupAndResolve();
-      return;
-    }
-
-    // Immediate post-registration check in case threshold was crossed during callback setup
-    if (dc.bufferedAmount <= targetThreshold) {
-      cleanupAndResolve();
-      return;
-    }
-
-    timer = setTimeout(() => {
-      cleanupAndResolve();
-    }, timeoutMs);
-  });
-}
 let transferMode     = 'http';   // 'webrtc' | 'http'
 let startTime        = 0;
 let receivedBytes    = 0;
@@ -2563,7 +2515,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -2628,7 +2582,17 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      let metaURL;
+      if (localURL.includes('?')) {
+        const [bBase, bQuery] = localURL.split('?');
+        metaURL = `${bBase.replace(/\/$/, '')}/api/meta?${bQuery}`;
+      } else {
+        metaURL = `${localURL.replace(/\/$/, '')}/api/meta`;
+        const s = params.get('s') || params.get('token');
+        if (s) metaURL += `?s=${encodeURIComponent(s)}`;
+      }
+
+      const res = await fetch(metaURL, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
@@ -3502,11 +3466,14 @@ async function startWebRTC() {
  */
 function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
   return new Promise((resolve, reject) => {
-    if (!dc || dc.readyState !== 'open') {
+    if (!dc) return resolve();
+    if (dc.readyState !== 'open') {
       return reject(new Error("Data channel is no longer open"));
     }
 
-    dc.bufferedAmountLowThreshold = targetThreshold;
+    try {
+      dc.bufferedAmountLowThreshold = targetThreshold;
+    } catch (e) {}
 
     if (dc.bufferedAmount <= targetThreshold) {
       return resolve();
@@ -3516,7 +3483,7 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
 
     const cleanup = () => {
       if (dc && typeof dc.removeEventListener === 'function') {
-        dc.removeEventListener('bufferedamountlow', onBufferedAmountLow);
+        try { dc.removeEventListener('bufferedamountlow', onBufferedAmountLow); } catch (e) {}
       }
       if (intervalId !== null) {
         clearInterval(intervalId);
@@ -3529,16 +3496,15 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
       resolve();
     };
 
-    // Attach bufferedamountlow listener
-    dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
+    try {
+      dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
+    } catch (e) {}
 
-    // Immediately re-evaluate bufferedAmount after attaching listener
     if (dc.bufferedAmount <= targetThreshold) {
       cleanup();
       return resolve();
     }
 
-    // Polling fallback to check for buffer drain or closed channel
     intervalId = setInterval(() => {
       if (dc.readyState !== 'open') {
         cleanup();

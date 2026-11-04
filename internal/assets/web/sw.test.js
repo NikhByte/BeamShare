@@ -24,7 +24,7 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     delete global.self;
   });
 
-  test('Service worker posts PORT_READY message on port upon INIT_PORT', () => {
+  test('Service worker posts READY message on port upon INIT_PORT', () => {
     const { streamMap } = require('./sw.js');
     const url = '/sw-download-pipe/test-port-ready';
 

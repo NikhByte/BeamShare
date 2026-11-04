@@ -33,7 +33,7 @@ func TestLiveStreamPipeSSE(t *testing.T) {
 	srv.WriteLive([]byte("log line 1\nlog line 2\n"))
 
 	// Connect Client 1 SSE
-	req1, err := http.NewRequest(http.MethodGet, ts.URL+"/api/live/stream", nil)
+	req1, err := http.NewRequest(http.MethodGet, ts.URL+"/api/live/stream?s="+srv.SessionToken(), nil)
 	require.NoError(t, err)
 
 	resp1, err := http.DefaultClient.Do(req1)
@@ -67,7 +67,7 @@ func TestLiveStreamPipeSSE(t *testing.T) {
 	assert.Equal(t, "log line 3\n", dataEv["payload"])
 
 	// Connect Client 2 SSE and verify it receives complete accumulated backlog
-	req2, err := http.NewRequest(http.MethodGet, ts.URL+"/api/live/stream", nil)
+	req2, err := http.NewRequest(http.MethodGet, ts.URL+"/api/live/stream?s="+srv.SessionToken(), nil)
 	require.NoError(t, err)
 	resp2, err := http.DefaultClient.Do(req2)
 	require.NoError(t, err)
