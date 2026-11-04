@@ -70,6 +70,9 @@ self.addEventListener('message', (event) => {
       }
       cleanup();
     }, STREAM_TTL_MS);
+    if (ttlTimer && typeof ttlTimer.unref === 'function') {
+      ttlTimer.unref();
+    }
 
     const stream = new ReadableStream({
       start(controller) {
@@ -123,6 +126,11 @@ self.addEventListener('message', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   
+  if (url.pathname === '/sw-ping') {
+    event.respondWith(new Response('pong'));
+    return;
+  }
+
   // Intercept synthetic download URLs used by the service worker pipe
   if (url.pathname.startsWith('/sw-download-pipe/')) {
     let entry = streamMap.get(url.pathname);
