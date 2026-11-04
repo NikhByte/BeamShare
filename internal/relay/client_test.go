@@ -165,48 +165,46 @@ func TestUploadReaderAtOffset(t *testing.T) {
 		}
 	})
 
-	for _, keyLen := range []int{32} {
-		t.Run(fmt.Sprintf("Encrypted_%dByteKey", keyLen), func(t *testing.T) {
-			client, sess := createIsolatedSession(t)
-			client.Key = make([]byte, keyLen)
-			rand.Read(client.Key)
+	t.Run("Encrypted_32ByteKey", func(t *testing.T) {
+		client, sess := createIsolatedSession(t)
+		client.Key = make([]byte, 32)
+		rand.Read(client.Key)
 
-			pr2, pw2 := io.Pipe()
-			sess.SetPipes(pr2, pw2)
+		pr2, pw2 := io.Pipe()
+		sess.SetPipes(pr2, pw2)
 
-			encryptedDone := make(chan []byte, 1)
-			go func() {
-				data, _ := io.ReadAll(pr2)
-				encryptedDone <- data
-			}()
+		encryptedDone := make(chan []byte, 1)
+		go func() {
+			data, _ := io.ReadAll(pr2)
+			encryptedDone <- data
+		}()
 
-			err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
-			if err != nil {
-				t.Fatalf("UploadReaderAtOffset encrypted failed: %v", err)
-			}
+		err := client.UploadReaderAtOffset(context.Background(), bytes.NewReader(testData), 0)
+		if err != nil {
+			t.Fatalf("UploadReaderAtOffset encrypted failed: %v", err)
+		}
 
-			encryptedReceived := <-encryptedDone
-			if len(encryptedReceived) <= len(testData) {
-				t.Fatalf("expected encrypted data payload to be larger than plaintext")
-			}
+		encryptedReceived := <-encryptedDone
+		if len(encryptedReceived) <= len(testData) {
+			t.Fatalf("expected encrypted data payload to be larger than plaintext")
+		}
 
-			// Verify decrypting the encrypted stream
-			decReader, err := NewDecryptingReader(bytes.NewReader(encryptedReceived), client.Key)
-			if err != nil {
-				t.Fatalf("NewDecryptingReader failed: %v", err)
-			}
-			decryptedData, err := io.ReadAll(decReader)
-			if err != nil {
-				t.Fatalf("Decrypting stream failed: %v", err)
-			}
-			if string(decryptedData) != string(testData) {
-				t.Fatalf("expected decrypted data '%s', got '%s'", string(testData), string(decryptedData))
-			}
-		})
-	}
+		// Verify decrypting the encrypted stream
+		decReader, err := NewDecryptingReader(bytes.NewReader(encryptedReceived), client.Key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+		decryptedData, err := io.ReadAll(decReader)
+		if err != nil {
+			t.Fatalf("Decrypting stream failed: %v", err)
+		}
+		if string(decryptedData) != string(testData) {
+			t.Fatalf("expected decrypted data '%s', got '%s'", string(testData), string(decryptedData))
+		}
+	})
 
 	t.Run("InvalidKeyLength", func(t *testing.T) {
-		for _, keyLen := range []int{1, 10, 15, 20, 31, 33} {
+		for _, keyLen := range []int{1, 10, 15, 16, 20, 24, 31, 33, 64} {
 			t.Run(fmt.Sprintf("KeyLength_%d", keyLen), func(t *testing.T) {
 				client, _ := createIsolatedSession(t)
 				client.Key = make([]byte, keyLen)
