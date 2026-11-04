@@ -746,9 +746,10 @@ describe('Gaze Web Sender Test Suite', () => {
   let dom;
   let window;
   let document;
-  let app;
+  let fetchedURLs = [];
 
   beforeEach(() => {
+    fetchedURLs = [];
     dom = new JSDOM(htmlContent, {
       url: 'http://localhost:8080/'
     });
@@ -822,6 +823,7 @@ describe('Gaze Web Sender Test Suite', () => {
     }
 
     global.fetch = async (url) => {
+      fetchedURLs.push(url.toString());
       if (url.includes('/poll')) {
           return { ok: false, status: 404 };
       }
@@ -883,7 +885,7 @@ describe('Gaze Web Sender Test Suite', () => {
     // Verify send-qr-img src uses local client-side Data URL without third-party calls
     const sendQrImg = document.getElementById('send-qr-img');
     assert.notEqual(sendQrImg, null);
-    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml'), true);
+    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml;charset=utf-8,'), true);
     assert.equal(sendQrImg.src.includes('api.qrserver.com'), false);
   });
 
@@ -897,7 +899,7 @@ describe('Gaze Web Sender Test Suite', () => {
     const svgStr = decodeURIComponent(dataUrl.replace('data:image/svg+xml;charset=utf-8,', ''));
     assert.equal(svgStr.includes('<svg'), true);
     assert.equal(svgStr.includes('viewBox='), true);
-    assert.equal(svgStr.includes('fill="#000000"'), true);
+    assert.equal(svgStr.includes('<path fill="#000000"'), true);
   });
 
   test('Client-side QR generation renders locally without external api.qrserver.com requests', async () => {
@@ -917,6 +919,19 @@ describe('Gaze Web Sender Test Suite', () => {
     // Verify QR code was rendered on send-qr-canvas
     const canvas = document.getElementById('send-qr-canvas');
     assert.notEqual(canvas, null);
+  });
+
+  test('completed upload displays a visible QR instead of leaving it in the hidden fallback image', () => {
+    app.showDone('uploaded.txt', 1024, 'HTTP Upload');
+
+    const canvas = document.getElementById('done-qr-canvas');
+    const image = document.getElementById('done-qr-img');
+    const shareContainer = document.getElementById('done-share-container');
+
+    assert.equal(canvas.classList.contains('hidden'), false);
+    assert.equal(canvas.style.display, 'block');
+    assert.equal(image.classList.contains('hidden'), true);
+    assert.equal(shareContainer.classList.contains('hidden'), false);
   });
 
   test('createOPFSWriter uses createWritable when available', async () => {
@@ -1293,6 +1308,5 @@ describe('WebRTC Buffer Backpressure Suite', () => {
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
   });
 });
-
 
 
