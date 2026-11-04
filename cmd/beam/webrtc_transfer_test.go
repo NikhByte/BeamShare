@@ -107,6 +107,18 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 	var senderMu sync.Mutex
 	var activeCancel context.CancelFunc
 
+	var dcSendMu sync.Mutex
+	sendText := func(s string) error {
+		dcSendMu.Lock()
+		defer dcSendMu.Unlock()
+		return dc.SendText(s)
+	}
+	sendBytes := func(b []byte) error {
+		dcSendMu.Lock()
+		defer dcSendMu.Unlock()
+		return dc.Send(b)
+	}
+
 	dc.OnClose(func() {
 		senderMu.Lock()
 		if activeCancel != nil {
@@ -156,7 +168,7 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				}
 
 				metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
-				if errSend := dc.SendText(metaHeader); errSend != nil {
+				if errSend := sendText(metaHeader); errSend != nil {
 					return
 				}
 
@@ -198,9 +210,15 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 
 					n, errRead := file.Read(buffer)
 					if n > 0 {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
+
 						chunkCopy := make([]byte, n)
 						copy(chunkCopy, buffer[:n])
-						errSend := dc.Send(chunkCopy)
+						errSend := sendBytes(chunkCopy)
 						if errSend != nil {
 							return
 						}
@@ -227,7 +245,7 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				default:
 				}
 
-				dc.SendText("EOF")
+				sendText("EOF")
 			}(transferCtx)
 		}
 	})

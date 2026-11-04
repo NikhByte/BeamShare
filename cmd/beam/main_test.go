@@ -22,6 +22,7 @@ import (
 	"github.com/beamshare/beam/internal/server"
 	"github.com/beamshare/beam/internal/signaling"
 	"github.com/pion/webrtc/v3"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -555,4 +556,387 @@ func TestDownloadFile_ValidEncrypted(t *testing.T) {
 	if !bytes.Equal(data, plainContent) {
 		t.Fatalf("expected decrypted content '%s', got '%s'", string(plainContent), string(data))
 	}
+}
+
+func TestWebRTCDataChannel_DuplicateOffsetCancellationAndBackpressure(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "beam_test_*.bin")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	data := make([]byte, 512*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	tmpFile.Write(data)
+	tmpFile.Close()
+
+	api := signaling.NewWebRTCAPI()
+	pcSender, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("failed to create pcSender: %v", err)
+	}
+	defer pcSender.Close()
+
+	pcReceiver, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("failed to create pcReceiver: %v", err)
+	}
+	defer pcReceiver.Close()
+
+	pcSender.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			pcReceiver.AddICECandidate(c.ToJSON())
+		}
+	})
+	pcReceiver.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			pcSender.AddICECandidate(c.ToJSON())
+		}
+	})
+
+	var receiverDC *webrtc.DataChannel
+	dcReady := make(chan struct{})
+
+	var receivedChunks [][]byte
+	var receivedChunksMu sync.Mutex
+	eofReceived := make(chan struct{})
+
+	var receivedBytesAfterMeta int
+	metaCount := 0
+	pcReceiver.OnDataChannel(func(dc *webrtc.DataChannel) {
+		receiverDC = dc
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			if msg.IsString {
+				dataStr := string(msg.Data)
+				if strings.HasPrefix(dataStr, "META:") {
+					receivedChunksMu.Lock()
+					metaCount++
+					receivedBytesAfterMeta = 0
+					receivedChunksMu.Unlock()
+				} else if dataStr == "EOF" {
+					close(eofReceived)
+				}
+			} else {
+				receivedChunksMu.Lock()
+				if metaCount >= 2 {
+					c := make([]byte, len(msg.Data))
+					copy(c, msg.Data)
+					receivedChunks = append(receivedChunks, c)
+					receivedBytesAfterMeta += len(msg.Data)
+				}
+				receivedChunksMu.Unlock()
+			}
+		})
+		dc.OnOpen(func() {
+			close(dcReady)
+		})
+	})
+
+	ordered := true
+	dcSender, err := pcSender.CreateDataChannel("beam-file", &webrtc.DataChannelInit{
+		Ordered: &ordered,
+	})
+	if err != nil {
+		t.Fatalf("failed to create data channel: %v", err)
+	}
+
+	offer, err := pcSender.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("failed to create offer: %v", err)
+	}
+	if err := pcSender.SetLocalDescription(offer); err != nil {
+		t.Fatalf("failed to set local sdp: %v", err)
+	}
+
+	<-webrtc.GatheringCompletePromise(pcSender)
+
+	if err := pcReceiver.SetRemoteDescription(*pcSender.LocalDescription()); err != nil {
+		t.Fatalf("failed to set remote sdp: %v", err)
+	}
+
+	answer, err := pcReceiver.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("failed to create answer: %v", err)
+	}
+	if err := pcReceiver.SetLocalDescription(answer); err != nil {
+		t.Fatalf("failed to set local answer: %v", err)
+	}
+
+	<-webrtc.GatheringCompletePromise(pcReceiver)
+
+	if err := pcSender.SetRemoteDescription(*pcReceiver.LocalDescription()); err != nil {
+		t.Fatalf("failed to set remote answer: %v", err)
+	}
+
+	select {
+	case <-dcReady:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for data channel to open")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	mainCtx, mainCancel := context.WithCancel(context.Background())
+	defer mainCancel()
+
+	filePath := tmpFile.Name()
+	fileName := filepath.Base(filePath)
+	fileSize := int64(len(data))
+
+	var streamMu sync.Mutex
+	var streamCancel context.CancelFunc
+
+	dcSender.OnMessage(func(msg webrtc.DataChannelMessage) {
+		if !msg.IsString {
+			return
+		}
+		dataStr := string(msg.Data)
+		if strings.HasPrefix(dataStr, "OFFSET:") {
+			parts := strings.SplitN(dataStr, ":", 2)
+			var offset int64
+			if len(parts) == 2 {
+				offset, _ = strconv.ParseInt(parts[1], 10, 64)
+			}
+
+			streamMu.Lock()
+			if streamCancel != nil {
+				streamCancel()
+			}
+			var streamCtx context.Context
+			streamCtx, streamCancel = context.WithCancel(mainCtx)
+			streamMu.Unlock()
+
+			go func(ctx context.Context, reqOffset int64) {
+				file, err := os.Open(filePath)
+				if err != nil {
+					return
+				}
+				defer file.Close()
+
+				if reqOffset > 0 {
+					_, err = file.Seek(reqOffset, io.SeekStart)
+					if err != nil {
+						return
+					}
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
+				dcSender.SendText(metaHeader)
+
+				bufferedAmountLowChan := make(chan struct{}, 1)
+				dcSender.SetBufferedAmountLowThreshold(512 * 1024)
+				dcSender.OnBufferedAmountLow(func() {
+					select {
+					case bufferedAmountLowChan <- struct{}{}:
+					default:
+					}
+				})
+
+				buffer := make([]byte, 16*1024)
+				totalSent := reqOffset
+
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+
+					if dcSender.BufferedAmount() > 1024*1024 {
+						for dcSender.BufferedAmount() > 512*1024 {
+							select {
+							case <-ctx.Done():
+								return
+							case <-bufferedAmountLowChan:
+							case <-time.After(10 * time.Millisecond):
+							}
+						}
+					}
+
+					n, err := file.Read(buffer)
+					if n > 0 {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
+
+						chunk := make([]byte, n)
+						copy(chunk, buffer[:n])
+
+						errSend := dcSender.Send(chunk)
+						if errSend != nil {
+							return
+						}
+						totalSent += int64(n)
+					}
+					if err != nil {
+						break
+					}
+				}
+
+				dcSender.SetBufferedAmountLowThreshold(0)
+				for dcSender.BufferedAmount() > 0 {
+					select {
+					case <-ctx.Done():
+						return
+					case <-bufferedAmountLowChan:
+					case <-time.After(10 * time.Millisecond):
+					}
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				dcSender.SendText("EOF")
+			}(streamCtx, offset)
+		}
+	})
+
+	receiverDC.SendText("OFFSET:0")
+	time.Sleep(5 * time.Millisecond)
+	receiverDC.SendText("OFFSET:1024")
+
+	select {
+	case <-eofReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for EOF")
+	}
+
+	receivedChunksMu.Lock()
+	defer receivedChunksMu.Unlock()
+
+	expectedLen := len(data) - 1024
+	if receivedBytesAfterMeta != expectedLen {
+		t.Fatalf("expected received bytes after meta %d, got %d", expectedLen, receivedBytesAfterMeta)
+	}
+}
+
+func TestActiveChannelsPruningOnClose(t *testing.T) {
+	channelsMu.Lock()
+	activeChannels = nil
+	channelsMu.Unlock()
+	defer func() {
+		channelsMu.Lock()
+		activeChannels = nil
+		channelsMu.Unlock()
+	}()
+
+	api := webrtc.NewAPI()
+	pc1, err := api.NewPeerConnection(webrtc.Configuration{})
+	require.NoError(t, err)
+	defer pc1.Close()
+
+	pc2, err := api.NewPeerConnection(webrtc.Configuration{})
+	require.NoError(t, err)
+	defer pc2.Close()
+
+	pc1.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			_ = pc2.AddICECandidate(c.ToJSON())
+		}
+	})
+	pc2.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			_ = pc1.AddICECandidate(c.ToJSON())
+		}
+	})
+
+	dc1Open := make(chan struct{})
+	dc2Open := make(chan struct{})
+
+	dc1, err := pc1.CreateDataChannel("live1", nil)
+	require.NoError(t, err)
+	dc1.OnOpen(func() {
+		channelsMu.Lock()
+		dc1.OnClose(func() {
+			channelsMu.Lock()
+			defer channelsMu.Unlock()
+			var updated []*webrtc.DataChannel
+			for _, ch := range activeChannels {
+				if ch != dc1 {
+					updated = append(updated, ch)
+				}
+			}
+			activeChannels = updated
+		})
+		activeChannels = append(activeChannels, dc1)
+		channelsMu.Unlock()
+		close(dc1Open)
+	})
+
+	dc2, err := pc1.CreateDataChannel("live2", nil)
+	require.NoError(t, err)
+	dc2.OnOpen(func() {
+		channelsMu.Lock()
+		dc2.OnClose(func() {
+			channelsMu.Lock()
+			defer channelsMu.Unlock()
+			var updated []*webrtc.DataChannel
+			for _, ch := range activeChannels {
+				if ch != dc2 {
+					updated = append(updated, ch)
+				}
+			}
+			activeChannels = updated
+		})
+		activeChannels = append(activeChannels, dc2)
+		channelsMu.Unlock()
+		close(dc2Open)
+	})
+
+	offer, err := pc1.CreateOffer(nil)
+	require.NoError(t, err)
+	require.NoError(t, pc1.SetLocalDescription(offer))
+	require.NoError(t, pc2.SetRemoteDescription(offer))
+
+	answer, err := pc2.CreateAnswer(nil)
+	require.NoError(t, err)
+	require.NoError(t, pc2.SetLocalDescription(answer))
+	require.NoError(t, pc1.SetRemoteDescription(answer))
+
+	select {
+	case <-dc1Open:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for dc1 open")
+	}
+	select {
+	case <-dc2Open:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for dc2 open")
+	}
+
+	channelsMu.Lock()
+	count := len(activeChannels)
+	channelsMu.Unlock()
+	require.Equal(t, 2, count)
+
+	// Close dc1
+	require.NoError(t, dc1.Close())
+
+	require.Eventually(t, func() bool {
+		channelsMu.Lock()
+		defer channelsMu.Unlock()
+		return len(activeChannels) == 1 && activeChannels[0] == dc2
+	}, 5*time.Second, 50*time.Millisecond)
+
+	// Close dc2
+	require.NoError(t, dc2.Close())
+
+	require.Eventually(t, func() bool {
+		channelsMu.Lock()
+		defer channelsMu.Unlock()
+		return len(activeChannels) == 0
+	}, 5*time.Second, 50*time.Millisecond)
 }

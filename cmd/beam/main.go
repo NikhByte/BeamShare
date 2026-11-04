@@ -794,6 +794,17 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					if len(backlog) > 0 {
 						dc.SendText(string(backlog))
 					}
+					dc.OnClose(func() {
+						channelsMu.Lock()
+						defer channelsMu.Unlock()
+						var updated []*webrtc.DataChannel
+						for _, ch := range activeChannels {
+							if ch != dc {
+								updated = append(updated, ch)
+							}
+						}
+						activeChannels = updated
+					})
 					activeChannels = append(activeChannels, dc)
 					channelsMu.Unlock()
 					fmt.Println("\n  [P2P] Receiver subscribed to live log stream!")
