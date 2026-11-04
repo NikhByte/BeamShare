@@ -1256,64 +1256,6 @@ const CIRCUMFERENCE   = 2 * Math.PI * 42; // SVG progress ring
 // ── State ──────────────────────────────────────────────────────────────────────
 let currentFile      = null;
 
-/**
- * Waits for a WebRTC DataChannel's bufferedAmount to drop to or below targetThreshold.
- * Combines bufferedamountlow listener, post-registration level check, and 250ms timeout fallback.
- *
- * @param {RTCDataChannel} dc
- * @param {number} targetThreshold - Target bufferedAmount in bytes
- * @param {number} timeoutMs - Timeout fallback in milliseconds (default: 250)
- * @returns {Promise<void>}
- */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 250) {
-  if (!dc) return Promise.resolve();
-  try {
-    dc.bufferedAmountLowThreshold = targetThreshold;
-  } catch (e) {}
-
-  if (dc.bufferedAmount <= targetThreshold) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve) => {
-    let timer = null;
-    let resolved = false;
-
-    const cleanupAndResolve = () => {
-      if (resolved) return;
-      resolved = true;
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      try {
-        dc.removeEventListener('bufferedamountlow', listener);
-      } catch (e) {}
-      resolve();
-    };
-
-    const listener = () => {
-      cleanupAndResolve();
-    };
-
-    try {
-      dc.addEventListener('bufferedamountlow', listener);
-    } catch (e) {
-      cleanupAndResolve();
-      return;
-    }
-
-    // Immediate post-registration check in case threshold was crossed during callback setup
-    if (dc.bufferedAmount <= targetThreshold) {
-      cleanupAndResolve();
-      return;
-    }
-
-    timer = setTimeout(() => {
-      cleanupAndResolve();
-    }, timeoutMs);
-  });
-}
 let transferMode     = 'http';   // 'webrtc' | 'http'
 let startTime        = 0;
 let receivedBytes    = 0;
@@ -2563,7 +2505,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window !== 'undefined' && !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -2628,12 +2572,30 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      let testMetaUrl = localURL;
+      try {
+        const urlObj = new URL(testMetaUrl);
+        urlObj.pathname = '/api/meta';
+        if (sessionID && !urlObj.searchParams.has('s')) {
+          urlObj.searchParams.set('s', sessionID);
+        }
+        testMetaUrl = urlObj.toString();
+      } catch (e) {}
+
+      const res = await fetch(testMetaUrl, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
         console.log("Local connection successful, using as backend...");
-        window.GAZE_BACKEND_URL = localURL;
+        try {
+          const cleanBackend = new URL(localURL);
+          cleanBackend.pathname = '';
+          cleanBackend.search = '';
+          cleanBackend.hash = '';
+          window.GAZE_BACKEND_URL = cleanBackend.toString().replace(/\/$/, '');
+        } catch (e) {
+          window.GAZE_BACKEND_URL = localURL;
+        }
         // Do not return, continue to bootstrap flow using localURL as backend
       }
     } catch (e) {
@@ -3500,15 +3462,27 @@ async function startWebRTC() {
  * Attaches the 'bufferedamountlow' listener and immediately re-evaluates bufferedAmount before awaiting,
  * supplemented by a polling fallback to prevent race conditions during buffer drains.
  */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
+function waitForBufferedAmountLow(dc, targetThreshold = 0, lowWatermark = 0, pollMs = 250) {
+  let threshold = targetThreshold;
+  let effectivePollMs = 250;
+
+  if (typeof lowWatermark === 'number' && lowWatermark > 1000 && lowWatermark < targetThreshold) {
+    threshold = lowWatermark;
+    if (typeof pollMs === 'number' && pollMs > 0 && pollMs <= 1000) {
+      effectivePollMs = pollMs;
+    }
+  } else if (typeof lowWatermark === 'number' && lowWatermark > 0 && lowWatermark <= 1000) {
+    effectivePollMs = lowWatermark;
+  }
+
   return new Promise((resolve, reject) => {
     if (!dc || dc.readyState !== 'open') {
       return reject(new Error("Data channel is no longer open"));
     }
 
-    dc.bufferedAmountLowThreshold = targetThreshold;
+    dc.bufferedAmountLowThreshold = threshold;
 
-    if (dc.bufferedAmount <= targetThreshold) {
+    if (dc.bufferedAmount <= threshold) {
       return resolve();
     }
 
@@ -3517,6 +3491,8 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
     const cleanup = () => {
       if (dc && typeof dc.removeEventListener === 'function') {
         dc.removeEventListener('bufferedamountlow', onBufferedAmountLow);
+        dc.removeEventListener('close', onCloseOrError);
+        dc.removeEventListener('error', onCloseOrError);
       }
       if (intervalId !== null) {
         clearInterval(intervalId);
@@ -3529,11 +3505,18 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
       resolve();
     };
 
-    // Attach bufferedamountlow listener
+    const onCloseOrError = () => {
+      cleanup();
+      reject(new Error("Data channel is no longer open"));
+    };
+
+    // Attach listeners
     dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
+    dc.addEventListener('close', onCloseOrError);
+    dc.addEventListener('error', onCloseOrError);
 
     // Immediately re-evaluate bufferedAmount after attaching listener
-    if (dc.bufferedAmount <= targetThreshold) {
+    if (dc.bufferedAmount <= threshold) {
       cleanup();
       return resolve();
     }
@@ -3545,11 +3528,11 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
         reject(new Error("Data channel is no longer open"));
         return;
       }
-      if (dc.bufferedAmount <= targetThreshold) {
+      if (dc.bufferedAmount <= threshold) {
         cleanup();
         resolve();
       }
-    }, pollMs);
+    }, effectivePollMs);
   });
 }
 
@@ -3700,12 +3683,17 @@ function appendTerminalText(text) {
 }
 
 function showDone(name, size, mode) {
-  localStorage.removeItem('beam_resume');
-  document.getElementById('done-sub').textContent = `${name} · ${formatBytes(size)}`;
+  if (typeof localStorage !== 'undefined' && localStorage && localStorage.removeItem) {
+    try { localStorage.removeItem('beam_resume'); } catch (_) {}
+  }
+  const doneSub = document.getElementById('done-sub');
+  if (doneSub) doneSub.textContent = `${name} · ${formatBytes(size)}`;
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   const speed   = formatBytes(size / (elapsed || 1)) + '/s';
-  document.getElementById('done-meta').innerHTML =
-    `<span>${mode}</span><span>${elapsed}s · avg ${speed}</span>`;
+  const doneMeta = document.getElementById('done-meta');
+  if (doneMeta) {
+    doneMeta.innerHTML = `<span>${mode}</span><span>${elapsed}s · avg ${speed}</span>`;
+  }
 
   const doneTitle = document.getElementById('done-title');
   const doneShare = document.getElementById('done-share-container');
@@ -3883,6 +3871,7 @@ async function startSenderSharing() {
     // Publish as soon as the first usable route is available. Later candidates
     // are pushed to the relay instead of blocking QR display.
     await waitForInitialICECandidate(senderPeerConnection, localCandidates);
+
 
     setLoadingSub('Publishing SDP offer to relay…');
     const stateRes = await fetch(`${backend}/relay/state?session=${senderSessionID}`, {
