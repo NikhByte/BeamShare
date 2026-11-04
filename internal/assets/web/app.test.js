@@ -313,7 +313,9 @@ describe('Gaze Web Receiver Test Suite', () => {
     const ssePromise = app.startHTTPSSE();
 
     // Allow microtasks to run so clearIDB completes and onmessage is assigned
-    await new Promise(resolve => setTimeout(resolve, 10));
+    for (let i = 0; i < 50 && (!mockSourceInstance || document.getElementById('state-livepipe').classList.contains('hidden')); i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
 
     assert.notEqual(mockSourceInstance, null);
     assert.equal(document.getElementById('state-livepipe').classList.contains('hidden'), false);
