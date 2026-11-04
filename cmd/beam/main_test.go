@@ -203,6 +203,7 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 
 		var (
 			senderCancel context.CancelFunc
+			senderDone   chan struct{}
 			senderMu     sync.Mutex
 		)
 
@@ -222,20 +223,26 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 			dataStr := string(msg.Data)
 			if strings.HasPrefix(dataStr, "OFFSET:") {
 				parts := strings.SplitN(dataStr, ":", 2)
-				var offset int64
+				var reqOffset int64
 				if len(parts) == 2 {
-					offset, _ = strconv.ParseInt(parts[1], 10, 64)
+					reqOffset, _ = strconv.ParseInt(parts[1], 10, 64)
 				}
 
 				senderMu.Lock()
 				if senderCancel != nil {
 					senderCancel()
+					senderMu.Unlock()
+					<-senderDone
+					senderMu.Lock()
 				}
 				var ctx context.Context
 				ctx, senderCancel = context.WithCancel(mainCtx)
+				done := make(chan struct{})
+				senderDone = done
 				senderMu.Unlock()
 
-				go func(ctx context.Context) {
+				go func(ctx context.Context, offset int64) {
+					defer close(done)
 					file, err := os.Open(filePath)
 					if err != nil {
 						return
@@ -312,7 +319,7 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 					}
 
 					dc.SendText("EOF")
-				}(ctx)
+				}(ctx, reqOffset)
 			}
 		})
 	}
@@ -415,6 +422,7 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 	var receivedBuf bytes.Buffer
 	eofChan := make(chan struct{})
 	firstChunkReceived := make(chan struct{}, 1)
+	metaCount := 0
 
 	rxDC.OnMessage(func(msg webrtc.DataChannelMessage) {
 		mu.Lock()
@@ -422,16 +430,23 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 		if msg.IsString {
 			str := string(msg.Data)
 			if strings.HasPrefix(str, "META:") {
-				receivedBuf.Reset()
+				metaCount++
+				if metaCount >= 2 {
+					receivedBuf.Reset()
+				}
 			} else if str == "EOF" {
-				select {
-				case <-eofChan:
-				default:
-					close(eofChan)
+				if metaCount >= 2 {
+					select {
+					case <-eofChan:
+					default:
+						close(eofChan)
+					}
 				}
 			}
 		} else {
-			receivedBuf.Write(msg.Data)
+			if metaCount >= 2 {
+				receivedBuf.Write(msg.Data)
+			}
 			select {
 			case firstChunkReceived <- struct{}{}:
 			default:

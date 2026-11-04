@@ -1,3 +1,18 @@
+function getToken() {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get('token') || params.get('t') || '';
+  if (!token) {
+    const backend = params.get('backend') || params.get('b') || '';
+    if (backend && backend.includes('token=')) {
+      try {
+        const backendUrl = new URL(backend);
+        token = backendUrl.searchParams.get('token') || backendUrl.searchParams.get('t') || '';
+      } catch (e) {}
+    }
+  }
+  return token;
+}
+
 // ── Client-side QR Code Generator Engine (Zero Network Dependencies) ──────
 var qrcodegen = (function() {
 	function QrCode(version, errorCorrectionLevel, dataCodewords, msk) {
@@ -509,6 +524,9 @@ function getBackendURL() {
       backend = 'https://beamshare.onrender.com';
     }
   }
+  if (backend && backend.includes('?')) {
+    backend = backend.split('?')[0];
+  }
   if (backend && backend.endsWith('/')) {
     backend = backend.slice(0, -1);
   }
@@ -519,10 +537,18 @@ function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
-  let fullPath = path;
-  if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
-  }
+  const token = getToken();
+
+  const urlParts = path.split('?');
+  const basePath = urlParts[0];
+  const queryParams = new URLSearchParams(urlParts[1] || '');
+
+  if (s) queryParams.set('s', s);
+  if (token && !queryParams.has('token')) queryParams.set('token', token);
+
+  const queryString = queryParams.toString();
+  const fullPath = queryString ? `${basePath}?${queryString}` : basePath;
+
   if (backend) {
     return backend + fullPath;
   }
@@ -1256,64 +1282,6 @@ const CIRCUMFERENCE   = 2 * Math.PI * 42; // SVG progress ring
 // ── State ──────────────────────────────────────────────────────────────────────
 let currentFile      = null;
 
-/**
- * Waits for a WebRTC DataChannel's bufferedAmount to drop to or below targetThreshold.
- * Combines bufferedamountlow listener, post-registration level check, and 250ms timeout fallback.
- *
- * @param {RTCDataChannel} dc
- * @param {number} targetThreshold - Target bufferedAmount in bytes
- * @param {number} timeoutMs - Timeout fallback in milliseconds (default: 250)
- * @returns {Promise<void>}
- */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, timeoutMs = 250) {
-  if (!dc) return Promise.resolve();
-  try {
-    dc.bufferedAmountLowThreshold = targetThreshold;
-  } catch (e) {}
-
-  if (dc.bufferedAmount <= targetThreshold) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve) => {
-    let timer = null;
-    let resolved = false;
-
-    const cleanupAndResolve = () => {
-      if (resolved) return;
-      resolved = true;
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      try {
-        dc.removeEventListener('bufferedamountlow', listener);
-      } catch (e) {}
-      resolve();
-    };
-
-    const listener = () => {
-      cleanupAndResolve();
-    };
-
-    try {
-      dc.addEventListener('bufferedamountlow', listener);
-    } catch (e) {
-      cleanupAndResolve();
-      return;
-    }
-
-    // Immediate post-registration check in case threshold was crossed during callback setup
-    if (dc.bufferedAmount <= targetThreshold) {
-      cleanupAndResolve();
-      return;
-    }
-
-    timer = setTimeout(() => {
-      cleanupAndResolve();
-    }, timeoutMs);
-  });
-}
 let transferMode     = 'http';   // 'webrtc' | 'http'
 let startTime        = 0;
 let receivedBytes    = 0;
@@ -2200,7 +2168,7 @@ async function getSWPipe(fileMeta) {
       return null;
     }
 
-    const swUrl = `/sw-download-pipe/${Math.random().toString(36).substring(2)}`;
+    const swUrl = apiPath(`/sw-download-pipe/${Math.random().toString(36).substring(2)}`);
     const channel = new MessageChannel();
     const port = channel.port1;
 
@@ -2563,7 +2531,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -3502,11 +3472,16 @@ async function startWebRTC() {
  */
 function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
   return new Promise((resolve, reject) => {
-    if (!dc || dc.readyState !== 'open') {
+    if (!dc || dc.readyState === 'closed' || dc.readyState === 'closing') {
+      return reject(new Error("Data channel is closed or closing"));
+    }
+    if (dc.readyState !== 'open') {
       return reject(new Error("Data channel is no longer open"));
     }
 
-    dc.bufferedAmountLowThreshold = targetThreshold;
+    try {
+      dc.bufferedAmountLowThreshold = targetThreshold;
+    } catch (e) {}
 
     if (dc.bufferedAmount <= targetThreshold) {
       return resolve();
@@ -3517,6 +3492,8 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
     const cleanup = () => {
       if (dc && typeof dc.removeEventListener === 'function') {
         dc.removeEventListener('bufferedamountlow', onBufferedAmountLow);
+        dc.removeEventListener('close', onCloseOrError);
+        dc.removeEventListener('error', onCloseOrError);
       }
       if (intervalId !== null) {
         clearInterval(intervalId);
@@ -3529,17 +3506,28 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
       resolve();
     };
 
-    // Attach bufferedamountlow listener
-    dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
+    const onCloseOrError = () => {
+      cleanup();
+      reject(new Error("Data channel is closed or closing"));
+    };
 
-    // Immediately re-evaluate bufferedAmount after attaching listener
+    if (dc && typeof dc.addEventListener === 'function') {
+      dc.addEventListener('bufferedamountlow', onBufferedAmountLow);
+      dc.addEventListener('close', onCloseOrError);
+      dc.addEventListener('error', onCloseOrError);
+    }
+
     if (dc.bufferedAmount <= targetThreshold) {
       cleanup();
       return resolve();
     }
 
-    // Polling fallback to check for buffer drain or closed channel
     intervalId = setInterval(() => {
+      if (dc.readyState === 'closed' || dc.readyState === 'closing') {
+        cleanup();
+        reject(new Error("Data channel is closed or closing"));
+        return;
+      }
       if (dc.readyState !== 'open') {
         cleanup();
         reject(new Error("Data channel is no longer open"));
@@ -3683,7 +3671,12 @@ function renderFileCard(meta) {
 
 function triggerSave(blob, name) {
   const url = URL.createObjectURL(blob);
-  const a   = Object.assign(document.createElement('a'), { href: url, download: name, target: '_blank', rel: 'noopener' });
+  triggerSaveURL(url, name);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function triggerSaveURL(url, name) {
+  const a = Object.assign(document.createElement('a'), { href: url, download: name, target: '_blank', rel: 'noopener' });
   document.body.appendChild(a);
   a.click();
   setTimeout(() => {
@@ -3700,7 +3693,9 @@ function appendTerminalText(text) {
 }
 
 function showDone(name, size, mode) {
-  localStorage.removeItem('beam_resume');
+  if (typeof localStorage !== 'undefined') {
+    try { localStorage.removeItem('beam_resume'); } catch (_) {}
+  }
   document.getElementById('done-sub').textContent = `${name} · ${formatBytes(size)}`;
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   const speed   = formatBytes(size / (elapsed || 1)) + '/s';
@@ -4738,8 +4733,8 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    waitForBufferedAmountLow,
     waitForDataChannelBuffer,
+    waitForBufferedAmountLow,
     waitForInitialICECandidate,
     uploadFileP2P,
     sendWebRTCFile,
@@ -4755,6 +4750,7 @@ if (typeof module !== 'undefined' && module.exports) {
     VirtualLogViewer,
     startHTTPSSE,
     getBackendURL,
+    getToken,
     apiPath,
     formatBytes,
     mimeLabel,
@@ -4774,6 +4770,7 @@ if (typeof module !== 'undefined' && module.exports) {
     parseDecryptionKeyFromHash,
     parseSessionInput,
     getIceServers,
+    getToken,
     init
   };
 }
