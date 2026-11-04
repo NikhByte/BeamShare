@@ -104,8 +104,11 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 
 // setupSenderDataChannelHandler simulates the session.OnOpen logic from main.go
 func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, fileName string, fileSize int64, activeSendersCount *int32) {
-	var senderMu sync.Mutex
-	var activeCancel context.CancelFunc
+	var (
+		senderMu     sync.Mutex
+		activeCancel context.CancelFunc
+		senderDone   chan struct{}
+	)
 
 	dc.OnClose(func() {
 		senderMu.Lock()
@@ -131,12 +134,24 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 			senderMu.Lock()
 			if activeCancel != nil {
 				activeCancel()
+				if senderDone != nil {
+					done := senderDone
+					senderMu.Unlock()
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+					}
+					senderMu.Lock()
+				}
 			}
 			transferCtx, cancel := context.WithCancel(context.Background())
 			activeCancel = cancel
+			done := make(chan struct{})
+			senderDone = done
 			senderMu.Unlock()
 
-			go func(ctx context.Context) {
+			go func(ctx context.Context, done chan struct{}) {
+				defer close(done)
 				if activeSendersCount != nil {
 					atomic.AddInt32(activeSendersCount, 1)
 					defer atomic.AddInt32(activeSendersCount, -1)
@@ -228,7 +243,7 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				}
 
 				dc.SendText("EOF")
-			}(transferCtx)
+			}(transferCtx, done)
 		}
 	})
 }
