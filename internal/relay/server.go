@@ -150,7 +150,8 @@ func (s *Session) closeUploadPipesLocked(err error) {
 }
 
 func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
-	closePipeWriter := func(w **io.PipeWriter) {
+	closePipePair := func(r **io.PipeReader, w **io.PipeWriter) {
+		wWasNotNil := *w != nil
 		if *w != nil {
 			if err != nil {
 				(*w).CloseWithError(err)
@@ -159,37 +160,33 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 			}
 			*w = nil
 		}
-	}
-	closePipeReader := func(r **io.PipeReader) {
 		if *r != nil {
-			if err != nil {
-				(*r).CloseWithError(err)
-			} else {
-				(*r).Close()
+			if !wWasNotNil {
+				if err != nil {
+					(*r).CloseWithError(err)
+				} else {
+					(*r).Close()
+				}
 			}
 			*r = nil
 		}
 	}
 
 	if pr == nil && pw == nil {
-		closePipeWriter(&s.DataPipeW)
-		closePipeReader(&s.DataPipeR)
-		closePipeWriter(&s.UploadPipeW)
-		closePipeReader(&s.UploadPipeR)
+		closePipePair(&s.DataPipeR, &s.DataPipeW)
+		closePipePair(&s.UploadPipeR, &s.UploadPipeW)
 		return
 	}
 
 	matched := false
 
 	if (pr != nil && s.DataPipeR == pr) || (pw != nil && s.DataPipeW == pw) {
-		closePipeWriter(&s.DataPipeW)
-		closePipeReader(&s.DataPipeR)
+		closePipePair(&s.DataPipeR, &s.DataPipeW)
 		matched = true
 	}
 
 	if (pr != nil && s.UploadPipeR == pr) || (pw != nil && s.UploadPipeW == pw) {
-		closePipeWriter(&s.UploadPipeW)
-		closePipeReader(&s.UploadPipeR)
+		closePipePair(&s.UploadPipeR, &s.UploadPipeW)
 		matched = true
 	}
 
@@ -331,13 +328,21 @@ func (s *Server) SweepExpiredSessions() {
 		sess.Close(fmt.Errorf("session expired"))
 	}
 
+	s.SweepExpiredIPs()
+}
+
+func (s *Server) SweepExpiredIPs() {
 	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	if s.failedAttempts == nil {
+		return
+	}
+	now := time.Now()
 	for ip, fa := range s.failedAttempts {
 		if now.Sub(fa.firstSeen) > time.Minute {
 			delete(s.failedAttempts, ip)
 		}
 	}
-	s.failedAttemptsMu.Unlock()
 }
 
 func (s *Server) GetSession(id string) *Session {
@@ -1283,6 +1288,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 					case <-done:
 						return
 					default:
+						r.Body.Close()
 						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("upload context cancelled: %w", r.Context().Err()))
 					}
 				}
@@ -1307,11 +1313,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			pw.Close()
 			part.Close()
 
-			if uploadErr != nil {
-				http.Error(w, fmt.Sprintf("upload error: %v", uploadErr), http.StatusInternalServerError)
-				return
-			}
-
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "filename": part.FileName()})
 			return
@@ -1324,8 +1325,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	sess := s.getSession(r.URL.Query().Get("session"))
 	if sess == nil {
-		http.Error(w, "not found", 404)
-		return
+		sess = s.getSession(r.URL.Query().Get("s"))
+		if sess == nil {
+			http.Error(w, "not found", 404)
+			return
+		}
 	}
 
 	sess.mu.Lock()
