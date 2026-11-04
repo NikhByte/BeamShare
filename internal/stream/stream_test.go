@@ -294,7 +294,7 @@ func TestStreamManager_DeterministicEOFFlush(t *testing.T) {
 		t.Fatal("timed out waiting for stream completion after EOF flush")
 	}
 
-	assert.True(t, eofSentTime.After(bufferClearedTime) || eofSentTime.Equal(bufferClearedTime))
+	assert.False(t, eofSentTime.Before(bufferClearedTime))
 
 	dc.mu.Lock()
 	require.Contains(t, dc.sentTexts, "EOF")

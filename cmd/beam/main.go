@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -462,16 +461,15 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 								fmt.Println("  ✅ Relay Transfer Complete!")
 							}
 						} else if cmd.Action == "upload" {
-							sanitizedFilename := sanitizeFilename(cmd.Filename)
-							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", sanitizedFilename)
+							cleanName := relay.SanitizeFilename(cmd.Filename)
+							fmt.Printf("\n  [Relay] Bridge active! Receiving HTTP Upload from relay (%s)...\n", cleanName)
 							rc, err := relClient.DownloadData()
 							if err != nil {
 								fmt.Printf("  Error downloading from relay: %v\n", err)
 								continue
 							}
 
-							cleanBase := server.SanitizeFilename(cmd.Filename, "upload.bin")
-							outName := "received_" + cleanBase
+							outName := "received_" + cleanName
 							outFile, err := os.Create(outName)
 							if err != nil {
 								fmt.Printf("  Error creating file: %v\n", err)
@@ -494,7 +492,7 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 									elapsed.Seconds(),
 									ui.FormatBytes(int64(speed)),
 								)
-								srv.UpdateSharedFile(outName, cleanBase, copied)
+								srv.UpdateSharedFile(outName, cleanName, copied)
 							}
 						}
 					}
@@ -536,7 +534,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					uploaded   int64
 					uploadStat time.Time
 				)
-				var isStreaming atomic.Bool
 
 				var senderMu sync.Mutex
 				var activeCancel context.CancelFunc
@@ -595,9 +592,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if isLive {
 								return
 							}
-							if !isStreaming.CompareAndSwap(false, true) {
-								return
-							}
 							parts := strings.SplitN(dataStr, ":", 2)
 							var offset int64
 							if len(parts) == 2 {
@@ -613,7 +607,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 							// File sender goroutine (Direct-to-Disk + Backpressure + Pause/Resume Flow Control)
 							go func(ctx context.Context, reqOffset int64) {
-								defer isStreaming.Store(false)
 								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
 								file, err := os.Open(filePath)
 								if err != nil {
