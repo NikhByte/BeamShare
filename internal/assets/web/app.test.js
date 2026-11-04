@@ -746,6 +746,7 @@ describe('Gaze Web Sender Test Suite', () => {
   let dom;
   let window;
   let document;
+  let app;
   let fetchedURLs = [];
 
   beforeEach(() => {
