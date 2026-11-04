@@ -2563,7 +2563,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -2729,6 +2731,15 @@ async function startHTTPDownload() {
 
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {
+    return;
+  }
+
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.error("Failed to import decryption key", err);
+    showError("Decryption key error: " + err.message);
     return;
   }
 
