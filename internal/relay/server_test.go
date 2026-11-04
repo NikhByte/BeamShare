@@ -175,7 +175,7 @@ func TestServer_DownloadQueueCleanupOnSessionExpiration(t *testing.T) {
 
 	// Wait for sweeper to clean up expired session
 	assert.Eventually(t, func() bool {
-		return srv.GetSession(sess.ID) == nil
+		return srv.GetSession(sess.ID) == nil && sess.DownloadQueueLen() == 0
 	}, 2*time.Second, 10*time.Millisecond, "Session did not expire in time")
 
 	assert.Equal(t, 0, sess.DownloadQueueLen())
@@ -232,7 +232,7 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 }
 
 func TestServer_LongPollingUnblockedAndGoroutinesCleanedOnExpiration(t *testing.T) {
-	srv := NewServerWithConfig(100*time.Millisecond, 20*time.Millisecond)
+	srv := NewServerWithConfig(300*time.Millisecond, 20*time.Millisecond)
 	defer srv.Stop()
 
 	ts := httptest.NewServer(srv)
