@@ -2736,6 +2736,11 @@ async function startHTTPDownload() {
   receivedBytes = 0;
   totalBytes    = currentFile.size;
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (e) {}
+
   // Try to use FileSystem API for streaming to disk if supported
   const useDiskStream = typeof window.showSaveFilePicker === 'function';
   const opfsSupported = !!(navigator.storage && navigator.storage.getDirectory);
@@ -3737,7 +3742,8 @@ function showError(msg) {
   if (useOPFS) {
     navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
   }
-  document.getElementById('error-msg').textContent = msg;
+  const errEl = document.getElementById('error-msg');
+  if (errEl) errEl.textContent = msg;
   setState('error');
 }
 
