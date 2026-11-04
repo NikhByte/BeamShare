@@ -265,9 +265,11 @@ func TestWebRTCTransfer_DuplicateOffsetCancellation(t *testing.T) {
 					receivedBytes.Reset()
 				}
 			} else if dataStr == "EOF" {
-				select {
-				case eofCh <- struct{}{}:
-				default:
+				if metaCount >= 2 {
+					select {
+					case eofCh <- struct{}{}:
+					default:
+					}
 				}
 			}
 		} else {

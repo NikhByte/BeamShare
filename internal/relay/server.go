@@ -121,7 +121,10 @@ func (s *Session) DownloadQueueLen() int {
 }
 
 func (s *Session) ClosePipes(err error) {
-	s.ClosePipesIfMatch(nil, nil, err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closePipesIfMatchLocked(nil, nil, err)
+	s.closeUploadPipesIfMatchLocked(nil, nil, err)
 }
 
 func (s *Session) ClosePipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err error) {
@@ -211,6 +214,52 @@ func (s *Session) closePipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, 
 	}
 }
 
+func (s *Session) CloseUploadPipes(err error) {
+	s.CloseUploadPipesIfMatch(nil, nil, err)
+}
+
+func (s *Session) CloseUploadPipesIfMatch(pr *io.PipeReader, pw *io.PipeWriter, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeUploadPipesIfMatchLocked(pr, pw, err)
+}
+
+func (s *Session) closeUploadPipesIfMatchLocked(pr *io.PipeReader, pw *io.PipeWriter, err error) {
+	if pr == nil || s.UploadPipeR == pr {
+		if s.UploadPipeW != nil {
+			if err != nil {
+				s.UploadPipeW.CloseWithError(err)
+			} else {
+				s.UploadPipeW.Close()
+			}
+			s.UploadPipeW = nil
+		}
+		if s.UploadPipeR != nil {
+			if err != nil {
+				s.UploadPipeR.CloseWithError(err)
+			} else {
+				s.UploadPipeR.Close()
+			}
+			s.UploadPipeR = nil
+		}
+	} else {
+		if pw != nil {
+			if err != nil {
+				pw.CloseWithError(err)
+			} else {
+				pw.Close()
+			}
+		}
+		if pr != nil {
+			if err != nil {
+				pr.CloseWithError(err)
+			} else {
+				pr.Close()
+			}
+		}
+	}
+}
+
 func (s *Session) SetPipes(pr *io.PipeReader, pw *io.PipeWriter) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -222,6 +271,19 @@ func (s *Session) IsPipeReady() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.DataPipeR != nil && s.DataPipeW != nil
+}
+
+func (s *Session) SetUploadPipes(pr *io.PipeReader, pw *io.PipeWriter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.UploadPipeR = pr
+	s.UploadPipeW = pw
+}
+
+func (s *Session) IsUploadPipeReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.UploadPipeR != nil && s.UploadPipeW != nil
 }
 
 type failedAttempt struct {
@@ -1264,6 +1326,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			pr, pw := io.Pipe()
 			sess.UploadPipeR = pr
 			sess.UploadPipeW = pw
+
+			// Notify sender
+			if !sess.closed && sess.UploadReq != nil {
+				select {
+				case sess.UploadReq <- part.FileName():
+				default:
+				}
+			}
 			sess.mu.Unlock()
 
 			var uploadErr error
@@ -1287,14 +1357,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}()
-
-			// Notify sender
-			if !sess.closed && sess.UploadReq != nil {
-				select {
-				case sess.UploadReq <- part.FileName():
-				default:
-				}
-			}
 
 			// Stream data to pipe
 			_, uploadErr = io.Copy(pw, part)

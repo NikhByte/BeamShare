@@ -20,6 +20,7 @@ type DataChannel interface {
 type Manager struct {
 	mu         sync.Mutex
 	cancelFunc context.CancelFunc
+	workerDone chan struct{}
 }
 
 // NewManager creates a new single-flight stream manager.
@@ -48,6 +49,7 @@ func (m *Manager) StartStream(parentCtx context.Context, dc DataChannel, opts St
 	if m.cancelFunc != nil {
 		m.cancelFunc()
 	}
+	oldDone := m.workerDone
 
 	if parentCtx == nil {
 		parentCtx = context.Background()
@@ -55,9 +57,26 @@ func (m *Manager) StartStream(parentCtx context.Context, dc DataChannel, opts St
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	m.cancelFunc = cancel
+	workerDone := make(chan struct{})
+	m.workerDone = workerDone
 	m.mu.Unlock()
 
-	go m.runWorker(ctx, dc, opts)
+	go func() {
+		defer close(workerDone)
+		if oldDone != nil {
+			select {
+			case <-oldDone:
+			case <-ctx.Done():
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		m.runWorker(ctx, dc, opts)
+	}()
 }
 
 func (m *Manager) runWorker(ctx context.Context, dc DataChannel, opts StreamOptions) {
