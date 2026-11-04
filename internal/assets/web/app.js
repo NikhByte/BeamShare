@@ -2756,6 +2756,13 @@ async function startHTTPDownload() {
     return;
   }
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.warn("Could not parse decryption key from hash:", err);
+  }
+
   startTime     = Date.now();
   receivedBytes = 0;
   totalBytes    = currentFile.size;
