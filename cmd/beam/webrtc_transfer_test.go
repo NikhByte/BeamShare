@@ -106,6 +106,7 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, fileName string, fileSize int64, activeSendersCount *int32) {
 	var senderMu sync.Mutex
 	var activeCancel context.CancelFunc
+	var activeDone chan struct{}
 
 	dc.OnClose(func() {
 		senderMu.Lock()
@@ -132,11 +133,24 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 			if activeCancel != nil {
 				activeCancel()
 			}
+			prevDone := activeDone
+			activeDone = make(chan struct{})
 			transferCtx, cancel := context.WithCancel(context.Background())
 			activeCancel = cancel
+			currDone := activeDone
 			senderMu.Unlock()
 
-			go func(ctx context.Context) {
+			go func(ctx context.Context, reqOffset int64, prevDone <-chan struct{}, currDone chan struct{}) {
+				defer close(currDone)
+				if prevDone != nil {
+					<-prevDone
+				}
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
 				if activeSendersCount != nil {
 					atomic.AddInt32(activeSendersCount, 1)
 					defer atomic.AddInt32(activeSendersCount, -1)
@@ -148,8 +162,8 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				}
 				defer file.Close()
 
-				if offset > 0 {
-					_, err = file.Seek(offset, io.SeekStart)
+				if reqOffset > 0 {
+					_, err = file.Seek(reqOffset, io.SeekStart)
 					if err != nil {
 						return
 					}
@@ -170,7 +184,7 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				})
 
 				buffer := make([]byte, 64*1000) // 64KB chunk size
-				totalSent := offset
+				totalSent := reqOffset
 
 				for {
 					select {
@@ -228,7 +242,7 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				}
 
 				dc.SendText("EOF")
-			}(transferCtx)
+			}(transferCtx, offset, prevDone, currDone)
 		}
 	})
 }

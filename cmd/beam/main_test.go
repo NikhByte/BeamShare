@@ -204,6 +204,7 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 
 		var (
 			senderCancel context.CancelFunc
+			senderDone   chan struct{}
 			senderMu     sync.Mutex
 		)
 
@@ -232,19 +233,32 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 				if senderCancel != nil {
 					senderCancel()
 				}
+				prevDone := senderDone
+				senderDone = make(chan struct{})
 				var ctx context.Context
 				ctx, senderCancel = context.WithCancel(mainCtx)
+				currDone := senderDone
 				senderMu.Unlock()
 
-				go func(ctx context.Context) {
+				go func(ctx context.Context, off int64, prevDone <-chan struct{}, currDone chan struct{}) {
+					defer close(currDone)
+					if prevDone != nil {
+						<-prevDone
+					}
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+
 					file, err := os.Open(filePath)
 					if err != nil {
 						return
 					}
 					defer file.Close()
 
-					if offset > 0 {
-						_, err = file.Seek(offset, io.SeekStart)
+					if off > 0 {
+						_, err = file.Seek(off, io.SeekStart)
 						if err != nil {
 							return
 						}
@@ -265,7 +279,7 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 					})
 
 					buffer := make([]byte, 32*1024)
-					totalSent := offset
+					totalSent := off
 
 					for {
 						select {
@@ -313,7 +327,7 @@ func TestWebRTCSenderGoroutineDeduplicationAndBackpressure(t *testing.T) {
 					}
 
 					dc.SendText("EOF")
-				}(ctx)
+				}(ctx, offset, prevDone, currDone)
 			}
 		})
 	}
@@ -587,6 +601,7 @@ func TestWebRTC_SenderDeduplicationAndChecksum(t *testing.T) {
 		var (
 			senderMu     sync.Mutex
 			cancelSender context.CancelFunc
+			senderDone   chan struct{}
 		)
 
 		dc.OnClose(func() {
@@ -612,11 +627,24 @@ func TestWebRTC_SenderDeduplicationAndChecksum(t *testing.T) {
 					if cancelSender != nil {
 						cancelSender()
 					}
+					prevDone := senderDone
+					senderDone = make(chan struct{})
 					ctx, cancel := context.WithCancel(context.Background())
 					cancelSender = cancel
+					currDone := senderDone
 					senderMu.Unlock()
 
-					go func(ctx context.Context, offset int64) {
+					go func(ctx context.Context, offset int64, prevDone <-chan struct{}, currDone chan struct{}) {
+						defer close(currDone)
+						if prevDone != nil {
+							<-prevDone
+						}
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
+
 						file, err := os.Open(filePath)
 						if err != nil {
 							return
@@ -717,7 +745,7 @@ func TestWebRTC_SenderDeduplicationAndChecksum(t *testing.T) {
 						}
 
 						_ = dc.SendText("EOF")
-					}(ctx, offset)
+					}(ctx, offset, prevDone, currDone)
 				}
 			}
 		})
