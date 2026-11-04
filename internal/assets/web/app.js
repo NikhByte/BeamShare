@@ -2294,6 +2294,7 @@ function checkRamWarning(size) {
 }
 
 function generateClientQRCodeDataURL(text) {
+  if (!text) return '';
   if (typeof generateQRCodeDataURL === 'function') {
     return generateQRCodeDataURL(text);
   }
@@ -2302,6 +2303,29 @@ function generateClientQRCodeDataURL(text) {
   }
   if (typeof window !== 'undefined' && window.qrcode && typeof window.qrcode.generateQRCodeSVGDataURL === 'function') {
     return window.qrcode.generateQRCodeSVGDataURL(text);
+  }
+  if (typeof globalThis !== 'undefined' && globalThis.qrcode && typeof globalThis.qrcode.generateQRCodeSVGDataURL === 'function') {
+    return globalThis.qrcode.generateQRCodeSVGDataURL(text);
+  }
+  const qrc = (typeof window !== 'undefined' && window.qrcodegen) ? window.qrcodegen : (typeof globalThis !== 'undefined' && globalThis.qrcodegen ? globalThis.qrcodegen : (typeof qrcodegen !== 'undefined' ? qrcodegen : null));
+  if (qrc && qrc.QrCode) {
+    const qr = qrc.QrCode.encodeText(text, qrc.QrCode.Ecc.MEDIUM);
+    const count = qr.size;
+    const cellSize = 4;
+    const margin = 4;
+    const size = (count + margin * 2) * cellSize;
+    const pathParts = [];
+    for (let y = 0; y < count; y++) {
+      for (let x = 0; x < count; x++) {
+        if (qr.getModule(x, y)) {
+          const px = (x + margin) * cellSize;
+          const py = (y + margin) * cellSize;
+          pathParts.push(`M${px},${py}h${cellSize}v${cellSize}h-${cellSize}z`);
+        }
+      }
+    }
+    const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#ffffff"/><path d="${pathParts.join(' ')}" fill="#000000"/></svg>`;
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
   }
   return '';
 }
@@ -2732,6 +2756,13 @@ async function startHTTPDownload() {
     return;
   }
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.warn("Could not parse decryption key from hash:", err);
+  }
+
   startTime     = Date.now();
   receivedBytes = 0;
   totalBytes    = currentFile.size;
@@ -2932,6 +2963,7 @@ async function startHTTPSSE() {
   useIndexedDB = !useDiskStream;
   if (useIndexedDB) {
     await clearIDB();
+    setState('livepipe');
   }
 
   source.onmessage = (event) => {
@@ -3553,6 +3585,71 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
   });
 }
 
+function waitForDataChannelBuffer(dc, targetThreshold = 64 * 1024, lowWatermark = 0) {
+  if (!dc || dc.readyState !== 'open') {
+    return Promise.reject(new Error("Data channel is closed or closing"));
+  }
+  if (dc.bufferedAmount <= targetThreshold) {
+    if (typeof lowWatermark === 'number' && lowWatermark >= 0) {
+      dc.bufferedAmountLowThreshold = lowWatermark;
+    }
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    let timer = null;
+
+    const cleanup = () => {
+      if (dc && typeof dc.removeEventListener === 'function') {
+        dc.removeEventListener('bufferedamountlow', onLow);
+        dc.removeEventListener('close', onClose);
+        dc.removeEventListener('error', onClose);
+      }
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+
+    const check = () => {
+      if (!dc || dc.readyState !== 'open') {
+        cleanup();
+        reject(new Error("Data channel is closed or closing"));
+        return true;
+      }
+      if (dc.bufferedAmount <= targetThreshold) {
+        cleanup();
+        resolve();
+        return true;
+      }
+      return false;
+    };
+
+    const onLow = () => {
+      check();
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error("Data channel is closed or closing"));
+    };
+
+    if (typeof lowWatermark === 'number' && lowWatermark >= 0) {
+      dc.bufferedAmountLowThreshold = lowWatermark;
+    }
+
+    dc.addEventListener('bufferedamountlow', onLow);
+    dc.addEventListener('close', onClose);
+    dc.addEventListener('error', onClose);
+
+    if (check()) return;
+
+    timer = setInterval(() => {
+      check();
+    }, 250);
+  });
+}
+
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
 async function uploadFileP2P(file, dc = webrtcDataChannel) {
   if (!dc || dc.readyState !== 'open') {
@@ -3778,6 +3875,7 @@ function initSpotlight() {
     card.style.setProperty('--mouse-y', `${((e.clientY - r.top)  / r.height * 100)}%`);
   });
 }
+
 
 // ── Format helpers ────────────────────────────────────────────────────────────
 function formatBytes(bytes) {
@@ -4308,8 +4406,8 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Client-side QR Code Generator ─────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
+var GF256_EXP = typeof GF256_EXP !== 'undefined' ? GF256_EXP : new Uint8Array(512);
+var GF256_LOG = typeof GF256_LOG !== 'undefined' ? GF256_LOG : new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -4738,6 +4836,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     waitForInitialICECandidate,
