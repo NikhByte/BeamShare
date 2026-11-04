@@ -227,7 +227,7 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     readyResolver({ active: {} });
     await readyPromise;
-    await new Promise(resolve => setTimeout(resolve, 20));
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     assert.equal(document.documentElement.getAttribute('data-sw-ready'), 'true');
 
@@ -746,6 +746,7 @@ describe('Gaze Web Sender Test Suite', () => {
   let dom;
   let window;
   let document;
+  let app;
   let fetchedURLs = [];
 
   beforeEach(() => {
