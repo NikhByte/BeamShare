@@ -106,6 +106,7 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, fileName string, fileSize int64, activeSendersCount *int32) {
 	var senderMu sync.Mutex
 	var activeCancel context.CancelFunc
+	var activeDone chan struct{}
 
 	dc.OnClose(func() {
 		senderMu.Lock()
@@ -132,11 +133,23 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 			if activeCancel != nil {
 				activeCancel()
 			}
+			prevDone := activeDone
+			currDone := make(chan struct{})
+			activeDone = currDone
 			transferCtx, cancel := context.WithCancel(context.Background())
 			activeCancel = cancel
 			senderMu.Unlock()
 
-			go func(ctx context.Context) {
+			go func(ctx context.Context, done chan struct{}, prevDone chan struct{}, reqOffset int64) {
+				defer close(done)
+				if prevDone != nil {
+					select {
+					case <-prevDone:
+					case <-ctx.Done():
+						return
+					}
+				}
+
 				if activeSendersCount != nil {
 					atomic.AddInt32(activeSendersCount, 1)
 					defer atomic.AddInt32(activeSendersCount, -1)
@@ -148,11 +161,17 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				}
 				defer file.Close()
 
-				if offset > 0 {
-					_, err = file.Seek(offset, io.SeekStart)
+				if reqOffset > 0 {
+					_, err = file.Seek(reqOffset, io.SeekStart)
 					if err != nil {
 						return
 					}
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				default:
 				}
 
 				metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
@@ -170,7 +189,7 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				})
 
 				buffer := make([]byte, 64*1000) // 64KB chunk size
-				totalSent := offset
+				totalSent := reqOffset
 
 				for {
 					select {
@@ -198,6 +217,11 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 
 					n, errRead := file.Read(buffer)
 					if n > 0 {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
 						chunkCopy := make([]byte, n)
 						copy(chunkCopy, buffer[:n])
 						errSend := dc.Send(chunkCopy)
@@ -228,7 +252,7 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				}
 
 				dc.SendText("EOF")
-			}(transferCtx)
+			}(transferCtx, currDone, prevDone, offset)
 		}
 	})
 }
@@ -252,6 +276,7 @@ func TestWebRTCTransfer_DuplicateOffsetCancellation(t *testing.T) {
 	var rxMu sync.Mutex
 	var receivedBytes bytes.Buffer
 	eofCh := make(chan struct{}, 1)
+	firstChunkReceived := make(chan struct{}, 1)
 	metaCount := 0
 
 	receiverDC.OnMessage(func(msg webrtc.DataChannelMessage) {
@@ -271,6 +296,10 @@ func TestWebRTCTransfer_DuplicateOffsetCancellation(t *testing.T) {
 				}
 			}
 		} else {
+			select {
+			case firstChunkReceived <- struct{}{}:
+			default:
+			}
 			if metaCount >= 2 {
 				receivedBytes.Write(msg.Data)
 			}
@@ -280,8 +309,12 @@ func TestWebRTCTransfer_DuplicateOffsetCancellation(t *testing.T) {
 	// Send initial OFFSET:0
 	require.NoError(t, receiverDC.SendText("OFFSET:0"))
 
-	// Wait briefly so transfer begins
-	time.Sleep(5 * time.Millisecond)
+	// Wait until at least 1 chunk is received from the first stream so transfer is actively running
+	select {
+	case <-firstChunkReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first chunk")
+	}
 
 	const offset int64 = 102400
 	require.NoError(t, receiverDC.SendText(fmt.Sprintf("OFFSET:%d", offset)))
