@@ -174,7 +174,7 @@ export function startBeamSender(options: {
     if (resolved || isCheckingPort) return;
 
     // Check if output contains URLs
-    const directMatch = output.match(/http:\/\/(127\.0\.0\.1|localhost|192\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+):\d+/);
+    const directMatch = output.match(/http:\/\/(127\.0\.0\.1|localhost|192\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+):\d+[^\s]*/);
     const webrtcMatch = output.match(/http:\/\/[^\s]+[\?&]mode=webrtc[^\s]*/);
     const relayMatch = output.match(/http:\/\/[^\s]+[\?&]s=[^&\s#]+[^\s]*/);
 
@@ -209,14 +209,17 @@ export function startBeamSender(options: {
         }
 
         if (open && !resolved) {
-          let webrtcURL = `${localURL}/?mode=webrtc`;
+          let webrtcURL = localURL;
           if (webrtcMatch) {
             webrtcURL = webrtcMatch[0].replace(/http:\/\/(192\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|0\.0\.0\.0)/, 'http://127.0.0.1');
           } else {
+            const url = new URL(localURL);
+            url.searchParams.set('mode', 'webrtc');
             const sdpMatch = output.match(/sdp=([^&\s#]+)/);
             if (sdpMatch) {
-              webrtcURL = `${localURL}/?mode=webrtc&sdp=${sdpMatch[1]}`;
+              url.searchParams.set('sdp', sdpMatch[1]);
             }
+            webrtcURL = url.toString();
           }
 
           resolved = true;

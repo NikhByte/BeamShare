@@ -515,13 +515,37 @@ function getBackendURL() {
   return backend;
 }
 
+function getSessionToken() {
+  const params = new URLSearchParams(window.location.search);
+  let tok = params.get('token') || params.get('t') || window.GAZE_SESSION_TOKEN || window.SESSION_TOKEN || '';
+  if (tok && tok.includes('/')) {
+    tok = tok.split('/')[0];
+  }
+  if (tok && tok.includes('?')) {
+    tok = tok.split('?')[0];
+  }
+  if (tok && tok.includes('&')) {
+    tok = tok.split('&')[0];
+  }
+  return tok;
+}
+
 function apiPath(path) {
   const backend = getBackendURL();
   const params = new URLSearchParams(window.location.search);
   const s = params.get('s');
+  const token = getSessionToken();
   let fullPath = path;
+  let queryParts = [];
   if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+    queryParts.push('s=' + encodeURIComponent(s));
+  }
+  if (token) {
+    queryParts.push('token=' + encodeURIComponent(token));
+  }
+  if (queryParts.length > 0) {
+    const sep = fullPath.includes('?') ? '&' : '?';
+    fullPath += sep + queryParts.join('&');
   }
   if (backend) {
     return backend + fullPath;
@@ -550,7 +574,7 @@ function apiPath(path) {
 
 // ── Local QR Code Generator & Renderer ─────────────────────────────────────
 "use strict";
-// var qrcodegen;
+// qrcodegen declared above
 (function (qrcodegen) {
  class QrCode {
  constructor(
@@ -1171,8 +1195,6 @@ function qrToSvgDataUrl(qr, border = 4) {
   svg += '</svg>';
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
-
-
 
 function renderQRToCanvas(qr, canvas, border = 4) {
   const ctx = canvas.getContext('2d');
@@ -2239,7 +2261,7 @@ async function getSWPipe(fileMeta) {
     const iframe = document.createElement('iframe');
     iframe.hidden = true;
     document.body.appendChild(iframe);
-    iframe.src = swUrl;
+    iframe.src = apiPath(swUrl);
 
     setTimeout(() => {
       try { iframe.remove(); } catch (_) {}
@@ -2304,6 +2326,10 @@ function generateClientQRCodeDataURL(text) {
     return window.qrcode.generateQRCodeSVGDataURL(text);
   }
   return '';
+}
+
+function renderClientQRCode(text) {
+  return generateClientQRCodeDataURL(text);
 }
 
 // ── QR Scanning ───────────────────────────────────────────────────────────────
@@ -2593,7 +2619,7 @@ function resetState() {
 
 async function bootstrap() {
   const params = new URLSearchParams(window.location.search);
-  const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
+  const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer') || window.location.search.includes('mode=webrtc');
   let localURL = params.get('local');
   const sessionID = params.get('s');
 
@@ -2628,7 +2654,12 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      const token = getSessionToken();
+      let probeURL = `${localURL}/api/meta`;
+      if (token) {
+        probeURL += `?token=${encodeURIComponent(token)}`;
+      }
+      const res = await fetch(probeURL, { signal: controller.signal });
       clearTimeout(timeoutId);
       
       if (res.ok) {
@@ -2800,6 +2831,13 @@ async function startHTTPDownload() {
 
   setState('downloading');
   updateProgress(initialOffset / totalBytes || 0);
+
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (e) {
+    console.warn("Unable to parse decryption key from URL hash:", e);
+  }
 
   try {
     const headers = {};
@@ -3319,114 +3357,47 @@ async function startWebRTC() {
         }
       });
 
-      encBuffer = new Uint8Array(0);
-      let decryptChain = Promise.resolve();
 
       dc.onmessage = (e) => {
-        if (decryptionKey) {
-          decryptChain = decryptChain.then(async () => {
-            if (typeof e.data === 'string') {
-              if (e.data === "EOF") {
-                chunkQueue.enqueueEOF();
-                try {
-                  await chunkQueue.drain();
-                  if (diskWritableStream) {
-                    await diskWritableStream.close();
-                    if (useOPFS) {
-                      const file = await diskFileHandle.getFile();
-                      triggerSave(file, currentFile.name);
-                    }
-                  } else if (swPipePort) {
-                    swPipePort.postMessage("EOF");
-                  } else {
-                    let finalBlob;
-                    if (useIndexedDB) {
-                      finalBlob = await getAllChunksIDB(currentFile.mime);
-                      await clearIDB();
-                    } else {
-                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                    }
-                    triggerSave(finalBlob, currentFile.name);
+        try {
+          if (typeof e.data === 'string') {
+            if (e.data === "EOF") {
+              chunkQueue.enqueueEOF();
+              chunkQueue.drain().then(async () => {
+                if (diskWritableStream) {
+                  await diskWritableStream.close();
+                  if (useOPFS) {
+                    const file = await diskFileHandle.getFile();
+                    triggerSave(file, currentFile.name);
                   }
-                  resolve();
-                } catch (err) {
-                  hasError = true;
-                  // Handled in chunkQueue onError callback
+                } else if (swPipePort) {
+                  swPipePort.postMessage("EOF");
+                } else {
+                  let finalBlob;
+                  if (useIndexedDB) {
+                    finalBlob = await getAllChunksIDB(currentFile.mime);
+                    await clearIDB();
+                  } else {
+                    finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
+                  }
+                  triggerSave(finalBlob, currentFile.name);
                 }
-              }
-              return;
+                resolve();
+              }).catch((err) => {
+                showError(`Transfer failed: ${err.message}`);
+                dc.close();
+                reject(err);
+              });
             }
-
-            const value = new Uint8Array(e.data);
-            let newBuffer = new Uint8Array(encBuffer.length + value.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(value, encBuffer.length);
-            encBuffer = newBuffer;
-
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-              const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
-
-                const nonce = new Uint8Array(frame.subarray(0, 12));
-                const ciphertext = new Uint8Array(frame.subarray(12));
-                const decrypted = await crypto.subtle.decrypt(
-                  { name: "AES-GCM", iv: nonce },
-                  decryptionKey,
-                  ciphertext
-                );
-                const decValue = new Uint8Array(decrypted);
-                chunkQueue.enqueue(decValue);
-              } else {
-                break;
-              }
-            }
-          }).catch((err) => {
-            showError(`Transfer failed: ${err.message}`);
-            dc.close();
-            reject(err);
-          });
-        } else {
-          try {
-            if (typeof e.data === 'string') {
-              if (e.data === "EOF") {
-                chunkQueue.enqueueEOF();
-                chunkQueue.drain().then(async () => {
-                  if (diskWritableStream) {
-                    await diskWritableStream.close();
-                    if (useOPFS) {
-                      const file = await diskFileHandle.getFile();
-                      triggerSave(file, currentFile.name);
-                    }
-                  } else if (swPipePort) {
-                    swPipePort.postMessage("EOF");
-                  } else {
-                    let finalBlob;
-                    if (useIndexedDB) {
-                      finalBlob = await getAllChunksIDB(currentFile.mime);
-                      await clearIDB();
-                    } else {
-                      finalBlob = new Blob(receivedChunks, { type: currentFile.mime });
-                    }
-                    triggerSave(finalBlob, currentFile.name);
-                  }
-                  resolve();
-                }).catch((err) => {
-                  // Handled in chunkQueue onError callback
-                });
-              }
-              return;
-            }
-
-            const chunk = new Uint8Array(e.data);
-            chunkQueue.enqueue(chunk);
-          } catch (err) {
-            showError(`Transfer failed: ${err.message}`);
-            dc.close();
-            reject(err);
+            return;
           }
+
+          const chunk = new Uint8Array(e.data);
+          chunkQueue.enqueue(chunk);
+        } catch (err) {
+          showError(`Transfer failed: ${err.message}`);
+          dc.close();
+          reject(err);
         }
 
         const chunk = new Uint8Array(e.data);
@@ -4054,7 +4025,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
     while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
       if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
       if (dc.bufferedAmount > 1024 * 1024) {
-        await waitForBufferedAmountLow(dc, 512 * 1024);
+        await waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
       } else if (senderPaused) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -4095,10 +4066,11 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
   if (senderAborted) return;
 
   if (dc.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(dc, 0);
+    await waitForDataChannelBuffer(dc, 0, 0);
   }
   dc.send("EOF");
-  document.getElementById('send-status-label').textContent = "Transfer Complete!";
+  const statusLabel = document.getElementById('send-status-label');
+  if (statusLabel) statusLabel.textContent = "Transfer Complete!";
 }
 
 async function startSenderPolling(backend) {
@@ -4441,7 +4413,7 @@ function getVersionBits(version) {
 function generateQRCodeSVG(text) {
   const utf8Encoder = new (typeof TextEncoder !== 'undefined' ? TextEncoder : require('util').TextEncoder)();
   const textBytes = utf8Encoder.encode(text);
-  
+
   let ver = 1;
   while (ver <= 40) {
     const spec = QR_VERSIONS_L[ver];
@@ -4755,6 +4727,7 @@ if (typeof module !== 'undefined' && module.exports) {
     VirtualLogViewer,
     startHTTPSSE,
     getBackendURL,
+    getSessionToken,
     apiPath,
     formatBytes,
     mimeLabel,

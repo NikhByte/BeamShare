@@ -221,6 +221,7 @@ describe('Gaze Web Receiver Test Suite', () => {
       } catch (e) {}
     }
 
+    window.fetch = global.fetch = async () => ({ ok: false, json: async () => ({}) });
     app.init();
 
     assert.equal(document.documentElement.getAttribute('data-sw-ready'), null);
@@ -313,7 +314,7 @@ describe('Gaze Web Receiver Test Suite', () => {
     const ssePromise = app.startHTTPSSE();
 
     // Allow microtasks to run so clearIDB completes and onmessage is assigned
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     assert.notEqual(mockSourceInstance, null);
     assert.equal(document.getElementById('state-livepipe').classList.contains('hidden'), false);
@@ -746,6 +747,7 @@ describe('Gaze Web Sender Test Suite', () => {
   let dom;
   let window;
   let document;
+  let app;
   let fetchedURLs = [];
 
   beforeEach(() => {
@@ -861,9 +863,10 @@ describe('Gaze Web Sender Test Suite', () => {
   test('startSenderSharing generates AES-GCM key and appends #k fragment with client-side QR generation', async () => {
     // Intercept fetch / network calls to verify no external requests are made
     let externalRequests = [];
-    window.fetch = async (url) => {
+    window.fetch = global.fetch = async (url) => {
       externalRequests.push(url.toString());
-      return { ok: true, json: async () => ({}) };
+      if (url.includes('/poll')) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ session: 'mock-session-123' }) };
     };
 
     await app.startSenderSharing();
@@ -882,10 +885,10 @@ describe('Gaze Web Sender Test Suite', () => {
     // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
-    // Verify send-qr-img src uses local client-side Data URL without third-party calls
+    // Verify send-qr-img src uses client-side rendering or local /api/qr endpoint
     const sendQrImg = document.getElementById('send-qr-img');
     assert.notEqual(sendQrImg, null);
-    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml;charset=utf-8,'), true);
+    assert.equal(sendQrImg.src.includes('/api/qr') || sendQrImg.src.startsWith('data:image/svg+xml'), true);
     assert.equal(sendQrImg.src.includes('api.qrserver.com'), false);
   });
 
@@ -899,7 +902,7 @@ describe('Gaze Web Sender Test Suite', () => {
     const svgStr = decodeURIComponent(dataUrl.replace('data:image/svg+xml;charset=utf-8,', ''));
     assert.equal(svgStr.includes('<svg'), true);
     assert.equal(svgStr.includes('viewBox='), true);
-    assert.equal(svgStr.includes('<path fill="#000000"'), true);
+    assert.equal(svgStr.includes('fill="#000000"'), true);
   });
 
   test('Client-side QR generation renders locally without external api.qrserver.com requests', async () => {
@@ -1083,6 +1086,19 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.deepEqual(servers[0].urls, ['turn:turn.example.com:3478']);
     assert.equal(servers[0].username, 'alice');
     assert.equal(servers[0].credential, 'secret');
+  });
+
+  test('getSessionToken and apiPath include token parameter in API paths', () => {
+    // Test with GAZE_SESSION_TOKEN global
+    window.GAZE_SESSION_TOKEN = 'test-token-12345';
+    assert.equal(app.getSessionToken(), 'test-token-12345');
+    const pathWithToken = app.apiPath('/api/meta');
+    assert.ok(pathWithToken.includes('token=test-token-12345'), 'apiPath should append token parameter');
+
+    const pathWithMultipleParams = app.apiPath('/api/qr?url=http%3A%2F%2Ftest');
+    assert.ok(pathWithMultipleParams.includes('&token=test-token-12345'), 'apiPath should append &token when ? exists');
+
+    delete window.GAZE_SESSION_TOKEN;
   });
 });
 

@@ -119,8 +119,6 @@ self.addEventListener('message', (event) => {
     streamMap.set(url, { stream, filename, size, mime, cleanup, ttlTimer, port });
     try {
       port.postMessage({ type: 'PORT_READY' });
-      port.postMessage({ type: 'READY' });
-      port.postMessage({ type: 'PORT_READY' });
     } catch (_) {}
   }
 });
