@@ -4134,6 +4134,8 @@ async function startSenderPolling(backend) {
         document.getElementById('send-status-label').textContent = "Receiving file from relay…";
         await receiveFileFromHTTP(backend, data.filename);
         break;
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     } catch (err) {
       console.warn("Polling error:", err);
@@ -4738,6 +4740,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     waitForInitialICECandidate,

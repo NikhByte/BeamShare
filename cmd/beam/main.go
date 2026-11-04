@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -43,46 +42,139 @@ var (
 	parsedTurnCredential string
 )
 
-type pauseController struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	paused bool
-	closed bool
+// DataChannelStreamer defines the WebRTC DataChannel operations required for P2P file streaming.
+type DataChannelStreamer interface {
+	Send(data []byte) error
+	SendText(text string) error
+	BufferedAmount() uint64
+	SetBufferedAmountLowThreshold(threshold uint64)
+	OnBufferedAmountLow(f func())
 }
 
-func newPauseController() *pauseController {
-	pc := &pauseController{}
-	pc.cond = sync.NewCond(&pc.mu)
-	return pc
-}
-
-func (pc *pauseController) Pause() {
-	pc.mu.Lock()
-	pc.paused = true
-	pc.mu.Unlock()
-}
-
-func (pc *pauseController) Resume() {
-	pc.mu.Lock()
-	pc.paused = false
-	pc.cond.Broadcast()
-	pc.mu.Unlock()
-}
-
-func (pc *pauseController) Close() {
-	pc.mu.Lock()
-	pc.closed = true
-	pc.cond.Broadcast()
-	pc.mu.Unlock()
-}
-
-func (pc *pauseController) WaitIfPaused() bool {
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-	for pc.paused && !pc.closed {
-		pc.cond.Wait()
+func streamFileP2P(ctx context.Context, dc DataChannelStreamer, filePath string, fileName string, fileSize int64, offset int64) {
+	fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
+	file, err := os.Open(filePath)
+	if err != nil {
+		fmt.Printf("  Error opening file: %v\n", err)
+		return
 	}
-	return !pc.closed
+	defer file.Close()
+
+	if ctx.Err() != nil {
+		return
+	}
+
+	if offset > 0 {
+		_, err = file.Seek(offset, io.SeekStart)
+		if err != nil {
+			fmt.Printf("  Error seeking file: %v\n", err)
+			return
+		}
+	}
+
+	// Send META header
+	metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
+	if errSend := dc.SendText(metaHeader); errSend != nil {
+		fmt.Printf("  Error sending meta header: %v\n", errSend)
+		return
+	}
+
+	bufferedAmountLowChan := make(chan struct{}, 1)
+	dc.SetBufferedAmountLowThreshold(512 * 1024)
+	dc.OnBufferedAmountLow(func() {
+		select {
+		case bufferedAmountLowChan <- struct{}{}:
+		default:
+		}
+	})
+
+	const chunkSize = 32 * 1024
+	totalSent := offset
+	start := time.Now()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Backpressure check: wait if buffered amount > 1MB
+		if dc.BufferedAmount() > 1024*1024 {
+			ticker := time.NewTicker(10 * time.Millisecond)
+			for dc.BufferedAmount() > 512*1024 {
+				select {
+				case <-ctx.Done():
+					ticker.Stop()
+					return
+				case <-bufferedAmountLowChan:
+				case <-ticker.C:
+				}
+			}
+			ticker.Stop()
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Fresh byte slice allocation per chunk send for slice memory isolation
+		chunk := make([]byte, chunkSize)
+		n, errRead := file.Read(chunk)
+		if n > 0 {
+			errSend := dc.Send(chunk[:n])
+			if errSend != nil {
+				fmt.Printf("\n  Error sending chunk: %v\n", errSend)
+				return
+			}
+			totalSent += int64(n)
+			fmt.Printf("\r  📤 Sending P2P: %s (%s/%s)",
+				ui.FormatPercentage(totalSent, fileSize),
+				ui.FormatBytes(totalSent),
+				ui.FormatBytes(fileSize),
+			)
+		}
+		if errRead != nil {
+			break
+		}
+	}
+
+	// Wait for buffer to clear before sending EOF
+	dc.SetBufferedAmountLowThreshold(0)
+	if dc.BufferedAmount() > 0 {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		for dc.BufferedAmount() > 0 {
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				return
+			case <-bufferedAmountLowChan:
+			case <-ticker.C:
+			}
+		}
+		ticker.Stop()
+	}
+
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	if errSend := dc.SendText("EOF"); errSend != nil {
+		fmt.Printf("\n  Error sending EOF: %v\n", errSend)
+		return
+	}
+
+	elapsed := time.Since(start)
+	sentInSession := totalSent - offset
+	fmt.Printf("\n  ✅ P2P Transfer Complete! Sent %s in %.1fs (avg %s)\n",
+		ui.FormatBytes(sentInSession),
+		elapsed.Seconds(),
+		ui.FormatSpeed(sentInSession, elapsed),
+	)
 }
 
 func main() {
@@ -512,22 +604,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 
 			// Hook up data channel handler
 			session.OnOpen = func(dc *webrtc.DataChannel) {
-				pauseCtrl := newPauseController()
-				var (
-					streamMu     sync.Mutex
-					streamCancel context.CancelFunc
-				)
-
-				dc.OnClose(func() {
-					pauseCtrl.Close()
-					streamMu.Lock()
-					if streamCancel != nil {
-						streamCancel()
-						streamCancel = nil
-					}
-					streamMu.Unlock()
-				})
-
 				// Upload state variables for incoming files from receiver
 				var (
 					uploadFile *os.File
@@ -536,28 +612,26 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 					uploaded   int64
 					uploadStat time.Time
 				)
-				var isStreaming atomic.Bool
 
-				var senderMu sync.Mutex
-				var activeCancel context.CancelFunc
+				var (
+					streamCtx    context.Context
+					streamCancel context.CancelFunc
+					streamMu     sync.Mutex
+				)
 
 				dc.OnClose(func() {
-					senderMu.Lock()
-					if activeCancel != nil {
-						activeCancel()
-						activeCancel = nil
+					streamMu.Lock()
+					if streamCancel != nil {
+						streamCancel()
+						streamCancel = nil
 					}
-					senderMu.Unlock()
+					streamMu.Unlock()
 				})
 
 				dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 					if msg.IsString {
 						dataStr := string(msg.Data)
-						if dataStr == "PAUSE" {
-							pauseCtrl.Pause()
-						} else if dataStr == "RESUME" {
-							pauseCtrl.Resume()
-						} else if strings.HasPrefix(dataStr, "UPLOAD_META:") {
+						if strings.HasPrefix(dataStr, "UPLOAD_META:") {
 							parts := strings.SplitN(dataStr, ":", 3)
 							if len(parts) == 3 {
 								name := parts[1]
@@ -595,172 +669,22 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if isLive {
 								return
 							}
-							if !isStreaming.CompareAndSwap(false, true) {
-								return
-							}
 							parts := strings.SplitN(dataStr, ":", 2)
 							var offset int64
 							if len(parts) == 2 {
 								offset, _ = strconv.ParseInt(parts[1], 10, 64)
 							}
+
 							streamMu.Lock()
 							if streamCancel != nil {
 								streamCancel()
 							}
-							var streamCtx context.Context
 							streamCtx, streamCancel = context.WithCancel(mainCtx)
+							currentCtx := streamCtx
 							streamMu.Unlock()
 
-							// File sender goroutine (Direct-to-Disk + Backpressure + Pause/Resume Flow Control)
-							go func(ctx context.Context, reqOffset int64) {
-								defer isStreaming.Store(false)
-								fmt.Println("\n  [P2P] Direct P2P tunnel established! Streaming file...")
-								file, err := os.Open(filePath)
-								if err != nil {
-									fmt.Printf("  Error opening file: %v\n", err)
-									return
-								}
-								defer file.Close()
-								defer pauseCtrl.Close()
-
-								if reqOffset > 0 {
-									_, err = file.Seek(reqOffset, io.SeekStart)
-									if err != nil {
-										fmt.Printf("  Error seeking file: %v\n", err)
-										return
-									}
-								}
-
-								select {
-								case <-ctx.Done():
-									return
-								default:
-								}
-
-								// Send META header
-								metaHeader := fmt.Sprintf("META:%s:%d", fileName, fileSize)
-								if errSend := dc.SendText(metaHeader); errSend != nil {
-									fmt.Printf("  Error sending meta header: %v\n", errSend)
-									return
-								}
-
-								bufferedAmountLowChan := make(chan struct{}, 1)
-								dc.OnBufferedAmountLow(func() {
-									select {
-									case bufferedAmountLowChan <- struct{}{}:
-									default:
-									}
-								})
-
-								waitForBufferLow := func(targetThreshold uint64) error {
-									dc.SetBufferedAmountLowThreshold(targetThreshold)
-									if uint64(dc.BufferedAmount()) <= targetThreshold {
-										return nil
-									}
-									ticker := time.NewTicker(20 * time.Millisecond)
-									defer ticker.Stop()
-
-									for {
-										if dc.ReadyState() != webrtc.DataChannelStateOpen {
-											return fmt.Errorf("data channel is no longer open")
-										}
-										if uint64(dc.BufferedAmount()) <= targetThreshold {
-											return nil
-										}
-										select {
-										case <-ctx.Done():
-											return ctx.Err()
-										case <-bufferedAmountLowChan:
-											if uint64(dc.BufferedAmount()) <= targetThreshold {
-												return nil
-											}
-										case <-ticker.C:
-											if uint64(dc.BufferedAmount()) <= targetThreshold {
-												return nil
-											}
-										}
-									}
-								}
-
-								buffer := make([]byte, 32*1024) // 32KB chunk size
-								totalSent := reqOffset
-								start := time.Now()
-
-								for {
-									select {
-									case <-ctx.Done():
-										return
-									default:
-									}
-
-									// Backpressure check: wait if buffered amount > 1MB
-									if dc.BufferedAmount() > 1024*1024 {
-										if errWait := waitForBufferLow(512 * 1024); errWait != nil {
-											if ctx.Err() != nil {
-												return
-											}
-											fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
-											return
-										}
-									}
-
-									if !pauseCtrl.WaitIfPaused() {
-										return
-									}
-
-									n, errRead := file.Read(buffer)
-									if n > 0 {
-										select {
-										case <-ctx.Done():
-											return
-										default:
-										}
-
-										// Isolated heap slice allocation per chunk send
-										chunk := make([]byte, n)
-										copy(chunk, buffer[:n])
-										errSend := dc.Send(chunk)
-										if errSend != nil {
-											fmt.Printf("\n  Error sending chunk: %v\n", errSend)
-											return
-										}
-										totalSent += int64(n)
-										fmt.Printf("\r  📤 Sending P2P: %s (%s/%s)",
-											ui.FormatPercentage(totalSent, fileSize),
-											ui.FormatBytes(totalSent),
-											ui.FormatBytes(fileSize),
-										)
-									}
-									if errRead != nil {
-										break
-									}
-								}
-
-								// Wait for buffer to clear before sending EOF
-								if dc.BufferedAmount() > 0 {
-									if errWait := waitForBufferLow(0); errWait != nil {
-										if ctx.Err() != nil {
-											return
-										}
-										fmt.Printf("\n  Error waiting for buffer drain: %v\n", errWait)
-										return
-									}
-								}
-
-								if ctx.Err() != nil {
-									return
-								}
-
-								dc.SendText("EOF")
-
-								elapsed := time.Since(start)
-								sentInSession := totalSent - reqOffset
-								fmt.Printf("\n  ✅ P2P Transfer Complete! Sent %s in %.1fs (avg %s)\n",
-									ui.FormatBytes(sentInSession),
-									elapsed.Seconds(),
-									ui.FormatSpeed(sentInSession, elapsed),
-								)
-							}(streamCtx, offset)
+							// File sender goroutine (Direct-to-Disk + Backpressure)
+							go streamFileP2P(currentCtx, dc, filePath, fileName, fileSize, offset)
 						}
 					} else {
 						if uploadFile != nil {

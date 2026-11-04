@@ -23,6 +23,12 @@ describe('Gaze Web Receiver Test Suite', () => {
     window = dom.window;
     document = window.document;
 
+    global.fetch = window.fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ name: 'test.txt', size: 1024, mime: 'text/plain' })
+    });
+
     window.HTMLCanvasElement.prototype.getContext = function() {
       return {
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
@@ -746,6 +752,7 @@ describe('Gaze Web Sender Test Suite', () => {
   let dom;
   let window;
   let document;
+  let app;
   let fetchedURLs = [];
 
   beforeEach(() => {
