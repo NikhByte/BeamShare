@@ -452,7 +452,7 @@ func TestFrameHeader_LessThanNonceSize_UnexpectedEOF(t *testing.T) {
 		t.Fatalf("failed to generate key: %v", err)
 	}
 
-	// Frame length = 11 bytes (GCM nonce is 12 bytes)
+	// Frame length = 11 bytes (GCM nonce is 12 bytes, MinFrameLength is 28 bytes)
 	buf := make([]byte, 4+11)
 	binary.BigEndian.PutUint32(buf[0:4], 11)
 
@@ -463,8 +463,8 @@ func TestFrameHeader_LessThanNonceSize_UnexpectedEOF(t *testing.T) {
 
 	out := make([]byte, 64)
 	_, err = decReader.Read(out)
-	if err != io.ErrUnexpectedEOF {
-		t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+	if !errors.Is(err, ErrInvalidFrameLength) {
+		t.Fatalf("expected ErrInvalidFrameLength, got %v", err)
 	}
 }
 

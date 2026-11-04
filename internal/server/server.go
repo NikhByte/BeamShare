@@ -220,11 +220,11 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	snap := s.fileSnapshot()
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Private-Network", "true")
-
-	snap := s.fileSnapshot()
 	json.NewEncoder(w).Encode(FileMeta{
 		Name: snap.fileName,
 		Size: snap.fileSize,

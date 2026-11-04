@@ -2164,7 +2164,7 @@ function setMode(mode, label) {
 
 // ── Service Worker Pipe ───────────────────────────────────────────────────────
 async function getSWPipe(fileMeta) {
-  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return null;
+  if (!('serviceWorker' in navigator)) return null;
 
   // WebKit (Safari / Mobile Safari) does not reliably route iframe navigations through SW fetch handlers
   const isWebKit = typeof navigator !== 'undefined' && (/AppleWebKit/i.test(navigator.userAgent) && !/Chrome|Chromium|Edg|Firefox/i.test(navigator.userAgent));
@@ -2178,7 +2178,6 @@ async function getSWPipe(fileMeta) {
     const swReady = navigator.serviceWorker.ready;
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('SW ready timeout')), 10000));
     const reg = await Promise.race([swReady, timeout]);
-
     if (!navigator.serviceWorker.controller) {
       await new Promise((resolve) => {
         if (navigator.serviceWorker.controller) {
@@ -4738,6 +4737,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     waitForInitialICECandidate,
