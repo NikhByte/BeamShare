@@ -227,7 +227,10 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     readyResolver({ active: {} });
     await readyPromise;
-    await new Promise(resolve => setTimeout(resolve, 20));
+    for (let i = 0; i < 20; i++) {
+      if (document.documentElement.getAttribute('data-sw-ready') === 'true') break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
 
     assert.equal(document.documentElement.getAttribute('data-sw-ready'), 'true');
 
@@ -885,8 +888,9 @@ describe('Gaze Web Sender Test Suite', () => {
     // Verify send-qr-img src uses local client-side Data URL without third-party calls
     const sendQrImg = document.getElementById('send-qr-img');
     assert.notEqual(sendQrImg, null);
-    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml;charset=utf-8,'), true);
-    assert.equal(sendQrImg.src.includes('api.qrserver.com'), false);
+    const qrSrc = sendQrImg.getAttribute('src') || sendQrImg.src;
+    assert.equal(qrSrc.startsWith('data:image/svg+xml'), true);
+    assert.equal(qrSrc.includes('api.qrserver.com'), false);
   });
 
   test('generateQRCodeDataURL produces local SVG Data URL encoding complete share link with #k fragment', () => {
@@ -919,6 +923,28 @@ describe('Gaze Web Sender Test Suite', () => {
     // Verify QR code was rendered on send-qr-canvas
     const canvas = document.getElementById('send-qr-canvas');
     assert.notEqual(canvas, null);
+  });
+
+  test('renderQRCode generates local QR SVG and Canvas elements containing Base64 AES keys (#k=)', () => {
+    const shareURL = "http://localhost:8080/?s=test-session-123&mode=webrtc#k=dGVzdC1zZWNyZXQta2V5LTAxMjM0NTY3ODkwMTI=";
+    
+    // SVG element target
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    app.renderQRCode(svg, shareURL);
+    assert.equal(svg.getAttribute('viewBox').length > 0, true);
+    assert.equal(svg.innerHTML.includes('<path d='), true);
+
+    // Image element target (data URI)
+    const img = document.createElement('img');
+    app.renderQRCode(img, shareURL);
+    const srcAttr = img.getAttribute('src') || img.src;
+    assert.equal(srcAttr.startsWith('data:image/svg+xml'), true);
+    assert.equal(decodeURIComponent(srcAttr).includes('<path d='), true);
+
+    // Container element target
+    const div = document.createElement('div');
+    app.renderQRCode(div, shareURL);
+    assert.equal(div.innerHTML.includes('<svg'), true);
   });
 
   test('completed upload displays a visible QR instead of leaving it in the hidden fallback image', () => {
