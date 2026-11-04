@@ -147,7 +147,6 @@ describe('Gaze Web Receiver Test Suite', () => {
       window.MessageChannel = global.MessageChannel;
     }
     window.showSaveFilePicker = async () => {}; // mock showSaveFilePicker
-
     if (window.HTMLCanvasElement && !window.HTMLCanvasElement.prototype.getContext) {
       window.HTMLCanvasElement.prototype.getContext = () => ({
         fillRect: () => {}, clearRect: () => {}, getImageData: () => ({ data: [] }), putImageData: () => {},
@@ -159,7 +158,6 @@ describe('Gaze Web Receiver Test Suite', () => {
     }
     global.pako = pako;
     window.pako = pako;
-
     window.__BEAM_TEST_ENV__ = true;
 
     // Load qrcode.min.js and app.js
@@ -229,7 +227,7 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     readyResolver({ active: {} });
     await readyPromise;
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await new Promise(resolve => setTimeout(resolve, 20));
 
     assert.equal(document.documentElement.getAttribute('data-sw-ready'), 'true');
 
@@ -924,6 +922,19 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.notEqual(canvas, null);
   });
 
+  test('completed upload displays a visible QR instead of leaving it in the hidden fallback image', () => {
+    app.showDone('uploaded.txt', 1024, 'HTTP Upload');
+
+    const canvas = document.getElementById('done-qr-canvas');
+    const image = document.getElementById('done-qr-img');
+    const shareContainer = document.getElementById('done-share-container');
+
+    assert.equal(canvas.classList.contains('hidden'), false);
+    assert.equal(canvas.style.display, 'block');
+    assert.equal(image.classList.contains('hidden'), true);
+    assert.equal(shareContainer.classList.contains('hidden'), false);
+  });
+
   test('createOPFSWriter uses createWritable when available', async () => {
     let written = [];
     const mockFileHandle = {
@@ -1187,6 +1198,5 @@ describe('WebRTC Buffer Backpressure Suite', () => {
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
   });
 });
-
 
 
