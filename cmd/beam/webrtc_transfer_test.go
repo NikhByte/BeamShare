@@ -106,6 +106,7 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, fileName string, fileSize int64, activeSendersCount *int32) {
 	var senderMu sync.Mutex
 	var activeCancel context.CancelFunc
+	var activeDone chan struct{}
 
 	dc.OnClose(func() {
 		senderMu.Lock()
@@ -132,11 +133,22 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 			if activeCancel != nil {
 				activeCancel()
 			}
+			prevDone := activeDone
+			thisDone := make(chan struct{})
+			activeDone = thisDone
 			transferCtx, cancel := context.WithCancel(context.Background())
 			activeCancel = cancel
 			senderMu.Unlock()
 
-			go func(ctx context.Context) {
+			go func(ctx context.Context, prevDone, thisDone chan struct{}) {
+				defer close(thisDone)
+				if prevDone != nil {
+					<-prevDone
+				}
+				if ctx.Err() != nil {
+					return
+				}
+
 				if activeSendersCount != nil {
 					atomic.AddInt32(activeSendersCount, 1)
 					defer atomic.AddInt32(activeSendersCount, -1)
@@ -228,7 +240,7 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 				}
 
 				dc.SendText("EOF")
-			}(transferCtx)
+			}(transferCtx, prevDone, thisDone)
 		}
 	})
 }
@@ -252,6 +264,7 @@ func TestWebRTCTransfer_DuplicateOffsetCancellation(t *testing.T) {
 	var rxMu sync.Mutex
 	var receivedBytes bytes.Buffer
 	eofCh := make(chan struct{}, 1)
+	firstChunkReceived := make(chan struct{}, 1)
 	metaCount := 0
 
 	receiverDC.OnMessage(func(msg webrtc.DataChannelMessage) {
@@ -265,12 +278,18 @@ func TestWebRTCTransfer_DuplicateOffsetCancellation(t *testing.T) {
 					receivedBytes.Reset()
 				}
 			} else if dataStr == "EOF" {
-				select {
-				case eofCh <- struct{}{}:
-				default:
+				if metaCount >= 2 {
+					select {
+					case eofCh <- struct{}{}:
+					default:
+					}
 				}
 			}
 		} else {
+			select {
+			case firstChunkReceived <- struct{}{}:
+			default:
+			}
 			if metaCount >= 2 {
 				receivedBytes.Write(msg.Data)
 			}
@@ -280,8 +299,12 @@ func TestWebRTCTransfer_DuplicateOffsetCancellation(t *testing.T) {
 	// Send initial OFFSET:0
 	require.NoError(t, receiverDC.SendText("OFFSET:0"))
 
-	// Wait briefly so transfer begins
-	time.Sleep(5 * time.Millisecond)
+	// Wait until at least 1 chunk is received from the first stream before sending second OFFSET
+	select {
+	case <-firstChunkReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first chunk")
+	}
 
 	const offset int64 = 102400
 	require.NoError(t, receiverDC.SendText(fmt.Sprintf("OFFSET:%d", offset)))
