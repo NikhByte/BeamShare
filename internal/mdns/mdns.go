@@ -10,6 +10,7 @@ package mdns
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strings"
@@ -31,14 +32,18 @@ type Registrar interface {
 // RegisterFunc abstracts the zeroconf registration function.
 type RegisterFunc func(instance, service, domain string, port int, text []string, ifaces []net.Interface) (Registrar, error)
 
+// InterfacesFunc abstracts network interface enumeration for testing.
+type InterfacesFunc func() ([]net.Interface, error)
+
 // Broadcaster advertises a Beam session over mDNS / Bonjour.
 type Broadcaster struct {
-	hostname     string
-	port         int
-	server       Registrar
-	registerFunc RegisterFunc
-	ifacesFunc   func() ([]net.Interface, error)
-	addrsFunc    func(net.Interface) ([]net.Addr, error)
+	hostname       string
+	port           int
+	server         Registrar
+	registerFunc   RegisterFunc
+	ifacesFunc     func() ([]net.Interface, error)
+	addrsFunc      func(net.Interface) ([]net.Addr, error)
+	interfacesFunc InterfacesFunc
 }
 
 func defaultIfaceAddrs(iface net.Interface) ([]net.Addr, error) {
@@ -55,16 +60,20 @@ func FilterActiveInterfaces(ifaces []net.Interface, addrsFn func(net.Interface) 
 	var active []net.Interface
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 {
+			log.Printf("[DEBUG] skipping interface %s: interface is down", iface.Name)
 			continue
 		}
 		if iface.Flags&net.FlagLoopback != 0 {
+			log.Printf("[DEBUG] skipping interface %s: loopback interface", iface.Name)
 			continue
 		}
 		if iface.Flags&net.FlagMulticast == 0 {
+			log.Printf("[DEBUG] skipping interface %s: missing multicast flag", iface.Name)
 			continue
 		}
 		addrs, err := addrsFn(iface)
 		if err != nil || len(addrs) == 0 {
+			log.Printf("[DEBUG] skipping interface %s: no addresses found", iface.Name)
 			continue
 		}
 		hasValidIP := false
@@ -83,6 +92,8 @@ func FilterActiveInterfaces(ifaces []net.Interface, addrsFn func(net.Interface) 
 		}
 		if hasValidIP {
 			active = append(active, iface)
+		} else {
+			log.Printf("[DEBUG] skipping interface %s: no valid non-loopback/unspecified IP", iface.Name)
 		}
 	}
 	return active
@@ -147,10 +158,19 @@ func (b *Broadcaster) Hostname() string { return b.hostname }
 // LocalName returns the full mDNS name (e.g. "beamshare.local").
 func (b *Broadcaster) LocalName() string { return b.hostname + ".local" }
 
+// SetInterfacesFunc sets a custom network interface enumerator (for mocking/testing).
+func (b *Broadcaster) SetInterfacesFunc(fn InterfacesFunc) {
+	b.interfacesFunc = fn
+	b.ifacesFunc = fn
+}
+
 // Start begins advertising the Beam service via mDNS.
 // It is non-blocking; call Stop() to deregister.
 func (b *Broadcaster) Start() error {
 	ifacesFn := b.ifacesFunc
+	if ifacesFn == nil && b.interfacesFunc != nil {
+		ifacesFn = b.interfacesFunc
+	}
 	if ifacesFn == nil {
 		ifacesFn = net.Interfaces
 	}
@@ -161,11 +181,13 @@ func (b *Broadcaster) Start() error {
 
 	ifaces, err := ifacesFn()
 	if err != nil {
-		return fmt.Errorf("mdns register: %w", err)
+		log.Printf("[DEBUG] failed to list network interfaces: %v", err)
+		return fmt.Errorf("mdns interfaces: %w", err)
 	}
 
 	activeIfaces := FilterActiveInterfaces(ifaces, addrsFn)
 	if len(activeIfaces) == 0 {
+		log.Printf("[DEBUG] no active multicast-capable interfaces found for mDNS")
 		return fmt.Errorf("mdns register: no active multicast network interfaces available")
 	}
 
