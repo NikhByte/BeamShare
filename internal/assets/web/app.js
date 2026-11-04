@@ -2734,6 +2734,15 @@ async function startHTTPDownload() {
     return;
   }
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.error("Failed to import decryption key", err);
+    showError("Decryption key error: " + err.message);
+    return;
+  }
+
   startTime     = Date.now();
   receivedBytes = 0;
   totalBytes    = currentFile.size;
