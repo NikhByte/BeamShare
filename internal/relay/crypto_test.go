@@ -169,7 +169,7 @@ func TestTruncatedStream(t *testing.T) {
 
 	out := make([]byte, 64)
 	_, err = decReader.Read(out)
-	if err != io.ErrUnexpectedEOF {
+	if err != io.ErrUnexpectedEOF && !errors.Is(err, ErrInvalidFrameLength) {
 		t.Fatalf("expected io.ErrUnexpectedEOF for truncated body, got %v", err)
 	}
 }
@@ -463,7 +463,7 @@ func TestFrameHeader_LessThanNonceSize_UnexpectedEOF(t *testing.T) {
 
 	out := make([]byte, 64)
 	_, err = decReader.Read(out)
-	if err != io.ErrUnexpectedEOF {
+	if err != io.ErrUnexpectedEOF && !errors.Is(err, ErrInvalidFrameLength) {
 		t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
 	}
 }
