@@ -3553,6 +3553,11 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
   });
 }
 
+function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark = 512 * 1024, pollMs = 250) {
+  const targetThreshold = (typeof lowWatermark === 'number') ? lowWatermark : highWatermark;
+  return waitForBufferedAmountLow(dc, targetThreshold, pollMs);
+}
+
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
 async function uploadFileP2P(file, dc = webrtcDataChannel) {
   if (!dc || dc.readyState !== 'open') {
@@ -4051,8 +4056,8 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
       reader.readAsArrayBuffer(chunkBlob);
     });
 
-    while (dc.bufferedAmount > 1024 * 1024 || senderPaused) {
-      if (dc.readyState !== 'open') throw new Error("Data channel is no longer open");
+    while ((dc && dc.bufferedAmount > 1024 * 1024) || senderPaused) {
+      if (!dc || dc.readyState !== 'open') throw new Error("Data channel is no longer open");
       if (dc.bufferedAmount > 1024 * 1024) {
         await waitForBufferedAmountLow(dc, 512 * 1024);
       } else if (senderPaused) {
@@ -4094,10 +4099,10 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (dc.bufferedAmount > 0) {
+  if (dc && dc.bufferedAmount > 0) {
     await waitForBufferedAmountLow(dc, 0);
   }
-  dc.send("EOF");
+  if (dc) dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
 
@@ -4729,11 +4734,6 @@ function waitForInitialICECandidate(peerConnection, candidates, timeoutMs = 750)
     peerConnection.addEventListener('icegatheringstatechange', onStateChange);
     timer = setTimeout(finish, timeoutMs);
   });
-}
-
-function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark = 512 * 1024, pollMs = 25) {
-  const targetThreshold = (typeof lowWatermark === 'number') ? lowWatermark : highWatermark;
-  return waitForBufferedAmountLow(dc, targetThreshold, pollMs);
 }
 
 if (typeof module !== 'undefined' && module.exports) {
