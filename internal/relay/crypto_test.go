@@ -463,8 +463,8 @@ func TestFrameHeader_LessThanNonceSize_UnexpectedEOF(t *testing.T) {
 
 	out := make([]byte, 64)
 	_, err = decReader.Read(out)
-	if err != io.ErrUnexpectedEOF {
-		t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+	if !errors.Is(err, ErrInvalidFrameLength) {
+		t.Fatalf("expected ErrInvalidFrameLength, got %v", err)
 	}
 }
 
@@ -722,5 +722,37 @@ func TestBufferReuseZeroAllocations(t *testing.T) {
 
 	if allocs > 0 {
 		t.Fatalf("expected 0 heap allocations per frame Read call, got %f", allocs)
+	}
+}
+
+func TestMaxFrameSizeAccepted(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// 64KB chunk produces a frame with payload size within MaxFrameSize (65,564 bytes payload)
+	data := make([]byte, 65536)
+	if _, err := io.ReadFull(rand.Reader, data); err != nil {
+		t.Fatalf("failed to generate random data: %v", err)
+	}
+
+	encReader, err := NewEncryptingReader(bytes.NewReader(data), key)
+	if err != nil {
+		t.Fatalf("NewEncryptingReader failed: %v", err)
+	}
+
+	decReader, err := NewDecryptingReader(encReader, key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	decryptedData, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("reading decrypted data failed: %v", err)
+	}
+
+	if !bytes.Equal(decryptedData, data) {
+		t.Fatal("decrypted data does not match original data")
 	}
 }
