@@ -32,26 +32,38 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 	receiverPC, err := api.NewPeerConnection(webrtc.Configuration{})
 	require.NoError(t, err)
 
-	var mu sync.Mutex
+	var rxCandidatesMu sync.Mutex
+	var rxPendingCandidates []webrtc.ICECandidateInit
+	rxRemoteDescSet := false
+
 	senderPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
-			mu.Lock()
-			_ = receiverPC.AddICECandidate(c.ToJSON())
-			mu.Unlock()
+			cand := c.ToJSON()
+			rxCandidatesMu.Lock()
+			if !rxRemoteDescSet {
+				rxPendingCandidates = append(rxPendingCandidates, cand)
+			} else {
+				_ = receiverPC.AddICECandidate(cand)
+			}
+			rxCandidatesMu.Unlock()
 		}
 	})
+
+	var txCandidatesMu sync.Mutex
+	var txPendingCandidates []webrtc.ICECandidateInit
+	txRemoteDescSet := false
 
 	receiverPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
-			mu.Lock()
-			_ = senderPC.AddICECandidate(c.ToJSON())
-			mu.Unlock()
+			cand := c.ToJSON()
+			txCandidatesMu.Lock()
+			if !txRemoteDescSet {
+				txPendingCandidates = append(txPendingCandidates, cand)
+			} else {
+				_ = senderPC.AddICECandidate(cand)
+			}
+			txCandidatesMu.Unlock()
 		}
-	})
-
-	rxDCChan := make(chan *webrtc.DataChannel, 1)
-	receiverPC.OnDataChannel(func(dc *webrtc.DataChannel) {
-		rxDCChan <- dc
 	})
 
 	ordered := true
@@ -60,15 +72,67 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 	})
 	require.NoError(t, err)
 
+	senderOpen := make(chan struct{})
+	senderDC.OnOpen(func() {
+		select {
+		case <-senderOpen:
+		default:
+			close(senderOpen)
+		}
+	})
+	if senderDC.ReadyState() == webrtc.DataChannelStateOpen {
+		select {
+		case <-senderOpen:
+		default:
+			close(senderOpen)
+		}
+	}
+
+	rxDCChan := make(chan *webrtc.DataChannel, 1)
+	receiverOpen := make(chan struct{})
+	receiverPC.OnDataChannel(func(dc *webrtc.DataChannel) {
+		dc.OnOpen(func() {
+			select {
+			case <-receiverOpen:
+			default:
+				close(receiverOpen)
+			}
+		})
+		if dc.ReadyState() == webrtc.DataChannelStateOpen {
+			select {
+			case <-receiverOpen:
+			default:
+				close(receiverOpen)
+			}
+		}
+		rxDCChan <- dc
+	})
+
 	offer, err := senderPC.CreateOffer(nil)
 	require.NoError(t, err)
 	require.NoError(t, senderPC.SetLocalDescription(offer))
 	require.NoError(t, receiverPC.SetRemoteDescription(offer))
 
+	rxCandidatesMu.Lock()
+	rxRemoteDescSet = true
+	for _, cand := range rxPendingCandidates {
+		_ = receiverPC.AddICECandidate(cand)
+	}
+	rxPendingCandidates = nil
+	rxCandidatesMu.Unlock()
+
 	answer, err := receiverPC.CreateAnswer(nil)
 	require.NoError(t, err)
 	require.NoError(t, receiverPC.SetLocalDescription(answer))
 	require.NoError(t, senderPC.SetRemoteDescription(answer))
+
+	txCandidatesMu.Lock()
+	txRemoteDescSet = true
+	for _, cand := range txPendingCandidates {
+		_ = senderPC.AddICECandidate(cand)
+	}
+	txPendingCandidates = nil
+	txCandidatesMu.Unlock()
 
 	var receiverDC *webrtc.DataChannel
 	select {
@@ -76,16 +140,6 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for receiver DataChannel")
 	}
-
-	senderOpen := make(chan struct{})
-	senderDC.OnOpen(func() {
-		close(senderOpen)
-	})
-
-	receiverOpen := make(chan struct{})
-	receiverDC.OnOpen(func() {
-		close(receiverOpen)
-	})
 
 	select {
 	case <-senderOpen:
