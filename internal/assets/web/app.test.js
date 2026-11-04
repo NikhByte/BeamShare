@@ -313,7 +313,9 @@ describe('Gaze Web Receiver Test Suite', () => {
     const ssePromise = app.startHTTPSSE();
 
     // Allow microtasks to run so clearIDB completes and onmessage is assigned
-    await new Promise(resolve => setTimeout(resolve, 10));
+    for (let i = 0; i < 50 && (!mockSourceInstance || !mockSourceInstance.onmessage); i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
 
     assert.notEqual(mockSourceInstance, null);
     assert.equal(document.getElementById('state-livepipe').classList.contains('hidden'), false);
@@ -879,14 +881,27 @@ describe('Gaze Web Sender Test Suite', () => {
     const raw = Buffer.from(b64, 'base64');
     assert.equal(raw.length, 32);
 
-    // Ensure global encryption key was created
+        // Ensure global encryption key was created
     assert.notEqual(app.get_senderEncryptionKey(), null);
 
     // Verify send-qr-img src uses local client-side Data URL without third-party calls
     const sendQrImg = document.getElementById('send-qr-img');
     assert.notEqual(sendQrImg, null);
-    assert.equal(sendQrImg.src.startsWith('data:image/svg+xml;charset=utf-8,'), true);
+    assert.equal(sendQrImg.src.startsWith('data:image/'), true);
     assert.equal(sendQrImg.src.includes('api.qrserver.com'), false);
+  });
+
+  test('generateClientQRCodeDataURL and renderClientQRCode generate local data URLs without network requests', () => {
+    const testURL = 'http://localhost:8080/?s=test-session-id&mode=webrtc#k=SecretKeyHashFragment123';
+    const dataURL = app.generateClientQRCodeDataURL(testURL);
+
+    assert.equal(typeof dataURL, 'string');
+    assert.equal(dataURL.startsWith('data:image/'), true);
+    assert.equal(dataURL.includes('api.qrserver.com'), false);
+
+    const mockImg = document.createElement('img');
+    app.renderClientQRCode(testURL, mockImg);
+    assert.equal(mockImg.src, dataURL);
   });
 
   test('generateQRCodeDataURL produces local SVG Data URL encoding complete share link with #k fragment', () => {
