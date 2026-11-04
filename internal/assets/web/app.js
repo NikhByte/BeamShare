@@ -503,8 +503,8 @@ function renderQRElements(url, canvasId, imgId) {
 function getBackendURL() {
   const params = new URLSearchParams(window.location.search);
   let backend = params.get('backend') || params.get('b') || window.GAZE_BACKEND_URL || window.BACKEND_URL || '';
-  if (!backend) {
-    backend = window.location.origin;
+  if (!backend || backend === 'null') {
+    backend = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://localhost';
     if (backend.includes('vercel.app') || backend.startsWith('file://')) {
       backend = 'https://beamshare.onrender.com';
     }
@@ -3902,7 +3902,8 @@ async function startSenderSharing() {
     senderStatePublished = true;
     publishCandidateUpdate();
 
-    const shareURL = new URL(window.location.origin);
+    const baseOrigin = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : 'http://localhost';
+    const shareURL = new URL(baseOrigin);
     shareURL.searchParams.set('s', senderSessionID);
     shareURL.searchParams.set('backend', backend);
     shareURL.searchParams.set('mode', 'webrtc');
@@ -4308,8 +4309,8 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Client-side QR Code Generator ─────────────────────────────────────────────
-const GF256_EXP = new Uint8Array(512);
-const GF256_LOG = new Uint8Array(256);
+var GF256_EXP = (typeof GF256_EXP !== 'undefined' ? GF256_EXP : new Uint8Array(512));
+var GF256_LOG = (typeof GF256_LOG !== 'undefined' ? GF256_LOG : new Uint8Array(256));
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
@@ -4738,6 +4739,7 @@ function waitForDataChannelBuffer(dc, highWatermark = 1024 * 1024, lowWatermark 
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    init,
     waitForBufferedAmountLow,
     waitForDataChannelBuffer,
     waitForInitialICECandidate,
