@@ -221,19 +221,25 @@ describe('Gaze Web Receiver Test Suite', () => {
       } catch (e) {}
     }
 
-    app.init();
+    const origFetch = global.fetch;
+    global.fetch = () => new Promise(() => {});
 
-    assert.equal(document.documentElement.getAttribute('data-sw-ready'), null);
+    try {
+      app.init();
 
-    readyResolver({ active: {} });
-    await readyPromise;
-    await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(document.documentElement.getAttribute('data-sw-ready'), null);
 
-    assert.equal(document.documentElement.getAttribute('data-sw-ready'), 'true');
+      readyResolver({ active: {} });
+      await readyPromise;
+      await new Promise(resolve => setTimeout(resolve, 20));
 
-    delete window.navigator.serviceWorker;
-    if (typeof global.navigator !== 'undefined') {
-      delete global.navigator.serviceWorker;
+      assert.equal(document.documentElement.getAttribute('data-sw-ready'), 'true');
+    } finally {
+      global.fetch = origFetch;
+      delete window.navigator.serviceWorker;
+      if (typeof global.navigator !== 'undefined') {
+        delete global.navigator.serviceWorker;
+      }
     }
   });
 
