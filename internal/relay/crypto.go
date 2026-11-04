@@ -10,15 +10,22 @@ import (
 	"io"
 )
 
+// MaxFramePayloadSize is the maximum allowable payload size for an encrypted frame (65,564 bytes).
+// EncryptingReader chunks plaintext into 64KB (65,536 bytes) blocks, which with AES-GCM 12-byte nonce
+// and 16-byte tag produces frames of at most 65,564 bytes.
 const (
-	MinFrameLength = 28
-	MaxFrameLength = 65564
-	MaxFrameSize   = MaxFrameLength
+	MinFrameLength      = 28
+	MaxFrameLength      = 65564
+	MaxFrameSize        = MaxFrameLength
+	MaxFramePayloadSize = MaxFrameLength
 )
 
 var (
+	// ErrInvalidFrameLength is returned when a frame length header is outside allowed bounds.
 	ErrInvalidFrameLength   = errors.New("invalid frame length")
+	// ErrFrameTooLarge is returned when a frame length header exceeds MaxFramePayloadSize.
 	ErrFrameTooLarge        = ErrInvalidFrameLength
+	// ErrMaxFrameSizeExceeded is an alias for ErrFrameTooLarge.
 	ErrMaxFrameSizeExceeded = ErrFrameTooLarge
 )
 
