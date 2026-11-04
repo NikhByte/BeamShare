@@ -24,6 +24,33 @@ describe('Service Worker Stream Cleanup & RFC 6266 Tests', () => {
     delete global.self;
   });
 
+  test('Service worker posts PORT_READY message on port upon INIT_PORT', () => {
+    const { streamMap } = require('./sw.js');
+    const url = '/sw-download-pipe/test-port-ready';
+
+    let postedMessages = [];
+    const mockPort = {
+      onmessage: null,
+      onmessageerror: null,
+      close: () => {},
+      postMessage: (msg) => { postedMessages.push(msg); }
+    };
+
+    listeners['message']({
+      data: {
+        type: 'INIT_PORT',
+        url,
+        filename: 'test.bin',
+        size: 100,
+        mime: 'application/octet-stream'
+      },
+      ports: [mockPort]
+    });
+
+    assert.equal(streamMap.has(url), true);
+    assert.equal(postedMessages.some(m => m && (m.type === 'PORT_READY' || m.type === 'READY')), true);
+  });
+
   test('formatContentDisposition formats RFC 6266 dual parameters correctly', () => {
     const { formatContentDisposition } = require('./sw.js');
 
