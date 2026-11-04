@@ -221,6 +221,9 @@ describe('Gaze Web Receiver Test Suite', () => {
       } catch (e) {}
     }
 
+    const origFetch = global.fetch;
+    global.fetch = window.fetch = async () => new Promise(() => {});
+
     app.init();
 
     assert.equal(document.documentElement.getAttribute('data-sw-ready'), null);
@@ -231,6 +234,7 @@ describe('Gaze Web Receiver Test Suite', () => {
 
     assert.equal(document.documentElement.getAttribute('data-sw-ready'), 'true');
 
+    global.fetch = window.fetch = origFetch;
     delete window.navigator.serviceWorker;
     if (typeof global.navigator !== 'undefined') {
       delete global.navigator.serviceWorker;
