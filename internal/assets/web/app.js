@@ -439,7 +439,13 @@ function renderQRCode(arg1, arg2, options = {}) {
       return true;
     }
 
-    const rawSvg = generateQRCodeSVG(text);
+    let rawSvg = generateQRCodeSVG(text);
+    if (typeof rawSvg === 'string' && rawSvg.startsWith('data:image/svg+xml')) {
+      const commaIdx = rawSvg.indexOf(',');
+      if (commaIdx !== -1) {
+        rawSvg = decodeURIComponent(rawSvg.slice(commaIdx + 1));
+      }
+    }
     const svgStr = rawSvg.replace('<path fill="#000000" d=', '<path d=');
 
     if (tag === 'img') {
@@ -2727,6 +2733,13 @@ async function parseDecryptionKeyFromHash(hash) {
 async function startHTTPDownload() {
   if (!currentFile) return;
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.error("Failed to import decryption key", err);
+  }
+
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {
     return;
@@ -2815,7 +2828,6 @@ async function startHTTPDownload() {
 
     while (true) {
       const { done, value } = await reader.read();
-
       if (value && value.length > 0) {
         if (decryptionKey) {
           let newBuffer = new Uint8Array(encBuffer.length + value.length);
@@ -2914,6 +2926,7 @@ async function startHTTPDownload() {
     showDone(currentFile.name, currentFile.size, modeDesc);
 
   } catch (err) {
+    console.error("HTTP Download failed error:", err);
     if (err.name === 'QuotaExceededError' || err.message.includes('Quota') || (err.message && err.message.includes('disk is full'))) {
       showError("Transfer failed: Device disk is full.");
     } else {
@@ -4308,18 +4321,17 @@ if (typeof window !== 'undefined') {
 }
 
 // ── Client-side QR Code Generator ─────────────────────────────────────────────
+
 const GF256_EXP = new Uint8Array(512);
 const GF256_LOG = new Uint8Array(256);
 (function initGF256() {
   let x = 1;
   for (let i = 0; i < 255; i++) {
     GF256_EXP[i] = x;
+    GF256_EXP[i + 255] = x;
     GF256_LOG[x] = i;
     x <<= 1;
-    if (x & 0x100) x ^= 0x11d;
-  }
-  for (let i = 255; i < 512; i++) {
-    GF256_EXP[i] = GF256_EXP[i - 255];
+    if (x & 256) x ^= 285;
   }
 })();
 

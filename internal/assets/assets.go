@@ -93,6 +93,11 @@ func QrcodeJS() string {
 	return qrcodeJS
 }
 
+// QriousJS returns the qrious.min.js content.
+func QriousJS() string {
+	return qriousJS
+}
+
 // StaticHandler returns an http.Handler that serves the embedded CSS and JS.
 func StaticHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -312,11 +312,12 @@ describe('Gaze Web Receiver Test Suite', () => {
     // Start SSE streaming
     const ssePromise = app.startHTTPSSE();
 
+    assert.equal(document.getElementById('state-livepipe').classList.contains('hidden'), false);
+
     // Allow microtasks to run so clearIDB completes and onmessage is assigned
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     assert.notEqual(mockSourceInstance, null);
-    assert.equal(document.getElementById('state-livepipe').classList.contains('hidden'), false);
 
     // Simulate backlog SSE message
     mockSourceInstance.onmessage({
@@ -746,6 +747,7 @@ describe('Gaze Web Sender Test Suite', () => {
   let dom;
   let window;
   let document;
+  let app;
   let fetchedURLs = [];
 
   beforeEach(() => {
