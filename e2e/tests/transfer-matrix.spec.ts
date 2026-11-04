@@ -234,7 +234,6 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       ]);
 
       await expect(page.locator('#state-done')).toBeVisible({ timeout: 45000 });
-
       const downloadPath = await download.path();
       expect(downloadPath).toBeTruthy();
 
