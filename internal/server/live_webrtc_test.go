@@ -246,8 +246,11 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	err = os.WriteFile(filePath, testPayload, 0644)
 	require.NoError(t, err)
 
+	var senderWg sync.WaitGroup
+	senderWg.Add(1)
 	// Perform sender chunked transfer with backpressure check
 	go func() {
+		defer senderWg.Done()
 		file, err := os.Open(filePath)
 		if err != nil {
 			return
@@ -299,6 +302,8 @@ func TestWebRTCDataChannelChunkingAndBackpressure(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for P2P chunked transfer completion")
 	}
+
+	senderWg.Wait()
 }
 
 func TestWebRTCDataChannelPauseResumeSignaling(t *testing.T) {

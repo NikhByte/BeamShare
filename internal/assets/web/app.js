@@ -2563,7 +2563,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -2726,6 +2728,15 @@ async function parseDecryptionKeyFromHash(hash) {
 
 async function startHTTPDownload() {
   if (!currentFile) return;
+
+  let decryptionKey = null;
+  if (typeof window !== 'undefined' && window.location && window.location.hash) {
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch (err) {
+      console.warn("Failed to parse decryption key from hash:", err);
+    }
+  }
 
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {

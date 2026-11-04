@@ -136,6 +136,8 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
 
+      await waitForServiceWorkerReady(page);
+
       // Click Download File button with concurrent download event listener
       const [download] = await Promise.all([
         page.waitForEvent('download', { timeout: 30000 }),
@@ -226,6 +228,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
 
+      // Unregister route interceptor after WebRTC failure fallback completes
       await page.unroute('**/api/signal/**');
 
       const [download] = await Promise.all([
