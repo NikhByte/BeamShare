@@ -515,13 +515,45 @@ function getBackendURL() {
   return backend;
 }
 
+function getSessionToken() {
+  if (typeof window === 'undefined') return '';
+  const params = new URLSearchParams(window.location.search || '');
+  let token = params.get('token');
+  if (!token) {
+    const backend = params.get('backend') || params.get('b') || params.get('local') || window.GAZE_BACKEND_URL || '';
+    if (backend && backend.includes('token=')) {
+      try {
+        const u = new URL(backend);
+        token = u.searchParams.get('token');
+      } catch (e) {}
+    }
+  }
+  if (token) {
+    try { sessionStorage.setItem('beam_token', token); } catch (e) {}
+    return token;
+  }
+  try { return sessionStorage.getItem('beam_token') || ''; } catch (e) { return ''; }
+}
+
+function getAuthHeaders(headers = {}) {
+  const token = getSessionToken();
+  if (token) {
+    return Object.assign({}, headers, { 'Authorization': 'Bearer ' + token });
+  }
+  return headers;
+}
+
 function apiPath(path) {
   const backend = getBackendURL();
-  const params = new URLSearchParams(window.location.search);
+  const params = new URLSearchParams(window.location.search || '');
   const s = params.get('s');
+  const token = getSessionToken();
   let fullPath = path;
-  if (s) {
-    fullPath = path.includes('?') ? path + '&s=' + s : path + '?s=' + s;
+  if (s && !fullPath.includes('s=')) {
+    fullPath = fullPath.includes('?') ? fullPath + '&s=' + s : fullPath + '?s=' + s;
+  }
+  if (token && !fullPath.includes('token=')) {
+    fullPath = fullPath.includes('?') ? fullPath + '&token=' + encodeURIComponent(token) : fullPath + '?token=' + encodeURIComponent(token);
   }
   if (backend) {
     return backend + fullPath;
@@ -2628,7 +2660,10 @@ async function bootstrap() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
-      const res = await fetch(`${localURL}/api/meta`, { signal: controller.signal });
+      const token = getSessionToken();
+      const headers = getAuthHeaders();
+      const targetUrl = localURL.includes('token=') ? `${localURL}/api/meta` : (token ? `${localURL}/api/meta?token=${encodeURIComponent(token)}` : `${localURL}/api/meta`);
+      const res = await fetch(targetUrl, { signal: controller.signal, headers });
       clearTimeout(timeoutId);
       
       if (res.ok) {
@@ -2659,7 +2694,7 @@ async function bootstrap() {
 // ── HTTP mode ─────────────────────────────────────────────────────────────────
 async function fetchMetaAndShowReady() {
   try {
-    const res = await fetch(apiPath('/api/meta'));
+    const res = await fetch(apiPath('/api/meta'), { headers: getAuthHeaders() });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     currentFile = await res.json();
 
@@ -2806,7 +2841,7 @@ async function startHTTPDownload() {
     if (initialOffset > 0) {
       headers['Range'] = `bytes=${initialOffset}-`;
     }
-    const res = await fetch(apiPath('/api/download'), { headers });
+    const res = await fetch(apiPath('/api/download'), { headers: getAuthHeaders(headers) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
     const reader = res.body.getReader();
@@ -3018,7 +3053,7 @@ async function startWebRTC() {
 
   if (!offer) {
     setWebRTCSub('Fetching SDP offer…');
-    const offerRes = await fetch(apiPath('/api/signal/offer'));
+    const offerRes = await fetch(apiPath('/api/signal/offer'), { headers: getAuthHeaders() });
     if (!offerRes.ok) throw new Error(`offer fetch: HTTP ${offerRes.status}`);
     offer = await offerRes.json();
   }
@@ -3029,7 +3064,7 @@ async function startWebRTC() {
   const pc = new RTCPeerConnection({ iceServers });
 
   // Also fetch file meta in parallel.
-  const metaPromise = fetch(apiPath('/api/meta')).then(r => r.json());
+  const metaPromise = fetch(apiPath('/api/meta'), { headers: getAuthHeaders() }).then(r => r.json());
 
   await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
@@ -3062,7 +3097,7 @@ async function startWebRTC() {
   setWebRTCSub('Sending answer to sender…');
   const answerRes = await fetch(apiPath('/api/signal/answer'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(pc.localDescription),
   });
   if (!answerRes.ok) throw new Error(`answer POST: HTTP ${answerRes.status}`);
@@ -3071,7 +3106,7 @@ async function startWebRTC() {
   // 5. Fetch and add ICE candidates from sender.
   setWebRTCSub('Exchanging ICE candidates…');
   try {
-    const candRes  = await fetch(apiPath('/api/signal/candidates'));
+    const candRes  = await fetch(apiPath('/api/signal/candidates'), { headers: getAuthHeaders() });
     const cands    = await candRes.json();
     for (const c of cands) {
       await pc.addIceCandidate(new RTCIceCandidate(c));
@@ -3669,6 +3704,10 @@ async function handleUploadFile(e) {
     };
 
     xhr.open('POST', apiPath('/api/upload'), true);
+    const uploadToken = getSessionToken();
+    if (uploadToken) {
+      xhr.setRequestHeader('Authorization', 'Bearer ' + uploadToken);
+    }
     xhr.send(formData);
   }
 }
@@ -4755,6 +4794,8 @@ if (typeof module !== 'undefined' && module.exports) {
     VirtualLogViewer,
     startHTTPSSE,
     getBackendURL,
+    getSessionToken,
+    getAuthHeaders,
     apiPath,
     formatBytes,
     mimeLabel,
