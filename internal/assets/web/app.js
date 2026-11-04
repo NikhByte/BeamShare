@@ -2563,7 +2563,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window !== 'undefined' && !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
