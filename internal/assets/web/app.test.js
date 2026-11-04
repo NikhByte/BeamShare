@@ -159,6 +159,8 @@ describe('Gaze Web Receiver Test Suite', () => {
     global.pako = pako;
     window.pako = pako;
     window.__BEAM_TEST_ENV__ = true;
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({}) });
+    window.fetch = global.fetch;
 
     // Load qrcode.min.js and app.js
     delete require.cache[require.resolve('./qrcode.min.js')];
