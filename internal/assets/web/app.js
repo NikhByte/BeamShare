@@ -2816,7 +2816,15 @@ async function startHTTPDownload() {
 
     const reader = res.body.getReader();
     let received = initialOffset;
+    let decryptionKey = null;
     let encBuffer = new Uint8Array(0);
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch(e) {
+      console.error("Failed to import decryption key", e);
+      showError("Decryption key error: " + e.message);
+      return;
+    }
 
     while (true) {
       const { done, value } = await reader.read();
