@@ -229,10 +229,13 @@ type failedAttempt struct {
 	firstSeen time.Time
 }
 
+const maxFailedAttemptsEntries = 10000
+
 type Server struct {
 	sessions           map[string]*Session
 	sessionTTL         time.Duration
 	cleanupInterval    time.Duration
+	UploadTimeout      time.Duration
 	stopChan           chan struct{}
 	ticker             *time.Ticker
 	wg                 sync.WaitGroup
@@ -252,6 +255,7 @@ func NewServerWithConfig(ttl, cleanupInterval time.Duration) *Server {
 		failedAttempts:  make(map[string]*failedAttempt),
 		sessionTTL:      ttl,
 		cleanupInterval: cleanupInterval,
+		UploadTimeout:   30 * time.Second,
 		stopChan:        make(chan struct{}),
 	}
 	s.startSweeper()
@@ -299,8 +303,6 @@ func (s *Server) Stop() {
 	s.wg.Wait()
 }
 
-const maxFailedAttemptsEntries = 10000
-
 func (s *Server) purgeFailedAttempts() {
 	s.failedAttemptsMu.Lock()
 	defer s.failedAttemptsMu.Unlock()
@@ -331,13 +333,21 @@ func (s *Server) SweepExpiredSessions() {
 		sess.Close(fmt.Errorf("session expired"))
 	}
 
+	s.SweepExpiredIPs()
+}
+
+func (s *Server) SweepExpiredIPs() {
 	s.failedAttemptsMu.Lock()
+	defer s.failedAttemptsMu.Unlock()
+	if s.failedAttempts == nil {
+		return
+	}
+	now := time.Now()
 	for ip, fa := range s.failedAttempts {
-		if now.Sub(fa.firstSeen) > time.Minute {
+		if fa == nil || now.Sub(fa.firstSeen) > time.Minute {
 			delete(s.failedAttempts, ip)
 		}
 	}
-	s.failedAttemptsMu.Unlock()
 }
 
 func (s *Server) GetSession(id string) *Session {
@@ -376,6 +386,14 @@ func (s *Server) recordFailedAttempt(ip string) {
 	defer s.failedAttemptsMu.Unlock()
 	if s.failedAttempts == nil {
 		s.failedAttempts = make(map[string]*failedAttempt)
+	}
+	if len(s.failedAttempts) >= maxFailedAttemptsEntries {
+		now := time.Now()
+		for k, fa := range s.failedAttempts {
+			if fa == nil || now.Sub(fa.firstSeen) > time.Minute {
+				delete(s.failedAttempts, k)
+			}
+		}
 	}
 	fa, ok := s.failedAttempts[ip]
 	if !ok || time.Since(fa.firstSeen) > time.Minute {
@@ -1216,6 +1234,22 @@ func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 	w.Write(pngBytes)
 }
 
+type activityWriter struct {
+	w        io.Writer
+	activity chan struct{}
+}
+
+func (aw *activityWriter) Write(p []byte) (int, error) {
+	n, err := aw.w.Write(p)
+	if n > 0 {
+		select {
+		case aw.activity <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
+}
+
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1274,32 +1308,66 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			done := make(chan struct{})
 			defer close(done)
 
+			uploadTimeout := s.UploadTimeout
+			if uploadTimeout <= 0 {
+				uploadTimeout = 30 * time.Second
+			}
+
+			activity := make(chan struct{}, 1)
+			aw := &activityWriter{w: pw, activity: activity}
+
+			timer := time.NewTimer(uploadTimeout)
+			defer timer.Stop()
+
 			go func() {
-				select {
-				case <-done:
-					return
-				case <-r.Context().Done():
+				for {
 					select {
 					case <-done:
 						return
-					default:
-						sess.ClosePipesIfMatch(pr, pw, fmt.Errorf("upload context cancelled: %w", r.Context().Err()))
+					case <-activity:
+						if !timer.Stop() {
+							select {
+							case <-timer.C:
+							default:
+							}
+						}
+						timer.Reset(uploadTimeout)
+					case <-timer.C:
+						errTimeout := fmt.Errorf("upload transfer write timeout: inactive for %v", uploadTimeout)
+						sess.ClosePipesIfMatch(pr, pw, errTimeout)
+						pw.CloseWithError(errTimeout)
+						pr.CloseWithError(errTimeout)
+						return
+					case <-r.Context().Done():
+						select {
+						case <-done:
+							return
+						default:
+							errCtx := fmt.Errorf("upload client context cancelled: %w", r.Context().Err())
+							sess.ClosePipesIfMatch(pr, pw, errCtx)
+							pw.CloseWithError(errCtx)
+							pr.CloseWithError(errCtx)
+							return
+						}
 					}
 				}
 			}()
 
 			// Notify sender
+			sess.mu.Lock()
 			if !sess.closed && sess.UploadReq != nil {
 				select {
 				case sess.UploadReq <- part.FileName():
 				default:
 				}
 			}
+			sess.mu.Unlock()
 
 			// Stream data to pipe
-			_, uploadErr = io.Copy(pw, part)
+			_, uploadErr = io.Copy(aw, part)
 			if uploadErr != nil {
 				pw.CloseWithError(uploadErr)
+				pr.CloseWithError(uploadErr)
 				part.Close()
 				http.Error(w, fmt.Sprintf("upload failed: %v", uploadErr), http.StatusInternalServerError)
 				return

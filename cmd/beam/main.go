@@ -595,9 +595,6 @@ func runSend(filePath string, iceServers []webrtc.ICEServer, discoveryTimeout ti
 							if isLive {
 								return
 							}
-							if !isStreaming.CompareAndSwap(false, true) {
-								return
-							}
 							parts := strings.SplitN(dataStr, ":", 2)
 							var offset int64
 							if len(parts) == 2 {
