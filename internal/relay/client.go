@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -14,7 +13,8 @@ import (
 )
 
 // ErrInvalidKeyLength indicates that a non-empty encryption key length is not 32 bytes (AES-256).
-var ErrInvalidKeyLength = errors.New("invalid encryption key length")
+// It is an alias for ErrInvalidKeySize for backwards compatibility.
+var ErrInvalidKeyLength = ErrInvalidKeySize
 
 // BackoffConfig defines exponential backoff retry parameters for relay client reconnections.
 type BackoffConfig struct {
@@ -186,9 +186,13 @@ func (c *Client) Poll(ctx context.Context) (*PollCommand, error) {
 // Returns nil if no key is set (len(Key) == 0) or if the key length is 32 bytes.
 func (c *Client) ValidateKey() error {
 	if len(c.Key) > 0 && len(c.Key) != 32 {
-		return fmt.Errorf("%w: expected 32 bytes, got %d", ErrInvalidKeyLength, len(c.Key))
+		return ErrInvalidKeySize
 	}
 	return nil
+}
+
+func (c *Client) validateKey() error {
+	return c.ValidateKey()
 }
 
 // UploadData streams file data starting at the beginning of the file.
