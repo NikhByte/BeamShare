@@ -59,6 +59,9 @@ func TestServer_RapidSuccessiveDownloadRequestsQueued(t *testing.T) {
 	httpClient := newTestHTTPClient()
 	cancels := make([]context.CancelFunc, 0, len(ranges))
 
+	sess := relayServer.getSession(sessID)
+	require.NotNil(t, sess)
+
 	for _, rng := range ranges {
 		reqCtx, reqCancel := context.WithCancel(testCtx)
 		cancels = append(cancels, reqCancel)
@@ -74,12 +77,13 @@ func TestServer_RapidSuccessiveDownloadRequestsQueued(t *testing.T) {
 			}
 		}(req)
 
-		// Brief delay to guarantee sequential HTTP request arrival order
-		time.Sleep(10 * time.Millisecond)
+		require.Eventually(t, func() bool {
+			sess.mu.Lock()
+			defer sess.mu.Unlock()
+			return sess.pendingDownload != nil && sess.pendingDownload.Range == rng
+		}, 3*time.Second, 5*time.Millisecond, "Download request for range %s was not queued in time", rng)
 	}
 
-	sess := relayServer.getSession(sessID)
-	require.NotNil(t, sess)
 	assert.Equal(t, 1, sess.DownloadQueueLen())
 
 	// Poll should yield the latest request in single-slot buffer
