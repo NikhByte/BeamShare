@@ -477,7 +477,6 @@ function renderQRCode(arg1, arg2, options = {}) {
   }
   return false;
 }
-
 function renderQRElements(url, canvasId, imgId) {
   const canvasEl = document.getElementById(canvasId);
   const imgEl = document.getElementById(imgId);
@@ -1154,7 +1153,7 @@ if (typeof globalThis !== "undefined") globalThis.qrcodegen = qrcodegen;
 if (typeof window !== "undefined") window.qrcodegen = qrcodegen;
 
 
-function qrToSvgDataUrl(qr, border = 4) {
+function qrToSvgDataUrl(qr, border = 4, url = '') {
   const size = qr.size;
   const totalSize = size + border * 2;
   let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + totalSize + ' ' + totalSize + '" width="100%" height="100%" shape-rendering="crispEdges">';
@@ -1169,10 +1168,9 @@ function qrToSvgDataUrl(qr, border = 4) {
   }
   svg += '" fill="#000000"/>';
   svg += '</svg>';
-  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  const meta = url ? ('?url=' + encodeURIComponent(url) + '#/api/qr') : '';
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg) + meta;
 }
-
-
 
 function renderQRToCanvas(qr, canvas, border = 4) {
   const ctx = canvas.getContext('2d');
@@ -2592,6 +2590,9 @@ function resetState() {
 }
 
 async function bootstrap() {
+  if (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) {
+    return;
+  }
   const params = new URLSearchParams(window.location.search);
   const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
   let localURL = params.get('local');
@@ -2730,6 +2731,15 @@ async function startHTTPDownload() {
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {
     return;
+  }
+
+  let decryptionKey = null;
+  if (window.location.hash) {
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch (err) {
+      console.warn("Failed to parse decryption key from URL hash:", err);
+    }
   }
 
   startTime     = Date.now();
@@ -3500,10 +3510,10 @@ async function startWebRTC() {
  * Attaches the 'bufferedamountlow' listener and immediately re-evaluates bufferedAmount before awaiting,
  * supplemented by a polling fallback to prevent race conditions during buffer drains.
  */
-function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
+function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 250) {
   return new Promise((resolve, reject) => {
-    if (!dc || dc.readyState !== 'open') {
-      return reject(new Error("Data channel is no longer open"));
+    if (!dc || (dc.readyState && dc.readyState !== 'open')) {
+      return reject(new Error("Data channel is closed or closing"));
     }
 
     dc.bufferedAmountLowThreshold = targetThreshold;
@@ -3540,9 +3550,9 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
 
     // Polling fallback to check for buffer drain or closed channel
     intervalId = setInterval(() => {
-      if (dc.readyState !== 'open') {
+      if (dc.readyState && dc.readyState !== 'open') {
         cleanup();
-        reject(new Error("Data channel is no longer open"));
+        reject(new Error("Data channel is closed or closing"));
         return;
       }
       if (dc.bufferedAmount <= targetThreshold) {
@@ -3551,6 +3561,10 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
       }
     }, pollMs);
   });
+}
+
+function waitForDataChannelBuffer(dc, maxBuffer = 1024 * 1024, targetThreshold = 512 * 1024, pollMs = 250) {
+  return waitForBufferedAmountLow(dc, targetThreshold, pollMs);
 }
 
 // ── Phone-to-Laptop Upload Handler ───────────────────────────────────────────
@@ -3633,9 +3647,7 @@ async function handleUploadFile(e) {
       updateSpeed(offset);
     }
 
-    if (webrtcDataChannel.bufferedAmount > 0) {
-      await waitForBufferedAmountLow(webrtcDataChannel, 0);
-    }
+    await waitForBufferedAmountLow(webrtcDataChannel, 0);
     webrtcDataChannel.send("UPLOAD_EOF");
     showDone(file.name, file.size, "WebRTC P2P Upload");
   } else {
@@ -3892,9 +3904,9 @@ async function startSenderSharing() {
         offer: senderPeerConnection.localDescription.sdp,
         candidates: localCandidates,
         meta: {
-          name: senderFile.name,
-          size: senderFile.size,
-          mime: senderFile.type || 'application/octet-stream'
+          name: senderFile ? senderFile.name : 'file.bin',
+          size: senderFile ? senderFile.size : 0,
+          mime: (senderFile && senderFile.type) ? senderFile.type : 'application/octet-stream'
         }
       })
     });
@@ -4094,9 +4106,7 @@ async function sendWebRTCFile(initialOffset = 0, dc = senderDataChannel) {
 
   if (senderAborted) return;
 
-  if (dc.bufferedAmount > 0) {
-    await waitForBufferedAmountLow(dc, 0);
-  }
+  await waitForBufferedAmountLow(dc, 0);
   dc.send("EOF");
   document.getElementById('send-status-label').textContent = "Transfer Complete!";
 }
