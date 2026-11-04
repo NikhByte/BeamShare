@@ -813,16 +813,18 @@ func TestConcurrentUpdateSharedFile(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		client := &http.Client{Timeout: 1 * time.Second}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				resp, err := http.Get(ts.URL + "/api/meta")
+				resp, err := client.Get(ts.URL + "/api/meta")
 				if err == nil {
 					io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
 				}
+				time.Sleep(1 * time.Millisecond)
 			}
 		}
 	}()
@@ -831,16 +833,18 @@ func TestConcurrentUpdateSharedFile(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		client := &http.Client{Timeout: 1 * time.Second}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				resp, err := http.Get(ts.URL + "/api/download")
+				resp, err := client.Get(ts.URL + "/api/download")
 				if err == nil {
 					io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
 				}
+				time.Sleep(1 * time.Millisecond)
 			}
 		}
 	}()
