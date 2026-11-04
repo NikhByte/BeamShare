@@ -2563,7 +2563,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -3550,6 +3552,74 @@ function waitForBufferedAmountLow(dc, targetThreshold = 0, pollMs = 25) {
         resolve();
       }
     }, pollMs);
+  });
+}
+
+function waitForDataChannelBuffer(dc, targetAmount = 1024 * 1024, lowThreshold = 512 * 1024) {
+  return new Promise((resolve, reject) => {
+    if (!dc || dc.readyState !== 'open') {
+      return reject(new Error("Data channel is closed or closing"));
+    }
+
+    const threshold = lowThreshold !== undefined && lowThreshold !== null ? lowThreshold : targetAmount;
+    dc.bufferedAmountLowThreshold = threshold;
+
+    if (dc.bufferedAmount <= targetAmount) {
+      return resolve();
+    }
+
+    let timer = null;
+    let resolved = false;
+
+    const cleanup = () => {
+      if (resolved) return;
+      resolved = true;
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+      try {
+        dc.removeEventListener('bufferedamountlow', onLow);
+        dc.removeEventListener('close', onClose);
+        dc.removeEventListener('error', onClose);
+      } catch (e) {}
+    };
+
+    const onLow = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error("Data channel is closed or closing"));
+    };
+
+    try {
+      dc.addEventListener('bufferedamountlow', onLow);
+      dc.addEventListener('close', onClose);
+      dc.addEventListener('error', onClose);
+    } catch (e) {
+      cleanup();
+      return resolve();
+    }
+
+    // Immediate post-listener re-check
+    if (dc.bufferedAmount <= threshold) {
+      cleanup();
+      return resolve();
+    }
+
+    // Periodic fallback timer
+    timer = setInterval(() => {
+      if (!dc || dc.readyState !== 'open') {
+        onClose();
+        return;
+      }
+      if (dc.bufferedAmount <= threshold) {
+        onLow();
+      }
+    }, 250);
   });
 }
 
