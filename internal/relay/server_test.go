@@ -708,6 +708,12 @@ func TestServer_RepeatedUploadRequestsClosePreviousPipes(t *testing.T) {
 	}, 3*time.Second, 10*time.Millisecond, "Upload pipe was not replaced")
 
 	uploadCancel2()
+
+	select {
+	case <-uploadErrCh2:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Second upload did not terminate after context cancellation")
+	}
 }
 
 func TestServer_SeekingReaderCheckSessionContextCancellation(t *testing.T) {

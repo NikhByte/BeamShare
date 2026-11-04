@@ -1307,9 +1307,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			readerDone := make(chan struct{})
 			go func() {
 				defer close(readerDone)
+				var readErr error
 				for {
 					buf := make([]byte, 32*1024)
 					n, err := part.Read(buf)
+					readErr = err
 					if n > 0 {
 						chunk := make([]byte, n)
 						copy(chunk, buf[:n])
@@ -1324,8 +1326,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 						case chunkCh <- chunkResult{err: err}:
 						case <-done:
 						}
-						return
+						break
 					}
+				}
+				if readErr == io.EOF {
+					_, _ = io.Copy(io.Discard, r.Body)
 				}
 			}()
 
