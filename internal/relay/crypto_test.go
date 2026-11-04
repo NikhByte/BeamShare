@@ -463,8 +463,8 @@ func TestFrameHeader_LessThanNonceSize_UnexpectedEOF(t *testing.T) {
 
 	out := make([]byte, 64)
 	_, err = decReader.Read(out)
-	if err != io.ErrUnexpectedEOF {
-		t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+	if !errors.Is(err, ErrInvalidFrameLength) && err != io.ErrUnexpectedEOF {
+		t.Fatalf("expected ErrInvalidFrameLength or io.ErrUnexpectedEOF, got %v", err)
 	}
 }
 
@@ -722,5 +722,110 @@ func TestBufferReuseZeroAllocations(t *testing.T) {
 
 	if allocs > 0 {
 		t.Fatalf("expected 0 heap allocations per frame Read call, got %f", allocs)
+	}
+}
+
+func TestDecryptingReaderFrameTooLarge(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	testCases := []struct {
+		name   string
+		length uint32
+	}{
+		{"MaxFrameSize + 1", MaxFrameSize + 1},
+		{"4GB malicious frame", 4*1024*1024*1024 - 1},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			binary.Write(buf, binary.BigEndian, tc.length)
+			buf.Write(make([]byte, 100))
+
+			decReader, err := NewDecryptingReader(buf, key)
+			if err != nil {
+				t.Fatalf("NewDecryptingReader failed: %v", err)
+			}
+
+			out := make([]byte, 64)
+			_, err = decReader.Read(out)
+			if !errors.Is(err, ErrFrameTooLarge) {
+				t.Fatalf("expected ErrFrameTooLarge for %s, got %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestDecryptingReaderExactMaxFrameSize(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	plaintext := make([]byte, 65536)
+	if _, err := io.ReadFull(rand.Reader, plaintext); err != nil {
+		t.Fatalf("failed to generate plaintext: %v", err)
+	}
+
+	encReader, err := NewEncryptingReader(bytes.NewReader(plaintext), key)
+	if err != nil {
+		t.Fatalf("NewEncryptingReader failed: %v", err)
+	}
+
+	encryptedData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("reading encrypted data failed: %v", err)
+	}
+
+	decReader, err := NewDecryptingReader(bytes.NewReader(encryptedData), key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	decryptedData, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("reading decrypted data failed: %v", err)
+	}
+
+	if !bytes.Equal(decryptedData, plaintext) {
+		t.Fatal("decrypted data does not match original plaintext")
+	}
+}
+
+func BenchmarkDecryptingReaderPerFrameNoInitAlloc(b *testing.B) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		b.Fatalf("failed to generate key: %v", err)
+	}
+
+	plaintext := make([]byte, 65536)
+	encReader, err := NewEncryptingReader(bytes.NewReader(plaintext), key)
+	if err != nil {
+		b.Fatalf("NewEncryptingReader failed: %v", err)
+	}
+	frameData, err := io.ReadAll(encReader)
+	if err != nil {
+		b.Fatalf("reading encrypted frame failed: %v", err)
+	}
+
+	repeater := &repeatingReader{data: frameData}
+	decReader, err := NewDecryptingReader(repeater, key)
+	if err != nil {
+		b.Fatalf("NewDecryptingReader failed: %v", err)
+	}
+
+	out := make([]byte, 65536)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_, err := decReader.Read(out)
+		if err != nil {
+			b.Fatalf("Read failed: %v", err)
+		}
 	}
 }

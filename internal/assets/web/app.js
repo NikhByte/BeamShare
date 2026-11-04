@@ -1714,7 +1714,7 @@ class OPFSStreamWriter {
       const blob = new Blob([workerCode], { type: 'application/javascript' });
       const url = URL.createObjectURL(blob);
       this.worker = new Worker(url);
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
 
       return new Promise((resolve, reject) => {
         const handleMsg = (e) => {
@@ -2563,7 +2563,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -2812,6 +2814,15 @@ async function startHTTPDownload() {
     const reader = res.body.getReader();
     let received = initialOffset;
     let encBuffer = new Uint8Array(0);
+
+    let decryptionKey = null;
+    try {
+      decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+    } catch (err) {
+      console.error("Failed to import decryption key", err);
+      showError("Decryption key error: " + err.message);
+      return;
+    }
 
     while (true) {
       const { done, value } = await reader.read();
@@ -3691,7 +3702,7 @@ function triggerSave(blob, name) {
       a.parentNode.removeChild(a);
     }
     URL.revokeObjectURL(url);
-  }, 5000);
+  }, 60000);
 }
 
 function appendTerminalText(text) {
