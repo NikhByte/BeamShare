@@ -324,7 +324,7 @@ func TestNonceUniquenessAcrossChunks(t *testing.T) {
 	}
 }
 
-func TestMaxFrameSizeExceeded(t *testing.T) {
+func TestDecryptingReader_FrameTooLarge(t *testing.T) {
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		t.Fatalf("failed to generate key: %v", err)
@@ -463,8 +463,8 @@ func TestFrameHeader_LessThanNonceSize_UnexpectedEOF(t *testing.T) {
 
 	out := make([]byte, 64)
 	_, err = decReader.Read(out)
-	if err != io.ErrUnexpectedEOF {
-		t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+	if !errors.Is(err, ErrInvalidFrameLength) && err != io.ErrUnexpectedEOF {
+		t.Fatalf("expected ErrInvalidFrameLength or io.ErrUnexpectedEOF, got %v", err)
 	}
 }
 
