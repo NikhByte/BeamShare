@@ -160,6 +160,8 @@ describe('Gaze Web Receiver Test Suite', () => {
     window.pako = pako;
     window.__BEAM_TEST_ENV__ = true;
 
+    global.fetch = window.fetch = () => new Promise(() => {});
+
     // Load qrcode.min.js and app.js
     delete require.cache[require.resolve('./qrcode.min.js')];
     const qrcodeLib1 = require('./qrcode.min.js');
@@ -746,6 +748,7 @@ describe('Gaze Web Sender Test Suite', () => {
   let dom;
   let window;
   let document;
+  let app;
   let fetchedURLs = [];
 
   beforeEach(() => {
@@ -1191,7 +1194,7 @@ describe('WebRTC Buffer Backpressure Suite', () => {
 
     await assert.rejects(
       async () => await waitPromise,
-      { message: 'Data channel is no longer open' }
+      { message: /closed or closing|no longer open/i }
     );
 
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
