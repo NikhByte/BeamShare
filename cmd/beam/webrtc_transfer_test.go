@@ -106,6 +106,7 @@ func setupConnectedDataChannels(t *testing.T) (*webrtc.PeerConnection, *webrtc.P
 func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, fileName string, fileSize int64, activeSendersCount *int32) {
 	var senderMu sync.Mutex
 	var activeCancel context.CancelFunc
+	var activeDone chan struct{}
 
 	dc.OnClose(func() {
 		senderMu.Lock()
@@ -131,12 +132,18 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 			senderMu.Lock()
 			if activeCancel != nil {
 				activeCancel()
+				senderMu.Unlock()
+				<-activeDone
+				senderMu.Lock()
 			}
 			transferCtx, cancel := context.WithCancel(context.Background())
 			activeCancel = cancel
+			done := make(chan struct{})
+			activeDone = done
 			senderMu.Unlock()
 
 			go func(ctx context.Context) {
+				defer close(done)
 				if activeSendersCount != nil {
 					atomic.AddInt32(activeSendersCount, 1)
 					defer atomic.AddInt32(activeSendersCount, -1)
@@ -236,7 +243,7 @@ func setupSenderDataChannelHandler(dc *webrtc.DataChannel, filePath string, file
 func TestWebRTCTransfer_DuplicateOffsetCancellation(t *testing.T) {
 	tempDir := t.TempDir()
 	testFile := filepath.Join(tempDir, "large_test.bin")
-	fileData := make([]byte, 500*1024) // 500KB test data
+	fileData := make([]byte, 2*1024*1024) // 2MB test data
 	for i := range fileData {
 		fileData[i] = byte(i % 256)
 	}
@@ -265,9 +272,11 @@ func TestWebRTCTransfer_DuplicateOffsetCancellation(t *testing.T) {
 					receivedBytes.Reset()
 				}
 			} else if dataStr == "EOF" {
-				select {
-				case eofCh <- struct{}{}:
-				default:
+				if metaCount >= 2 {
+					select {
+					case eofCh <- struct{}{}:
+					default:
+					}
 				}
 			}
 		} else {
