@@ -232,7 +232,7 @@ func TestServer_SessionEnumerationRateLimited(t *testing.T) {
 }
 
 func TestServer_LongPollingUnblockedAndGoroutinesCleanedOnExpiration(t *testing.T) {
-	srv := NewServerWithConfig(100*time.Millisecond, 20*time.Millisecond)
+	srv := NewServerWithConfig(10*time.Second, 10*time.Millisecond)
 	defer srv.Stop()
 
 	ts := httptest.NewServer(srv)
@@ -278,6 +278,11 @@ func TestServer_LongPollingUnblockedAndGoroutinesCleanedOnExpiration(t *testing.
 	require.Eventually(t, func() bool {
 		return runtime.NumGoroutine() >= baselineGoroutines+numPollers
 	}, 2*time.Second, 10*time.Millisecond, "Goroutine count should increase when long-polling HTTP handlers are blocked")
+
+	sess.mu.Lock()
+	sess.expiresAt = time.Now().Add(-1 * time.Second)
+	sess.mu.Unlock()
+	srv.SweepExpiredSessions()
 
 	// Verify AnswerReady and UploadReq channels are closed upon session expiration
 	assert.Eventually(t, func() bool {
