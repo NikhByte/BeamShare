@@ -131,6 +131,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       expect(parsed.localURL).toBeTruthy();
 
       await page.goto(parsed.localURL);
+      await waitForServiceWorkerReady(page);
 
       // Should enter ready state displaying file metadata and Download button
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
@@ -180,6 +181,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       relayURL.searchParams.set('local', 'http://127.0.0.1:0');
 
       await page.goto(relayURL.toString());
+      await waitForServiceWorkerReady(page);
 
       // Should connect via relay and reach state-ready
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 20000 });
@@ -221,6 +223,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       const fallbackURL = `${parsed.localURL}/?mode=webrtc`;
 
       await page.goto(fallbackURL);
+      await waitForServiceWorkerReady(page);
 
       // WebRTC attempt will fail due to aborted signaling, and app should seamlessly transition to HTTP ready state
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
