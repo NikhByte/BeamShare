@@ -221,19 +221,28 @@ describe('Gaze Web Receiver Test Suite', () => {
       } catch (e) {}
     }
 
-    app.init();
+    const originalFetch = global.fetch;
+    const mockFetch = async () => new Promise(() => {});
+    global.fetch = mockFetch;
+    window.fetch = mockFetch;
 
-    assert.equal(document.documentElement.getAttribute('data-sw-ready'), null);
+    try {
+      app.init();
 
-    readyResolver({ active: {} });
-    await readyPromise;
-    await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(document.documentElement.getAttribute('data-sw-ready'), null);
 
-    assert.equal(document.documentElement.getAttribute('data-sw-ready'), 'true');
+      readyResolver({ active: {} });
+      await readyPromise;
+      await new Promise(resolve => setTimeout(resolve, 20));
 
-    delete window.navigator.serviceWorker;
-    if (typeof global.navigator !== 'undefined') {
-      delete global.navigator.serviceWorker;
+      assert.equal(document.documentElement.getAttribute('data-sw-ready'), 'true');
+    } finally {
+      global.fetch = originalFetch;
+      window.fetch = originalFetch;
+      delete window.navigator.serviceWorker;
+      if (typeof global.navigator !== 'undefined') {
+        delete global.navigator.serviceWorker;
+      }
     }
   });
 
@@ -1083,6 +1092,18 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.deepEqual(servers[0].urls, ['turn:turn.example.com:3478']);
     assert.equal(servers[0].username, 'alice');
     assert.equal(servers[0].credential, 'secret');
+  });
+
+  test('getSessionToken and apiPath propagate session token', () => {
+    // Test with URL search params containing token
+    dom.reconfigure({ url: 'http://localhost:8080/?b=http://localhost:8080&token=sec_tok_12345' });
+    global.window = dom.window;
+    global.location = dom.window.location;
+    global.URLSearchParams = dom.window.URLSearchParams;
+
+    assert.equal(app.getSessionToken(), 'sec_tok_12345');
+    assert.equal(app.apiPath('/api/meta'), 'http://localhost:8080/api/meta?token=sec_tok_12345');
+    assert.equal(app.apiPath('/api/qr?url=abc'), 'http://localhost:8080/api/qr?url=abc&token=sec_tok_12345');
   });
 });
 

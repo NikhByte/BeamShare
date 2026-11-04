@@ -165,8 +165,13 @@ func (s *Session) CompressedOffer() string { return s.offerSDP }
 func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 	// Offer endpoint — receiver fetches this after scanning the QR.
 	mux.HandleFunc("/api/signal/offer", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Beam-Token, Authorization")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"sdp":        s.rawOffer,
 			"type":       "offer",
@@ -178,9 +183,8 @@ func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 	// Answer endpoint — receiver POSTs its SDP answer here.
 	mux.HandleFunc("/api/signal/answer", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Beam-Token, Authorization")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -200,7 +204,6 @@ func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
 		// Unblock WaitForAnswer.
@@ -212,8 +215,13 @@ func (s *Session) RegisterHandlers(mux *http.ServeMux) {
 
 	// ICE candidates endpoint — receiver polls this to add remote candidates.
 	mux.HandleFunc("/api/signal/candidates", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Beam-Token, Authorization")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		cands := s.GetCandidates()
 		json.NewEncoder(w).Encode(cands)
 	})
