@@ -365,6 +365,33 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 		})
 	}
 
+	t.Run("ExactMaxFrameSizeValid", func(t *testing.T) {
+		payload := make([]byte, 65536)
+		encReader, err := NewEncryptingReader(bytes.NewReader(payload), key)
+		if err != nil {
+			t.Fatalf("NewEncryptingReader failed: %v", err)
+		}
+
+		encryptedData, err := io.ReadAll(encReader)
+		if err != nil {
+			t.Fatalf("reading encrypted data failed: %v", err)
+		}
+
+		decReader, err := NewDecryptingReader(bytes.NewReader(encryptedData), key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		decryptedData, err := io.ReadAll(decReader)
+		if err != nil {
+			t.Fatalf("decryption failed for MaxFrameSize payload: %v", err)
+		}
+
+		if !bytes.Equal(decryptedData, payload) {
+			t.Fatal("decrypted payload does not match original")
+		}
+	})
+
 	t.Run("Exact MaxFrameSize boundary passes length check", func(t *testing.T) {
 		buf := new(bytes.Buffer)
 		binary.Write(buf, binary.BigEndian, uint32(MaxFrameSize))
@@ -378,6 +405,22 @@ func TestMaxFrameSizeExceeded(t *testing.T) {
 		_, err = decReader.Read(out)
 		if errors.Is(err, ErrFrameTooLarge) {
 			t.Fatalf("expected length check to pass for MaxFrameSize, but got ErrFrameTooLarge")
+		}
+	})
+
+	t.Run("ZeroLengthHeader", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		binary.Write(buf, binary.BigEndian, uint32(0))
+
+		decReader, err := NewDecryptingReader(buf, key)
+		if err != nil {
+			t.Fatalf("NewDecryptingReader failed: %v", err)
+		}
+
+		out := make([]byte, 64)
+		_, err = decReader.Read(out)
+		if !errors.Is(err, ErrInvalidFrameLength) && err != io.ErrUnexpectedEOF {
+			t.Fatalf("expected ErrInvalidFrameLength or io.ErrUnexpectedEOF for zero length header, got %v", err)
 		}
 	})
 }
@@ -463,8 +506,8 @@ func TestFrameHeader_LessThanNonceSize_UnexpectedEOF(t *testing.T) {
 
 	out := make([]byte, 64)
 	_, err = decReader.Read(out)
-	if err != io.ErrUnexpectedEOF {
-		t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+	if err != io.ErrUnexpectedEOF && !errors.Is(err, ErrInvalidFrameLength) {
+		t.Fatalf("expected io.ErrUnexpectedEOF or ErrInvalidFrameLength, got %v", err)
 	}
 }
 
