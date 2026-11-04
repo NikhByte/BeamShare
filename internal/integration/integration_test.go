@@ -14,8 +14,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -769,4 +771,222 @@ func TestEndToEndRelayLiveStreamPipeTransfer(t *testing.T) {
 
 	expected := "initial backlog line 1\nrealtime piped input line 2\nrealtime piped input line 3\n"
 	assert.Equal(t, expected, string(downloadedData))
+}
+
+func TestWebRTCSingleFlightAndPollingBackpressure(t *testing.T) {
+	senderSession, err := signaling.NewSession([]webrtc.ICEServer{}, 10*time.Second)
+	require.NoError(t, err)
+	defer senderSession.Close()
+
+	senderTxReady := make(chan struct{})
+	var isStreaming atomic.Bool
+	var metaCount int32
+	var eofCount int32
+
+	fileSize := 128 * 1024
+	testPayload := make([]byte, fileSize)
+	for i := range testPayload {
+		testPayload[i] = byte(i % 256)
+	}
+
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "single_flight_test.bin")
+	err = os.WriteFile(filePath, testPayload, 0644)
+	require.NoError(t, err)
+
+	senderSession.OnOpen = func(dc *webrtc.DataChannel) {
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			if msg.IsString {
+				dataStr := string(msg.Data)
+				if strings.HasPrefix(dataStr, "OFFSET:") {
+					if !isStreaming.CompareAndSwap(false, true) {
+						return
+					}
+					parts := strings.SplitN(dataStr, ":", 2)
+					var offset int64
+					if len(parts) == 2 {
+						offset, _ = strconv.ParseInt(parts[1], 10, 64)
+					}
+					go func() {
+						defer isStreaming.Store(false)
+						file, err := os.Open(filePath)
+						if err != nil {
+							return
+						}
+						defer file.Close()
+
+						if offset > 0 {
+							_, _ = file.Seek(offset, io.SeekStart)
+						}
+
+						metaHeader := fmt.Sprintf("META:single_flight_test.bin:%d", fileSize)
+						_ = dc.SendText(metaHeader)
+
+						buffer := make([]byte, 32*1024)
+						for {
+							for dc.BufferedAmount() > 1024*1024 {
+								if dc.ReadyState() == webrtc.DataChannelStateClosed {
+									return
+								}
+								time.Sleep(5 * time.Millisecond)
+							}
+
+							n, err := file.Read(buffer)
+							if n > 0 {
+								chunk := make([]byte, n)
+								copy(chunk, buffer[:n])
+								_ = dc.Send(chunk)
+								time.Sleep(2 * time.Millisecond)
+							}
+							if err != nil {
+								break
+							}
+						}
+
+						for dc.BufferedAmount() > 0 {
+							if dc.ReadyState() == webrtc.DataChannelStateClosed {
+								return
+							}
+							time.Sleep(5 * time.Millisecond)
+						}
+						_ = dc.SendText("EOF")
+					}()
+				}
+			}
+		})
+
+		select {
+		case <-senderTxReady:
+		default:
+			close(senderTxReady)
+		}
+	}
+
+	rxPC, err := signaling.NewWebRTCAPI().NewPeerConnection(webrtc.Configuration{})
+	require.NoError(t, err)
+	defer rxPC.Close()
+
+	var mu sync.Mutex
+	var rxCandidates []webrtc.ICECandidateInit
+	rxPC.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			cand := c.ToJSON()
+			mu.Lock()
+			rxCandidates = append(rxCandidates, cand)
+			mu.Unlock()
+			_ = senderSession.AddICECandidate(cand)
+		}
+	})
+
+	var receivedBuf bytes.Buffer
+	eofReceived := make(chan struct{})
+
+	rxOpenCh := make(chan struct{})
+	rxDataChannelCh := make(chan *webrtc.DataChannel, 1)
+	rxPC.OnDataChannel(func(dc *webrtc.DataChannel) {
+		dc.OnOpen(func() {
+			select {
+			case <-rxOpenCh:
+			default:
+				close(rxOpenCh)
+			}
+		})
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			mu.Lock()
+			defer mu.Unlock()
+			if msg.IsString {
+				str := string(msg.Data)
+				if strings.HasPrefix(str, "META:") {
+					atomic.AddInt32(&metaCount, 1)
+				} else if str == "EOF" {
+					atomic.AddInt32(&eofCount, 1)
+					close(eofReceived)
+				}
+			} else {
+				receivedBuf.Write(msg.Data)
+			}
+		})
+		rxDataChannelCh <- dc
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err = senderSession.CreateOffer(ctx)
+	require.NoError(t, err)
+
+	err = rxPC.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeOffer,
+		SDP:  senderSession.RawOffer(),
+	})
+	require.NoError(t, err)
+
+	for _, cand := range senderSession.GetCandidates() {
+		_ = rxPC.AddICECandidate(cand)
+	}
+
+	senderSession.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			_ = rxPC.AddICECandidate(c.ToJSON())
+		}
+	})
+
+	answer, err := rxPC.CreateAnswer(nil)
+	require.NoError(t, err)
+	err = rxPC.SetLocalDescription(answer)
+	require.NoError(t, err)
+
+	answerBytes, err := json.Marshal(answer)
+	require.NoError(t, err)
+
+	err = senderSession.ProvideAnswer(string(answerBytes))
+	require.NoError(t, err)
+
+	mu.Lock()
+	for _, cand := range rxCandidates {
+		_ = senderSession.AddICECandidate(cand)
+	}
+	mu.Unlock()
+
+	var rxDC *webrtc.DataChannel
+	select {
+	case rxDC = <-rxDataChannelCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for receiver DataChannel")
+	}
+
+	select {
+	case <-rxOpenCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for receiver DataChannel open")
+	}
+
+	select {
+	case <-senderTxReady:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for sender DataChannel open")
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Send 5 concurrent OFFSET requests to test single-flight execution guard
+	for i := 0; i < 5; i++ {
+		go func() {
+			errSend := rxDC.SendText("OFFSET:0")
+			if errSend != nil {
+				t.Logf("SendText OFFSET:0 error: %v", errSend)
+			}
+		}()
+	}
+
+	select {
+	case <-eofReceived:
+		mu.Lock()
+		defer mu.Unlock()
+		assert.Equal(t, int32(1), atomic.LoadInt32(&metaCount), "Expected exactly 1 META header despite concurrent OFFSET requests")
+		assert.Equal(t, int32(1), atomic.LoadInt32(&eofCount), "Expected exactly 1 EOF despite concurrent OFFSET requests")
+		assert.Equal(t, testPayload, receivedBuf.Bytes(), "Received payload should match original test payload without corruption")
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for single-flight transfer completion")
+	}
 }
