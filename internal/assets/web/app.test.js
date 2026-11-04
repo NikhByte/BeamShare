@@ -929,6 +929,19 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.notEqual(canvas, null);
   });
 
+  test('completed upload displays a visible QR instead of leaving it in the hidden fallback image', () => {
+    app.showDone('uploaded.txt', 1024, 'HTTP Upload');
+
+    const canvas = document.getElementById('done-qr-canvas');
+    const image = document.getElementById('done-qr-img');
+    const shareContainer = document.getElementById('done-share-container');
+
+    assert.equal(canvas.classList.contains('hidden'), false);
+    assert.equal(canvas.style.display, 'block');
+    assert.equal(image.classList.contains('hidden'), true);
+    assert.equal(shareContainer.classList.contains('hidden'), false);
+  });
+
   test('createOPFSWriter uses createWritable when available', async () => {
     let written = [];
     const mockFileHandle = {
@@ -1192,6 +1205,5 @@ describe('WebRTC Buffer Backpressure Suite', () => {
     assert.equal(dc.getListenerCount('bufferedamountlow'), 0);
   });
 });
-
 
 
