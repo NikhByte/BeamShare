@@ -2727,6 +2727,15 @@ async function parseDecryptionKeyFromHash(hash) {
 async function startHTTPDownload() {
   if (!currentFile) return;
 
+  let decryptionKey = null;
+  try {
+    decryptionKey = await parseDecryptionKeyFromHash(window.location.hash);
+  } catch (err) {
+    console.error("Failed to import decryption key", err);
+    showError("Decryption key error: " + err.message);
+    return;
+  }
+
   const proceed = await checkRamWarning(currentFile.size);
   if (!proceed) {
     return;
@@ -3428,58 +3437,6 @@ async function startWebRTC() {
             reject(err);
           }
         }
-
-        const chunk = new Uint8Array(e.data);
-        msgChain = msgChain.then(async () => {
-          if (isTerminated) return;
-
-          if (decryptionKey) {
-            let newBuffer = new Uint8Array(encBuffer.length + chunk.length);
-            newBuffer.set(encBuffer, 0);
-            newBuffer.set(chunk, encBuffer.length);
-            encBuffer = newBuffer;
-
-            while (encBuffer.length >= 4) {
-              const dv = new DataView(encBuffer.buffer, encBuffer.byteOffset, encBuffer.byteLength);
-              const frameLen = dv.getUint32(0, false);
-              if (encBuffer.length >= 4 + frameLen) {
-                const frame = encBuffer.slice(4, 4 + frameLen);
-                encBuffer = encBuffer.slice(4 + frameLen);
-
-                if (frameLen < 12) {
-                  throw new Error("Invalid frame length: header smaller than nonce size");
-                }
-
-                const nonce = new Uint8Array(frame.subarray(0, 12));
-                const ciphertext = new Uint8Array(frame.subarray(12));
-
-                let decrypted;
-                try {
-                  decrypted = await crypto.subtle.decrypt(
-                    { name: "AES-GCM", iv: nonce },
-                    decryptionKey,
-                    ciphertext
-                  );
-                } catch (decryptErr) {
-                  throw new Error("Decryption failed: corrupted frame or invalid key");
-                }
-
-                const decValue = new Uint8Array(decrypted);
-                chunkQueue.enqueue(decValue);
-              } else {
-                break;
-              }
-            }
-          } else {
-            chunkQueue.enqueue(chunk);
-          }
-        }).catch((err) => {
-          if (isTerminated) return;
-          isTerminated = true;
-          showError(`Transfer failed: ${err.message}`);
-          try { dc.close(); } catch (closeErr) {}
-          reject(err);
-        });
       };
 
       dc.onerror = (e) => reject(new Error('data channel error: ' + e));
