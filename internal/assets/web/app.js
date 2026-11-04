@@ -2459,7 +2459,9 @@ function init() {
   document.getElementById('file-upload-input')?.addEventListener('change', handleUploadFile);
   document.getElementById('btn-retry')?.addEventListener('click', () => {
     resetState();
-    setTimeout(bootstrap, 400);
+    if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+      setTimeout(bootstrap, 400);
+    }
   });
   document.getElementById('btn-again')?.addEventListener('click', () => {
     window.location.href = window.location.pathname; // strip query params to go to receive-home
@@ -2563,7 +2565,9 @@ function init() {
   });
 
   initSpotlight();
-  bootstrap();
+  if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+    bootstrap();
+  }
 }
 
 function resetState() {
@@ -2592,6 +2596,9 @@ function resetState() {
 }
 
 async function bootstrap() {
+  if (typeof window !== 'undefined' && window.__BEAM_TEST_ENV__) {
+    return;
+  }
   const params = new URLSearchParams(window.location.search);
   const isWebRTCMode = params.get('mode') === 'webrtc' || params.get('sdp') || params.get('offer');
   let localURL = params.get('local');
@@ -3737,7 +3744,8 @@ function showError(msg) {
   if (useOPFS) {
     navigator.storage?.getDirectory().then(root => root.removeEntry('beam_temp').catch(()=>{})).catch(()=>{});
   }
-  document.getElementById('error-msg').textContent = msg;
+  const el = document.getElementById('error-msg');
+  if (el) el.textContent = msg;
   setState('error');
 }
 
@@ -3935,6 +3943,7 @@ async function startSenderSharing() {
     startSenderPolling(backend);
 
   } catch (err) {
+    console.error("startSenderSharing error:", err);
     showError(`Sender setup failed: ${err.message}`);
   }
 }
@@ -4273,7 +4282,9 @@ function switchTab(tab) {
   if (tab === 'receive') {
     receiveBtn?.classList.add('active');
     sendBtn?.classList.remove('active');
-    bootstrap();
+    if (typeof window === 'undefined' || !window.__BEAM_TEST_ENV__) {
+      bootstrap();
+    }
   } else {
     sendBtn?.classList.add('active');
     receiveBtn?.classList.remove('active');
