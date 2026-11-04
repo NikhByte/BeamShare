@@ -30,6 +30,7 @@ export default defineConfig({
             '--disable-web-security',
             '--no-sandbox',
             '--disable-dev-shm-usage',
+            '--disable-gpu',
           ],
         },
       },
