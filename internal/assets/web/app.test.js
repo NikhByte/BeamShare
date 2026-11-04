@@ -1084,6 +1084,32 @@ describe('Gaze Web Sender Test Suite', () => {
     assert.equal(servers[0].username, 'alice');
     assert.equal(servers[0].credential, 'secret');
   });
+
+  test('getSessionToken and apiPath automatically extract and include session token', () => {
+    // Set URL with token parameter
+    dom.reconfigure({ url: 'http://localhost:8080/?token=sec_tok_1234567890' });
+    global.window = dom.window;
+    global.location = dom.window.location;
+
+    assert.equal(app.getSessionToken(), 'sec_tok_1234567890');
+    assert.equal(app.apiPath('/api/meta').includes('token=sec_tok_1234567890'), true);
+  });
+
+  test('authFetch attaches X-Beam-Token header', async () => {
+    dom.reconfigure({ url: 'http://localhost:8080/?token=test_token_abc' });
+    global.window = dom.window;
+    global.location = dom.window.location;
+
+    let fetchCalledWith = null;
+    global.fetch = async (url, options) => {
+      fetchCalledWith = { url, options };
+      return { ok: true, json: async () => ({}) };
+    };
+
+    await app.authFetch('http://localhost:8080/api/meta');
+    assert.notEqual(fetchCalledWith, null);
+    assert.equal(fetchCalledWith.options.headers.get('X-Beam-Token'), 'test_token_abc');
+  });
 });
 
 describe('WebRTC Buffer Backpressure Suite', () => {
@@ -1198,4 +1224,172 @@ describe('WebRTC Buffer Backpressure Suite', () => {
   });
 });
 
+describe('WebRTC Backpressure & Flow Control Suite', () => {
+  let dom;
+  let window;
+  let document;
+  let app;
+
+  beforeEach(() => {
+    dom = new JSDOM(htmlContent, {
+      url: 'http://localhost:8080/'
+    });
+
+    window = dom.window;
+    document = window.document;
+
+    const { webcrypto } = require('node:crypto');
+    window.crypto = webcrypto;
+
+    global.window = window;
+    global.document = document;
+    global.crypto = window.crypto;
+    global.navigator = window.navigator;
+    global.location = window.location;
+    global.URLSearchParams = window.URLSearchParams;
+    global.TextDecoder = require('util').TextDecoder;
+    global.FileReader = window.FileReader;
+
+    window.__BEAM_TEST_ENV__ = true;
+
+    delete require.cache[require.resolve('./app.js')];
+    app = require('./app.js');
+  });
+
+  class MockDataChannel {
+    constructor(bufferedAmount = 0, readyState = 'open') {
+      this.bufferedAmount = bufferedAmount;
+      this.bufferedAmountLowThreshold = 0;
+      this.readyState = readyState;
+      this.listeners = new Map();
+    }
+
+    addEventListener(type, listener) {
+      if (!this.listeners.has(type)) {
+        this.listeners.set(type, new Set());
+      }
+      this.listeners.get(type).add(listener);
+    }
+
+    removeEventListener(type, listener) {
+      if (this.listeners.has(type)) {
+        this.listeners.get(type).delete(listener);
+      }
+    }
+
+    emit(type, event) {
+      if (this.listeners.has(type)) {
+        for (const listener of Array.from(this.listeners.get(type))) {
+          listener(event);
+        }
+      }
+    }
+
+    send(data) {}
+  }
+
+  test('waitForDataChannelBuffer resolves immediately if bufferedAmount <= targetAmount', async () => {
+    const dc = new MockDataChannel(500 * 1024, 'open');
+    await app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    assert.equal(dc.bufferedAmountLowThreshold, 512 * 1024);
+  });
+
+  test('waitForDataChannelBuffer resolves when bufferedamountlow event fires', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+    const promise = app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+
+    assert.equal(dc.listeners.get('bufferedamountlow').size, 1);
+    dc.bufferedAmount = 500 * 1024;
+    dc.emit('bufferedamountlow');
+
+    await promise;
+    assert.equal(dc.listeners.get('bufferedamountlow').size, 0, 'Listeners must be cleaned up on resolve');
+  });
+
+  test('waitForDataChannelBuffer post-registration re-check resolves without waiting', async () => {
+    class FastDrainDataChannel extends MockDataChannel {
+      addEventListener(type, listener) {
+        super.addEventListener(type, listener);
+        if (type === 'bufferedamountlow') {
+          // Buffer drained immediately before event loop fired event
+          this.bufferedAmount = 300 * 1024;
+        }
+      }
+    }
+
+    const dc = new FastDrainDataChannel(2 * 1024 * 1024, 'open');
+    await app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+    assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up');
+  });
+
+  test('waitForDataChannelBuffer periodic fallback timer resolves when event is missed', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+    const start = Date.now();
+    const promise = app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+
+    // Drains buffer without firing 'bufferedamountlow'
+    dc.bufferedAmount = 100 * 1024;
+
+    await promise;
+    const elapsed = Date.now() - start;
+    assert.equal(elapsed >= 200, true, 'Resolved via 250ms periodic timer fallback');
+    assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up');
+  });
+
+  test('waitForDataChannelBuffer rejects when channel closes or errors', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'open');
+    const promise = app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024);
+
+    dc.readyState = 'closed';
+    dc.emit('close');
+
+    await assert.rejects(promise, { message: /closed or closing|no longer open/i });
+    assert.equal(dc.listeners.get('bufferedamountlow')?.size || 0, 0, 'Listeners must be cleaned up on rejection');
+  });
+
+  test('waitForDataChannelBuffer rejects immediately if channel is already closed', async () => {
+    const dc = new MockDataChannel(2 * 1024 * 1024, 'closed');
+    await assert.rejects(
+      app.waitForDataChannelBuffer(dc, 1024 * 1024, 512 * 1024),
+      { message: /closed or closing|no longer open/i }
+    );
+  });
+
+  test('uploadFileP2P streams file chunks and sends UPLOAD_EOF using backpressure helper', async () => {
+    const sent = [];
+    const mockDC = new MockDataChannel(0, 'open');
+    mockDC.send = (msg) => sent.push(msg);
+
+    delete require.cache[require.resolve('./app.js')];
+    const testApp = require('./app.js');
+
+    const fileContent = new Uint8Array(150 * 1024).fill(65);
+    const mockFile = new window.File([fileContent], 'test-p2p.bin', { type: 'application/octet-stream' });
+
+    await testApp.uploadFileP2P(mockFile, mockDC);
+
+    assert.equal(sent.length, 5, 'Should send UPLOAD_META, 3 chunks, and UPLOAD_EOF');
+    assert.equal(sent[0], 'UPLOAD_META:test-p2p.bin:153600');
+    assert.equal(sent[4], 'UPLOAD_EOF');
+  });
+
+  test('sendWebRTCFile streams chunks and sends EOF using backpressure helper', async () => {
+    const sent = [];
+    const mockDC = new MockDataChannel(0, 'open');
+    mockDC.send = (msg) => sent.push(msg);
+
+    delete require.cache[require.resolve('./app.js')];
+    const testApp = require('./app.js');
+
+    const fileContent = new Uint8Array(150 * 1024).fill(66);
+    const mockFile = new window.File([fileContent], 'sender-test.bin', { type: 'application/octet-stream' });
+
+    testApp.handleSenderFileSelect(mockFile);
+
+    await testApp.sendWebRTCFile(0, mockDC);
+
+    assert.equal(sent.length, 4, 'Should send 3 chunks and EOF');
+    assert.equal(sent[3], 'EOF');
+  });
+});
 

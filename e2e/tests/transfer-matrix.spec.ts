@@ -135,6 +135,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       // Should enter ready state displaying file metadata and Download button
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
+      await waitForServiceWorkerReady(page);
 
       // Click Download File button with concurrent download event listener
       const [download] = await Promise.all([
@@ -184,6 +185,7 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       // Should connect via relay and reach state-ready
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 20000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
+      await waitForServiceWorkerReady(page);
 
       // Click Download button with concurrent download event listener
       const [download] = await Promise.all([
@@ -218,13 +220,14 @@ test.describe('BeamShare Full Network Matrix File Transfer E2E', () => {
       // Abort WebRTC signaling API requests to simulate WebRTC connection failure
       await page.route('**/api/signal/**', (route) => route.abort());
 
-      const fallbackURL = `${parsed.localURL}/?mode=webrtc`;
+      const fallbackURL = parsed.localURL.includes('?') ? `${parsed.localURL}&mode=webrtc` : `${parsed.localURL}/?mode=webrtc`;
 
       await page.goto(fallbackURL);
 
       // WebRTC attempt will fail due to aborted signaling, and app should seamlessly transition to HTTP ready state
       await expect(page.locator('#state-ready')).toBeVisible({ timeout: 15000 });
       await expect(page.locator('#file-name')).toHaveText(path.basename(testFilePath));
+      await waitForServiceWorkerReady(page);
 
       await page.unroute('**/api/signal/**');
 
