@@ -316,13 +316,12 @@ func (s *Server) SweepExpiredSessions() {
 	s.mu.Lock()
 	now := time.Now()
 	var expired []*Session
-	for id, sess := range s.sessions {
+	for _, sess := range s.sessions {
 		sess.mu.Lock()
 		exp := sess.expiresAt
 		sess.mu.Unlock()
 		if !exp.IsZero() && now.After(exp) {
 			expired = append(expired, sess)
-			delete(s.sessions, id)
 		}
 	}
 	s.mu.Unlock()
@@ -330,6 +329,12 @@ func (s *Server) SweepExpiredSessions() {
 	for _, sess := range expired {
 		sess.Close(fmt.Errorf("session expired"))
 	}
+
+	s.mu.Lock()
+	for _, sess := range expired {
+		delete(s.sessions, sess.ID)
+	}
+	s.mu.Unlock()
 
 	s.failedAttemptsMu.Lock()
 	for ip, fa := range s.failedAttempts {
