@@ -1063,6 +1063,22 @@ func runReceive(code string) {
 }
 
 func decodeBase64Key(kStr string) ([]byte, error) {
+	kStr = strings.TrimSpace(kStr)
+	if strings.HasPrefix(kStr, "k=") {
+		kStr = kStr[2:]
+	}
+	if strings.HasPrefix(kStr, "k%3D") || strings.HasPrefix(kStr, "k%3d") {
+		kStr = kStr[4:]
+	}
+	if unescaped, err := url.QueryUnescape(kStr); err == nil {
+		kStr = unescaped
+	}
+	kStr = strings.TrimPrefix(kStr, "k=")
+	kStr = strings.TrimSpace(kStr)
+	if kStr == "" {
+		return nil, fmt.Errorf("empty key")
+	}
+
 	encodings := []*base64.Encoding{
 		base64.URLEncoding,
 		base64.RawURLEncoding,
@@ -1086,7 +1102,11 @@ func decodeBase64Key(kStr string) ([]byte, error) {
 	return keyBytes, nil
 }
 
-func downloadFile(code string) error {
+func decodeKey(k string) ([]byte, error) {
+	return decodeBase64Key(k)
+}
+
+func downloadFile(code string, keyOverride ...string) error {
 	if !strings.HasPrefix(code, "http://") && !strings.HasPrefix(code, "https://") {
 		code = "http://" + code
 	}
@@ -1103,13 +1123,22 @@ func downloadFile(code string) error {
 
 	s := u.Query().Get("s")
 	k := extractKeyFromURL(u)
+	if k == "" {
+		k = u.Query().Get("k")
+		if strings.HasPrefix(k, "k=") {
+			k = k[2:]
+		}
+	}
+	if k == "" && len(keyOverride) > 0 && keyOverride[0] != "" {
+		k = keyOverride[0]
+	}
 
 	var keyBytes []byte
 	if k != "" {
 		var err error
-		keyBytes, err = decodeBase64Key(k)
+		keyBytes, err = decodeKey(k)
 		if err != nil {
-			return fmt.Errorf("invalid base64 key encoding: %w", err)
+			return err
 		}
 		if len(keyBytes) != 32 {
 			return fmt.Errorf("invalid encryption key length: expected 32 bytes, got %d", len(keyBytes))
